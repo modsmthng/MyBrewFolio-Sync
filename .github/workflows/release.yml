@@ -57,7 +57,11 @@ jobs:
             echo 'MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY is not a complete Tauri updater public key'
             exit 1
           }
-          printf 'TAURI_CONFIG={"plugins":{"updater":{"pubkey":"%s"}}}\n' "$UPDATER_PUBLIC_KEY" >> "$GITHUB_ENV"
+          CONFIG_PUBLIC_KEY="$(node -p "require('./src-tauri/tauri.conf.json').plugins.updater.pubkey")"
+          test "$UPDATER_PUBLIC_KEY" = "$CONFIG_PUBLIC_KEY" || {
+            echo 'The repository updater key does not match src-tauri/tauri.conf.json'
+            exit 1
+          }
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
