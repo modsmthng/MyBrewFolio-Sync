@@ -1,0 +1,61 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MyBrewFolio Sync",
+  "version": "0.1.0",
+  "identifier": "com.mybrewfolio.sync",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "MyBrewFolio Sync",
+        "width": 760,
+        "height": 820,
+        "minWidth": 400,
+        "minHeight": 620,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "targets": ["dmg", "msi", "appimage", "deb"],
+    "category": "Utility",
+    "shortDescription": "Synchronize a GaggiMate library with MyBrewFolio",
+    "longDescription": "Copies shots, profiles, and notes from one local GaggiMate to a private MyBrewFolio library.",
+    "resources": ["../THIRD_PARTY_NOTICES.md"],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "embedBootstrapper" }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": { "schemes": ["mybrewfolio-sync"] }
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": [
+        "https://github.com/modsmthng/MyBrewFolio-Sync/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

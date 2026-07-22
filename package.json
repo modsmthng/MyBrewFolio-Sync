@@ -1,0 +1,29 @@
+{
+  "name": "@mybrewfolio/sync",
+  "private": true,
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "fake-gaggimate": "node tests/fake-gaggimate.mjs",
+    "test:fake-gaggimate": "node tests/verify-fake-gaggimate.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-autostart": "^2.0.0",
+    "@tauri-apps/plugin-deep-link": "^2.0.0",
+    "@tauri-apps/plugin-opener": "^2.0.0",
+    "preact": "^10.27.0"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "vite": "^7.0.0",
+    "ws": "^8.21.1"
+  }
+}

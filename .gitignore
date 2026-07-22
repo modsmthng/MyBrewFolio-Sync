@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+src-tauri/gen/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+

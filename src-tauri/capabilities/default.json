@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-capability",
+  "description": "Capabilities required by the MyBrewFolio Sync desktop window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "autostart:default",
+    "deep-link:default",
+    "opener:default",
+    "updater:default"
+  ]
+}

@@ -1,0 +1,42 @@
+[package]
+name = "mybrewfolio-sync"
+version = "0.1.0"
+description = "GaggiMate to MyBrewFolio synchronization companion"
+authors = ["André Tolksdorf"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/modsmthng/MyBrewFolio-Sync"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "mybrewfolio_sync_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-autostart = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-updater = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["time", "sync", "net"] }
+tokio-tungstenite = "0.26"
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"
