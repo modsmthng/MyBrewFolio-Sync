@@ -4,11 +4,6 @@ MyBrewFolio Sync is the open-source desktop companion for copying shots, profile
 one local GaggiMate to a private MyBrewFolio library. It is intentionally one-way: the companion
 never selects, edits, or deletes anything on the machine.
 
-The companion source is licensed under
-[GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html). The hosted MyBrewFolio platform,
-server implementation, and website are separate proprietary software and are not part of this
-repository or licence.
-
 ## User flow
 
 1. Install MyBrewFolio Sync.
