@@ -53,6 +53,11 @@ jobs:
           test -n "$UPDATER_PUBLIC_KEY" || { echo 'Missing MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY repository variable'; exit 1; }
           test -n "$UPDATER_PRIVATE_KEY" || { echo 'Missing TAURI_SIGNING_PRIVATE_KEY repository secret'; exit 1; }
           test -n "$UPDATER_PRIVATE_KEY_PASSWORD" || { echo 'Missing TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secret'; exit 1; }
+          printf '%s' "$UPDATER_PUBLIC_KEY" | base64 --decode | grep -q '^untrusted comment: minisign public key:' || {
+            echo 'MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY is not a complete Tauri updater public key'
+            exit 1
+          }
+          printf 'TAURI_CONFIG={"plugins":{"updater":{"pubkey":"%s"}}}\n' "$UPDATER_PUBLIC_KEY" >> "$GITHUB_ENV"
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
