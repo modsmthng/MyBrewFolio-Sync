@@ -1,7 +1,5 @@
 # Contributing
 
-Thank you for helping improve MyBrewFolio Sync.
-
 ## Before opening a pull request
 
 1. Open an issue for substantial behavioral or protocol changes.
