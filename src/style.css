@@ -36,7 +36,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .message, .privacy { line-height: 1.5; color: #64788f; font-size: 13px; }
 .privacy { margin-top: 26px; text-align: center; }
 .dashboard-header h1 { margin: 0; font-size: 28px; }
-.status { border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 900; }
+.status { display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 900; }
 .status-ok { color: #1f684d; background: #dcebe4; }
 .status-error { color: #9d3038; background: #f4dfe0; }
 .status-working { color: #275e80; background: #dce9f0; }
@@ -46,6 +46,11 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .overview div { display: grid; gap: 5px; }
 .overview small { color: #718399; }
 .compact-button { width: auto; margin: 0; }
+.action-label { display: inline-flex; min-width: 0; align-items: center; justify-content: center; gap: 8px; white-space: nowrap; }
+.sync-spinner { display: inline-block; width: 16px; height: 16px; flex: 0 0 16px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: sync-spin .75s linear infinite; }
+.sync-activity { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding: 12px 16px; border: 1px solid rgba(50,107,142,.32); border-radius: 18px; color: #275e80; background: rgba(220,233,240,.7); font-size: 13px; }
+.sync-activity .sync-spinner { width: 18px; height: 18px; flex-basis: 18px; }
+@keyframes sync-spin { to { transform: rotate(360deg); } }
 .counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 14px 0; }
 .counts article { padding: 20px; display: grid; gap: 5px; }
 .counts strong { font-size: 28px; }
@@ -85,6 +90,10 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .resync-preview { background: #202d39; }
   .issue-details li { background: rgba(211,91,97,.12); }
   .issue-details li span { color: #9fb0c2; }
+  .sync-activity { color: #b9d8eb; border-color: rgba(115,171,204,.38); background: rgba(39,94,128,.22); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sync-spinner { animation: none; border-right-color: currentColor; opacity: .72; }
 }
 @media (max-width: 560px) {
   .shell { padding: 24px 18px; }

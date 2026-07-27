@@ -32,10 +32,23 @@ function formatDate(value) {
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Not synced yet';
 }
 
+function SyncSpinner() {
+  return <span className="sync-spinner" aria-hidden="true" />;
+}
+
+function ActionLabel({ active, activeText, children }) {
+  return (
+    <span className="action-label">
+      {active ? <SyncSpinner /> : null}
+      {active ? activeText : children}
+    </span>
+  );
+}
+
 function StatusPill({ status }) {
   const kind = status.syncing ? 'working' : status.lastError ? 'error' : status.connected ? 'ok' : 'idle';
   const text = status.syncing ? 'Syncing' : status.lastError ? 'Needs attention' : status.connected ? 'Connected' : 'Not connected';
-  return <span className={`status status-${kind}`}>{text}</span>;
+  return <span className={`status status-${kind}`}>{status.syncing ? <SyncSpinner /> : null}{text}</span>;
 }
 
 function Setup({ status, refresh, externalMessage }) {
@@ -96,6 +109,7 @@ function Dashboard({ status, refresh }) {
   const [resync, setResync] = useState(null);
   const [restoreIds, setRestoreIds] = useState([]);
   const [duplicateDecisions, setDuplicateDecisions] = useState([]);
+  const [syncActivity, setSyncActivity] = useState('');
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
@@ -107,6 +121,7 @@ function Dashboard({ status, refresh }) {
 
   const syncNow = async () => {
     setBusy(true);
+    setSyncActivity('sync');
     setMessage('');
     try {
       await invoke('sync_now');
@@ -115,6 +130,7 @@ function Dashboard({ status, refresh }) {
       setMessage(String(error));
     } finally {
       setBusy(false);
+      setSyncActivity('');
       refresh();
     }
   };
@@ -177,6 +193,7 @@ function Dashboard({ status, refresh }) {
 
   const configure = async () => {
     setBusy(true);
+    setSyncActivity(status.initialSyncConfigured ? '' : 'first-sync');
     setMessage('');
     try {
       await invoke('configure_sync', { reuseMatching });
@@ -188,12 +205,14 @@ function Dashboard({ status, refresh }) {
       setMessage(String(error));
     } finally {
       setBusy(false);
+      setSyncActivity('');
       refresh();
     }
   };
 
   const retryFailures = async () => {
     setBusy(true);
+    setSyncActivity('retry');
     try {
       await invoke('retry_failed_items');
       setMessage('Failed items were checked again.');
@@ -201,12 +220,14 @@ function Dashboard({ status, refresh }) {
       setMessage(String(error));
     } finally {
       setBusy(false);
+      setSyncActivity('');
       refresh();
     }
   };
 
   const previewResync = async () => {
     setBusy(true);
+    setSyncActivity('resync-preview');
     setMessage('Reading the complete GaggiMate library…');
     try {
       const preview = await invoke('preview_complete_resync');
@@ -224,6 +245,7 @@ function Dashboard({ status, refresh }) {
       setMessage(String(error));
     } finally {
       setBusy(false);
+      setSyncActivity('');
     }
   };
 
@@ -235,6 +257,7 @@ function Dashboard({ status, refresh }) {
     }
     if (!confirm('Apply this complete resync? Selected deleted items will be restored and selected duplicate Sync copies will be removed.')) return;
     setBusy(true);
+    setSyncActivity('resync-apply');
     try {
       const decisions = {
         restoreItemIds: restoreIds,
@@ -251,8 +274,18 @@ function Dashboard({ status, refresh }) {
       setMessage(String(error));
     } finally {
       setBusy(false);
+      setSyncActivity('');
       refresh();
     }
+  };
+
+  const activeSyncActivity = syncActivity || (status.syncing ? 'sync' : '');
+  const syncActivityLabels = {
+    sync: 'Synchronizing with GaggiMate…',
+    'first-sync': 'Running the first synchronization…',
+    retry: 'Retrying failed Sync items…',
+    'resync-preview': 'Reading the complete GaggiMate library…',
+    'resync-apply': 'Applying the complete resync…',
   };
 
   return (
@@ -263,8 +296,16 @@ function Dashboard({ status, refresh }) {
       </header>
       <section className="overview card">
         <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
-        <button className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>{busy || status.syncing ? 'Syncing…' : 'Sync now'}</button>
+        <button className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
+          <ActionLabel active={activeSyncActivity === 'sync'} activeText="Syncing…">Sync now</ActionLabel>
+        </button>
       </section>
+      {activeSyncActivity ? (
+        <section className="sync-activity" role="status" aria-live="polite">
+          <SyncSpinner />
+          <strong>{syncActivityLabels[activeSyncActivity]}</strong>
+        </section>
+      ) : null}
       {status.lastError ? <section className="alert"><strong>Sync needs attention</strong><p>{status.lastError}</p></section> : null}
       <section className="counts">
         <article className="card"><strong>{status.shots}</strong><span>Shots</span></article>
@@ -283,11 +324,16 @@ function Dashboard({ status, refresh }) {
             <span>Reuse matching shots already in MyBrewFolio</span>
           </label>
           <p className="muted">Matches use the GaggiMate shot ID and recording time. Existing MyBrewFolio changes are not silently overwritten.</p>
-          <button className="primary compact-button" disabled={busy} onClick={configure}>Save and start first sync</button>
+          <button className="primary compact-button" disabled={busy} onClick={configure}>
+            <ActionLabel active={syncActivity === 'first-sync'} activeText="Starting first sync…">Save and start first sync</ActionLabel>
+          </button>
         </section>
       ) : null}
       {(status.conflicts || status.suppressed) ? (
-        <section className="card attention"><strong>{status.conflicts} conflicts · {status.suppressed} suppressed</strong><p>Open Account → MyBrewFolio Sync on the website to review these items.</p></section>
+        <section className="card attention">
+          <strong>{status.conflicts} conflicts · {status.suppressed} suppressed</strong>
+          <p>Go to MyBrewFolio.com, then open Account → MyBrewFolio Sync to review these items or allow all suppressed imports at once.</p>
+        </section>
       ) : null}
       {status.issues?.length ? (
         <details className="card issue-details" open>
@@ -301,7 +347,9 @@ function Dashboard({ status, refresh }) {
               </span>
             </li>
           ))}</ul>
-          <button className="secondary inline-action" disabled={busy} onClick={retryFailures}>Retry failed items</button>
+          <button className="secondary inline-action" disabled={busy} onClick={retryFailures}>
+            <ActionLabel active={syncActivity === 'retry'} activeText="Retrying…">Retry failed items</ActionLabel>
+          </button>
         </details>
       ) : null}
       <h2 className="section-title">Settings</h2>
@@ -319,7 +367,9 @@ function Dashboard({ status, refresh }) {
           <button className="secondary inline-action" disabled={busy} onClick={configure}>Save matching preference</button>
         ) : null}
         <p className="muted">Sync is one-way. Nothing is selected, overwritten, or deleted on your GaggiMate.</p>
-        <button className="secondary inline-action" disabled={busy} onClick={previewResync}>Complete resync</button>
+        <button className="secondary inline-action" disabled={busy} onClick={previewResync}>
+          <ActionLabel active={syncActivity === 'resync-preview'} activeText="Reading library…">Complete resync</ActionLabel>
+        </button>
       </section>
       <section className="card settings">
         <h3>App settings</h3>
@@ -373,7 +423,9 @@ function Dashboard({ status, refresh }) {
           </fieldset> : null}
           <div className="dialog-actions">
             <button className="secondary inline-action" disabled={busy} onClick={() => setResync(null)}>Cancel</button>
-            <button className="primary compact-button" disabled={busy} onClick={applyResync}>Apply complete resync</button>
+            <button className="primary compact-button" disabled={busy} onClick={applyResync}>
+              <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">Apply complete resync</ActionLabel>
+            </button>
           </div>
         </section>
       ) : null}

@@ -12,11 +12,15 @@ never selects, edits, or deletes anything on the machine.
 
 The application then starts with the computer, checks for new shots every 30 seconds, compares
 profiles every five minutes, and catches up after either the computer, machine, or internet was
-offline.
+offline. Visible Sync actions and background synchronization show a stable activity indicator so
+the user can see when work is still in progress.
 
 Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
 be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
 machine content and safe duplicate merges, then apply only the user's confirmed choices.
+When suppressed items need attention, the app directs users first to MyBrewFolio.com. Under
+**Account → MyBrewFolio Sync**, every suppressed import can be allowed again with one confirmed
+bulk action.
 
 ## Code quality
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=modsmthng_MyBrewFolio-Sync&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=modsmthng_MyBrewFolio-Sync)
