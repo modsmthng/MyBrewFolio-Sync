@@ -93,6 +93,8 @@ npm exec tauri icon -- assets/textlogosync-1024.png --output src-tauri/icons
 - Only explicitly synchronized library content is sent to the MyBrewFolio Sync API.
 - The companion permits only loopback and private-network machine targets.
 - Release update metadata is signed. The private signing key is never stored in this repository.
+- Windows GitHub MSI releases use the signed MyBrewFolio updater. Microsoft Store MSIX releases use
+  Microsoft Store updates instead.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

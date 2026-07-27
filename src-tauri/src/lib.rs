@@ -167,52 +167,50 @@ async fn disconnect_account(
 
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = app;
+    if store_managed_updates() {
         return Ok("store-managed".into());
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
-            .unwrap_or("")
-            .trim();
-        if public_key.is_empty() {
-            return Ok("not-configured".into());
-        }
-        let updater = app.updater().map_err(|error| error.to_string())?;
-        let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-            return Ok("up-to-date".into());
-        };
-        Ok(format!("available:{}", update.version))
+    let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
+        .unwrap_or("")
+        .trim();
+    if public_key.is_empty() {
+        return Ok("not-configured".into());
     }
+    let updater = app.updater().map_err(|error| error.to_string())?;
+    let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+        return Ok("up-to-date".into());
+    };
+    Ok(format!("available:{}", update.version))
 }
 
 #[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
-    #[cfg(target_os = "windows")]
-    {
-        let _ = app;
+    if store_managed_updates() {
         return Ok("store-managed".into());
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
-            .unwrap_or("")
-            .trim();
-        if public_key.is_empty() {
-            return Ok("not-configured".into());
-        }
-        let updater = app.updater().map_err(|error| error.to_string())?;
-        let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-            return Ok("up-to-date".into());
-        };
-        update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok("installed".into())
+    let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
+        .unwrap_or("")
+        .trim();
+    if public_key.is_empty() {
+        return Ok("not-configured".into());
     }
+    let updater = app.updater().map_err(|error| error.to_string())?;
+    let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+        return Ok("up-to-date".into());
+    };
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok("installed".into())
+}
+
+fn store_managed_updates() -> bool {
+    cfg!(target_os = "windows")
+        && matches!(
+            option_env!("MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD"),
+            Some("true")
+        )
 }
 
 fn show_main_window(app: &tauri::AppHandle) {

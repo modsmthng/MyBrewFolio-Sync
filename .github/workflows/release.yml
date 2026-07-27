@@ -110,10 +110,17 @@ jobs:
       - name: Build unsigned Microsoft Store submission package
         if: matrix.os == 'windows-latest' && vars.MYBREWFOLIO_MSIX_IDENTITY_NAME != '' && vars.MYBREWFOLIO_MSIX_PUBLISHER != ''
         shell: pwsh
+        env:
+          MYBREWFOLIO_SYNC_API_URL: https://mybrewfolio.com
+          MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+          MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY: ${{ vars.MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY }}
+          MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD: 'true'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $parts = '${{ github.ref_name }}'.Replace('v', '').Split('.')
           if ($parts.Count -ne 3) { throw 'The release tag must use vMAJOR.MINOR.PATCH' }
           $packageVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+          cargo build --manifest-path src-tauri/Cargo.toml --release
           ./scripts/package-msix.ps1 `
             -IdentityName '${{ vars.MYBREWFOLIO_MSIX_IDENTITY_NAME }}' `
             -Publisher '${{ vars.MYBREWFOLIO_MSIX_PUBLISHER }}' `
@@ -121,5 +128,3 @@ jobs:
             -Executable './src-tauri/target/release/mybrewfolio-sync.exe' `
             -Output './MyBrewFolio-Sync-Store.msix'
           gh release upload '${{ github.ref_name }}' './MyBrewFolio-Sync-Store.msix' --clobber
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
