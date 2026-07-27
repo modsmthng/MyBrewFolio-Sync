@@ -193,8 +193,16 @@ impl GaggiMateClient {
 
     pub async fn notes(&self, id: u32) -> Result<Option<Value>, LocalError> {
         let response = self
-            .websocket_request("req:history:notes:get", json!({ "id": id.to_string() }))
+            .websocket_request_allowing_error(
+                "req:history:notes:get",
+                json!({ "id": id.to_string() }),
+            )
             .await?;
+        // Real GaggiMate versions may report a missing notes record as a
+        // protocol-level error instead of returning an empty object.
+        if response.get("error").is_some() {
+            return Ok(None);
+        }
         let notes = response
             .get("notes")
             .cloned()
@@ -217,6 +225,24 @@ impl GaggiMateClient {
         &self,
         request_type: &str,
         body: Value,
+    ) -> Result<Value, LocalError> {
+        self.websocket_request_inner(request_type, body, false)
+            .await
+    }
+
+    async fn websocket_request_allowing_error(
+        &self,
+        request_type: &str,
+        body: Value,
+    ) -> Result<Value, LocalError> {
+        self.websocket_request_inner(request_type, body, true).await
+    }
+
+    async fn websocket_request_inner(
+        &self,
+        request_type: &str,
+        body: Value,
+        allow_error: bool,
     ) -> Result<Value, LocalError> {
         let url = Url::parse(&self.ws_url()).map_err(|_| LocalError::InvalidHost)?;
         let stream = tokio::time::timeout(
@@ -249,10 +275,11 @@ impl GaggiMateClient {
                 }
                 let value: Value =
                     serde_json::from_str(&text).map_err(|_| LocalError::InvalidData)?;
+                let response_type = value.get("tp").and_then(Value::as_str);
                 if value.get("rid").and_then(Value::as_str) == Some(&rid)
-                    && value.get("tp").and_then(Value::as_str) == Some(&expected)
+                    && (response_type == Some(&expected) || response_type == Some("res:error"))
                 {
-                    if value.get("error").is_some() {
+                    if value.get("error").is_some() && !allow_error {
                         return Err(LocalError::InvalidData);
                     }
                     return Ok(value);

@@ -18,6 +18,8 @@ the user can see when work is still in progress.
 Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
 be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
 machine content and safe duplicate merges, then apply only the user's confirmed choices.
+After applying a resync, Sync refreshes the authoritative cloud state before rebuilding its local
+scan so restored items are imported without disconnecting the account.
 When suppressed items need attention, the app directs users first to MyBrewFolio.com. Under
 **Account → MyBrewFolio Sync**, every suppressed import can be allowed again with one confirmed
 bulk action.

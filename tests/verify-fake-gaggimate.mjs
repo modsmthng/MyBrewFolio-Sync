@@ -29,7 +29,7 @@ try {
       const value = JSON.parse(String(event.data));
       if (value.rid === `notes-${id}`) {
         socket.close();
-        resolve(value.notes);
+        resolve(value.error ? null : value.notes);
       }
     });
     socket.addEventListener('error', reject);
@@ -37,7 +37,7 @@ try {
   const notes = await readNotes('1');
   if (notes.rating !== 4) throw new Error('Notes fixture is invalid');
   const emptyNotes = await readNotes('999');
-  if (Object.keys(emptyNotes).length !== 0) throw new Error('Empty notes fixture is invalid');
+  if (emptyNotes !== null) throw new Error('Missing notes fixture is invalid');
 
   const profile = await new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);

@@ -262,6 +262,11 @@ impl SyncEngine {
             .ok_or(CloudError::Revoked)?;
         let result = self.cloud.resync_apply(&device_id, decisions).await?;
         self.store.reset_scan_state()?;
+        // Do not let the next full scan reuse suppressions cached before the
+        // resync was applied. Refresh the authoritative state immediately.
+        let state = self.cloud.state(&device_id).await?;
+        self.store.set_setting("cloud_state", &state.to_string())?;
+        self.update_from_cloud_state(&state).await;
         Ok(result)
     }
 

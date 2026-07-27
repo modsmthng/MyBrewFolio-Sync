@@ -27,7 +27,7 @@ state, source hashes, and validated content waiting for an upload retry.
 - Notes for recent shots are refreshed every five minutes.
 - A throttled full notes pass runs once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty
-  responses mean that no notes exist.
+  objects and the machine's protocol-level “not found” response both mean that no notes exist.
 - Validated data remains in the local queue while the internet or MyBrewFolio is unavailable.
 
 Synchronization is one-way. Deleting a synchronized object in MyBrewFolio suppresses its automatic
@@ -37,7 +37,8 @@ Before the first import, the source stores whether exact GaggiMate-ID/recording-
 existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.
 Only a confirmed apply can clear suppressions for still-present machine objects or merge an
 unambiguous later Sync copy into the older MyBrewFolio shot. Differing notes require an explicit
-choice; ambiguous matches remain untouched.
+choice; ambiguous matches remain untouched. After apply, the client discards the old scan state
+and refreshes the authoritative server state before uploading the restored inventory.
 
 ## Public server contract
 

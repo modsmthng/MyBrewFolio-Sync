@@ -113,10 +113,18 @@ websocket.on('connection', socket => {
       return;
     }
     if (request.tp === 'req:history:notes:get') {
+      if (request.id !== '1') {
+        socket.send(JSON.stringify({
+          tp: 'res:error',
+          rid: request.rid,
+          error: 'No notes found'
+        }));
+        return;
+      }
       socket.send(JSON.stringify({
         tp: 'res:history:notes:get',
         rid: request.rid,
-        notes: request.id === '1' ? fixture.notes : {}
+        notes: fixture.notes
       }));
       return;
     }
