@@ -80,6 +80,33 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: ${{ matrix.args }}
+      - name: Upload stable user-facing download aliases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          case "${{ matrix.os }}" in
+            macos-latest)
+              cp "src-tauri/target/universal-apple-darwin/release/bundle/dmg/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_universal.dmg" \
+                "MyBrewFolio-Sync-macOS-universal.dmg"
+              gh release upload "$GITHUB_REF_NAME" "MyBrewFolio-Sync-macOS-universal.dmg" --clobber
+              ;;
+            windows-latest)
+              cp "src-tauri/target/release/bundle/msi/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_x64_en-US.msi" \
+                "MyBrewFolio-Sync-Windows-x64.msi"
+              gh release upload "$GITHUB_REF_NAME" "MyBrewFolio-Sync-Windows-x64.msi" --clobber
+              ;;
+            ubuntu-22.04)
+              cp "src-tauri/target/release/bundle/appimage/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_amd64.AppImage" \
+                "MyBrewFolio-Sync-Linux-x86_64.AppImage"
+              cp "src-tauri/target/release/bundle/deb/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_amd64.deb" \
+                "MyBrewFolio-Sync-Linux-amd64.deb"
+              gh release upload "$GITHUB_REF_NAME" \
+                "MyBrewFolio-Sync-Linux-x86_64.AppImage" \
+                "MyBrewFolio-Sync-Linux-amd64.deb" \
+                --clobber
+              ;;
+          esac
       - name: Build unsigned Microsoft Store submission package
         if: matrix.os == 'windows-latest' && vars.MYBREWFOLIO_MSIX_IDENTITY_NAME != '' && vars.MYBREWFOLIO_MSIX_PUBLISHER != ''
         shell: pwsh

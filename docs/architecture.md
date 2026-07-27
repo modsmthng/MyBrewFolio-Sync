@@ -64,7 +64,10 @@ part of this repository.
 
 Pull requests and ordinary pushes run frontend fixtures and native Rust checks. A tag matching
 `vMAJOR.MINOR.PATCH` builds draft installers for Windows, macOS, and Linux. Release update artifacts
-are signed with a protected key available only to the owner-controlled release job.
+are signed with a protected key available only to the owner-controlled release job. Each platform
+job also uploads a stable user-facing alias for the current DMG, MSI, AppImage, or DEB package.
+The MyBrewFolio Support page links these aliases through GitHub's `releases/latest/download` route,
+while updater-only `.sig` files remain outside the normal installation flow.
 
 Required GitHub repository configuration:
 
