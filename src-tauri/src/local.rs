@@ -203,10 +203,12 @@ impl GaggiMateClient {
         if response.get("error").is_some() {
             return Ok(None);
         }
-        let notes = response
-            .get("notes")
-            .cloned()
-            .ok_or(LocalError::InvalidData)?;
+        let Some(notes) = response.get("notes").cloned() else {
+            return Ok(None);
+        };
+        if notes.is_null() {
+            return Ok(None);
+        }
         let object = notes.as_object().ok_or(LocalError::InvalidData)?;
         if object.is_empty() {
             return Ok(None);

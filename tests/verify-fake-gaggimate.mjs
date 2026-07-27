@@ -36,6 +36,8 @@ try {
   });
   const notes = await readNotes('1');
   if (notes.rating !== 4) throw new Error('Notes fixture is invalid');
+  const nullNotes = await readNotes('2');
+  if (nullNotes !== null) throw new Error('Null notes fixture is invalid');
   const emptyNotes = await readNotes('999');
   if (emptyNotes !== null) throw new Error('Missing notes fixture is invalid');
 
