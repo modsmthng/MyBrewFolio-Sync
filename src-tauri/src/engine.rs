@@ -170,6 +170,7 @@ impl SyncEngine {
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".to_string());
         let connected = store.tokens()?.is_some() && store.setting("device_id")?.is_some();
+        let issues = store.failures().unwrap_or_default();
         Ok(Self {
             store,
             cloud,
@@ -186,6 +187,9 @@ impl SyncEngine {
                 notes: 0,
                 conflicts: 0,
                 suppressed: 0,
+                initial_sync_configured: false,
+                duplicate_policy: "reuse_matching".into(),
+                issues,
             }),
             sync_lock: Mutex::new(()),
         })
@@ -200,6 +204,65 @@ impl SyncEngine {
         self.store.set_setting("machine_host", &host)?;
         self.status.write().await.machine_host = host;
         Ok(())
+    }
+
+    pub async fn configure_sync(&self, reuse_matching: bool) -> Result<(), EngineError> {
+        let device_id = self
+            .store
+            .setting("device_id")?
+            .ok_or(CloudError::Revoked)?;
+        let policy = if reuse_matching {
+            "reuse_matching"
+        } else {
+            "import_all"
+        };
+        self.cloud.save_settings(&device_id, policy).await?;
+        let state = self.cloud.state(&device_id).await?;
+        self.store.set_setting("cloud_state", &state.to_string())?;
+        self.update_from_cloud_state(&state).await;
+        Ok(())
+    }
+
+    pub async fn retry_failures(&self) -> Result<(), EngineError> {
+        self.store.retry_failures()?;
+        Ok(())
+    }
+
+    pub async fn resync_preview(&self) -> Result<Value, EngineError> {
+        let device_id = self
+            .store
+            .setting("device_id")?
+            .ok_or(CloudError::Revoked)?;
+        let host = self
+            .store
+            .setting("machine_host")?
+            .unwrap_or_else(|| "gaggimate.local".into());
+        let local = GaggiMateClient::new(&host)?;
+        let mut inventory = Vec::new();
+        for (id, _) in local.profiles().await? {
+            inventory.push(serde_json::json!({ "kind": "profile", "sourceKey": id }));
+        }
+        for entry in local.shot_index().await? {
+            let source_key = format!("{}:{}", entry.id, entry.timestamp);
+            inventory.push(serde_json::json!({ "kind": "shot", "sourceKey": source_key }));
+            if local.notes(entry.id).await?.is_some() {
+                inventory.push(serde_json::json!({ "kind": "notes", "sourceKey": source_key }));
+            }
+        }
+        self.cloud
+            .resync_preview(&device_id, Value::Array(inventory))
+            .await
+            .map_err(Into::into)
+    }
+
+    pub async fn apply_resync(&self, decisions: Value) -> Result<Value, EngineError> {
+        let device_id = self
+            .store
+            .setting("device_id")?
+            .ok_or(CloudError::Revoked)?;
+        let result = self.cloud.resync_apply(&device_id, decisions).await?;
+        self.store.reset_scan_state()?;
+        Ok(result)
     }
 
     pub async fn begin_oauth(&self) -> Result<url::Url, EngineError> {
@@ -251,11 +314,18 @@ impl SyncEngine {
         let mut conflicts = 0;
         let mut suppressed = 0;
         for item in items {
-            match item.get("kind").and_then(Value::as_str) {
-                Some("profile") => profiles += 1,
-                Some("shot") => shots += 1,
-                Some("notes") => notes += 1,
-                _ => {}
+            let is_suppressed = item
+                .get("suppressed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let is_present = item.get("present").and_then(Value::as_bool).unwrap_or(true);
+            if !is_suppressed && is_present {
+                match item.get("kind").and_then(Value::as_str) {
+                    Some("profile") => profiles += 1,
+                    Some("shot") => shots += 1,
+                    Some("notes") => notes += 1,
+                    _ => {}
+                }
             }
             if item
                 .get("conflict")
@@ -264,11 +334,7 @@ impl SyncEngine {
             {
                 conflicts += 1;
             }
-            if item
-                .get("suppressed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+            if is_suppressed {
                 suppressed += 1;
             }
         }
@@ -279,6 +345,17 @@ impl SyncEngine {
         status.notes = notes;
         status.conflicts = conflicts;
         status.suppressed = suppressed;
+        status.initial_sync_configured = source
+            .get("initial_sync_configured_at")
+            .or_else(|| source.get("initialSyncConfiguredAt"))
+            .is_some_and(|value| !value.is_null());
+        status.duplicate_policy = source
+            .get("duplicate_policy")
+            .or_else(|| source.get("duplicatePolicy"))
+            .and_then(Value::as_str)
+            .unwrap_or("reuse_matching")
+            .to_string();
+        status.issues = self.store.failures().unwrap_or_default();
         status.last_sync_at = source
             .get("last_sync_at")
             .or_else(|| source.get("lastSyncAt"))
@@ -327,10 +404,18 @@ impl SyncEngine {
                 let data = match loaded {
                     Ok(data) => data,
                     Err(_) => {
+                        self.store.record_failure(
+                            None,
+                            "profile",
+                            &id,
+                            "read",
+                            "Profile could not be read from the GaggiMate",
+                        )?;
                         skipped.push(format!("Profile {id} could not be read"));
                         continue;
                     }
                 };
+                self.store.clear_failure("profile", &id)?;
                 self.store.queue(&SyncObject {
                     kind: "profile".into(),
                     source_key: id,
@@ -343,6 +428,11 @@ impl SyncEngine {
                 .set_setting("last_profile_scan", &now.to_rfc3339())?;
         }
 
+        if self.store.setting("notes_reader_version")?.as_deref() != Some("2") {
+            self.store.set_setting("last_full_notes_scan", "")?;
+            self.store.set_setting("last_recent_notes_scan", "")?;
+            self.store.set_setting("notes_reader_version", "2")?;
+        }
         let full_notes = parse_time(self.store.setting("last_full_notes_scan")?)
             .map_or(true, |last| now - last >= Duration::days(1));
         let recent_notes = parse_time(self.store.setting("last_recent_notes_scan")?)
@@ -370,10 +460,18 @@ impl SyncEngine {
                 let mut shot = match local.shot(entry.id).await {
                     Ok(shot) => shot,
                     Err(_) => {
+                        self.store.record_failure(
+                            None,
+                            "shot",
+                            &source_key,
+                            "read",
+                            "Shot could not be read from the GaggiMate",
+                        )?;
                         skipped.push(format!("Shot {} could not be read", entry.id));
                         continue;
                     }
                 };
+                self.store.clear_failure("shot", &source_key)?;
                 if let Some(object) = shot.as_object_mut() {
                     object.insert(
                         "name".into(),
@@ -397,6 +495,7 @@ impl SyncEngine {
             {
                 match local.notes(entry.id).await {
                     Ok(Some(notes)) => {
+                        self.store.clear_failure("notes", &source_key)?;
                         self.store.queue(&SyncObject {
                             kind: "notes".into(),
                             source_key: source_key.clone(),
@@ -405,8 +504,13 @@ impl SyncEngine {
                             data: notes,
                         })?;
                     }
-                    Ok(None) => {}
+                    Ok(None) => {
+                        self.store.clear_failure("notes", &source_key)?;
+                    }
                     Err(_) => {
+                        let reason = "Notes could not be read from the GaggiMate";
+                        self.store
+                            .record_failure(None, "notes", &source_key, "read", reason)?;
                         skipped.push(format!("Notes for shot {} could not be read", entry.id))
                     }
                 }
@@ -451,9 +555,30 @@ impl SyncEngine {
                     invalid += 1;
                 }
                 if let Some(object) = pending.get(index) {
+                    if status == "invalid" {
+                        let reason = result
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .unwrap_or("MyBrewFolio rejected this item");
+                        self.store.record_failure(
+                            Some(object),
+                            &object.kind,
+                            &object.source_key,
+                            "upload",
+                            reason,
+                        )?;
+                    } else {
+                        self.store.clear_failure(&object.kind, &object.source_key)?;
+                    }
                     if matches!(
                         status,
-                        "created" | "updated" | "unchanged" | "suppressed" | "conflict" | "invalid"
+                        "created"
+                            | "updated"
+                            | "linked"
+                            | "unchanged"
+                            | "suppressed"
+                            | "conflict"
+                            | "invalid"
                     ) {
                         self.store
                             .remove_pending(&object.kind, &object.source_key)?;
@@ -499,6 +624,17 @@ impl SyncEngine {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let configured = state
+                .get("source")
+                .and_then(|source| {
+                    source
+                        .get("initial_sync_configured_at")
+                        .or_else(|| source.get("initialSyncConfiguredAt"))
+                })
+                .is_some_and(|value| !value.is_null());
+            if !configured {
+                return Ok(());
+            }
             let local = GaggiMateClient::new(&host)?;
             let skipped = self.queue_local_changes(&local, &state).await?;
             if cloud_unreachable {
@@ -522,10 +658,11 @@ impl SyncEngine {
             status.last_sync_at = Some(synchronized_at);
             status.last_error = warning_code.map(|_| {
                 format!(
-                    "{} local files could not be synchronized. Open Sync for details.",
+                    "{} local files could not be synchronized. Review the details below.",
                     skipped.len() + invalid
                 )
             });
+            status.issues = self.store.failures().unwrap_or_default();
             Ok::<(), EngineError>(())
         }
         .await;
@@ -552,6 +689,9 @@ impl SyncEngine {
                     notes: 0,
                     conflicts: 0,
                     suppressed: 0,
+                    initial_sync_configured: false,
+                    duplicate_policy: "reuse_matching".into(),
+                    issues: Vec::new(),
                 };
                 drop(guard);
                 return result;
@@ -603,6 +743,9 @@ impl SyncEngine {
             notes: 0,
             conflicts: 0,
             suppressed: 0,
+            initial_sync_configured: false,
+            duplicate_policy: "reuse_matching".into(),
+            issues: Vec::new(),
         };
         Ok(())
     }

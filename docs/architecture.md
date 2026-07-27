@@ -26,10 +26,18 @@ state, source hashes, and validated content waiting for an upload retry.
 - Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
 - Notes for recent shots are refreshed every five minutes.
 - A throttled full notes pass runs once per day.
+- Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty
+  responses mean that no notes exist.
 - Validated data remains in the local queue while the internet or MyBrewFolio is unavailable.
 
 Synchronization is one-way. Deleting a synchronized object in MyBrewFolio suppresses its automatic
 reimport but does not modify the GaggiMate.
+
+Before the first import, the source stores whether exact GaggiMate-ID/recording-time matches reuse
+existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.
+Only a confirmed apply can clear suppressions for still-present machine objects or merge an
+unambiguous later Sync copy into the older MyBrewFolio shot. Differing notes require an explicit
+choice; ambiguous matches remain untouched.
 
 ## Public server contract
 
@@ -39,6 +47,9 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 |---|---|
 | `POST /v1/sync/devices` | Register an OAuth-authorized installation |
 | `GET /v1/sync/state` | Read known mappings, conflicts, and suppressions |
+| `PUT /v1/sync/settings` | Save duplicate policy and initialize first sync |
+| `POST /v1/sync/resync/preview` | Preview recoverable items and duplicate candidates |
+| `POST /v1/sync/resync/apply` | Apply selected restores and validated merges transactionally |
 | `POST /v1/sync/batches` | Submit bounded, validated synchronization batches |
 | `POST /v1/sync/heartbeat` | Report app and machine availability without a local address |
 | `POST /v1/sync/conflicts/:itemId/resolve` | Resolve a synchronization conflict |
@@ -66,4 +77,3 @@ Required GitHub repository configuration:
 
 Release signing secrets are unavailable to workflows triggered from forks. Releases remain drafts
 until their installers and signed updater metadata have been reviewed.
-

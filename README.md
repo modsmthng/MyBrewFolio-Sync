@@ -14,6 +14,10 @@ The application then starts with the computer, checks for new shots every 30 sec
 profiles every five minutes, and catches up after either the computer, machine, or internet was
 offline.
 
+Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
+be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
+machine content and safe duplicate merges, then apply only the user's confirmed choices.
+
 ## Code quality
 [![Quality gate status](https://sonarcloud.io/api/project_badges/measure?project=modsmthng_MyBrewFolio-Sync&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=modsmthng_MyBrewFolio-Sync)
 
@@ -52,8 +56,9 @@ MYBREWFOLIO_SYNC_TOKEN_URL=https://clerk.mybrewfolio.com/oauth/token
 MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY=<Tauri updater public key>
 ```
 
-OAuth tokens are stored in the operating-system keychain. SQLite stores only settings, the local
-offline queue, and cached server state.
+OAuth tokens are stored in the operating-system keychain. SQLite stores settings, the local
+offline/retry queue, cached server state, and bounded diagnostics without notes contents,
+credentials, or the machine address.
 
 ## Verification
 
@@ -68,6 +73,12 @@ cargo test --locked --lib
 
 The trust boundary, synchronization behavior, public API contract, and release process are described
 in [docs/architecture.md](docs/architecture.md).
+
+The supplied logo masters live in `assets/`. Rebuild all native icon formats reproducibly with:
+
+```bash
+npm exec tauri icon -- assets/textlogosync-1024.png --output src-tauri/icons
+```
 
 ## Security and privacy
 

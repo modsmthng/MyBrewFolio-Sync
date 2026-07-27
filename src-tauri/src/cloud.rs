@@ -275,6 +275,72 @@ impl CloudClient {
         response.json().await.map_err(|_| CloudError::Rejected)
     }
 
+    async fn device_json(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        device_id: &str,
+        body: Value,
+    ) -> Result<Value, CloudError> {
+        let response = self
+            .authorized(method, path)
+            .await?
+            .header("X-MyBrewFolio-Sync-Device", device_id)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(CloudError::Revoked);
+        }
+        if !response.status().is_success() {
+            return Err(CloudError::Rejected);
+        }
+        response.json().await.map_err(|_| CloudError::Rejected)
+    }
+
+    pub async fn save_settings(
+        &self,
+        device_id: &str,
+        duplicate_policy: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::PUT,
+            "/v1/sync/settings",
+            device_id,
+            json!({ "duplicatePolicy": duplicate_policy }),
+        )
+        .await
+    }
+
+    pub async fn resync_preview(
+        &self,
+        device_id: &str,
+        inventory: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/resync/preview",
+            device_id,
+            json!({ "items": inventory }),
+        )
+        .await
+    }
+
+    pub async fn resync_apply(
+        &self,
+        device_id: &str,
+        decisions: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/resync/apply",
+            device_id,
+            decisions,
+        )
+        .await
+    }
+
     pub async fn heartbeat(
         &self,
         device_id: &str,

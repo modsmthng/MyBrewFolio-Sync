@@ -46,6 +46,18 @@ impl AppStore {
                shot_source_key text,
                updated_at integer not null,
                primary key (kind, source_key)
+             );
+             create table if not exists sync_failures (
+               kind text not null,
+               source_key text not null,
+               stage text not null,
+               reason text not null,
+               payload text,
+               source_hash text,
+               shot_source_key text,
+               attempts integer not null default 1,
+               updated_at integer not null,
+               primary key (kind, source_key, stage)
              );",
         )?;
         Ok(Self {
@@ -128,12 +140,130 @@ impl AppStore {
         Ok(())
     }
 
+    pub fn record_failure(
+        &self,
+        object: Option<&SyncObject>,
+        kind: &str,
+        source_key: &str,
+        stage: &str,
+        reason: &str,
+    ) -> Result<(), StoreError> {
+        // Notes can contain private free text. Diagnostics retain only their
+        // source identity and retry metadata; a retry reads them from the
+        // machine again instead of persisting the content here.
+        let payload = object
+            .filter(|value| value.kind != "notes")
+            .map(|value| serde_json::to_string(&value.data))
+            .transpose()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        self.connection.lock().map_err(|_| StoreError::InvalidCredentials)?.execute(
+            "insert into sync_failures (
+               kind, source_key, stage, reason, payload, source_hash,
+               shot_source_key, attempts, updated_at
+             ) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, unixepoch())
+             on conflict (kind, source_key, stage) do update
+               set reason = excluded.reason,
+                   payload = coalesce(excluded.payload, sync_failures.payload),
+                   source_hash = coalesce(excluded.source_hash, sync_failures.source_hash),
+                   shot_source_key = coalesce(excluded.shot_source_key, sync_failures.shot_source_key),
+                   attempts = sync_failures.attempts + 1,
+                   updated_at = unixepoch()",
+            params![
+                kind,
+                source_key,
+                stage,
+                reason,
+                payload,
+                object.map(|value| value.source_hash.as_str()),
+                object.and_then(|value| value.shot_source_key.as_deref()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_failure(&self, kind: &str, source_key: &str) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute(
+                "delete from sync_failures where kind = ?1 and source_key = ?2",
+                params![kind, source_key],
+            )?;
+        Ok(())
+    }
+
+    pub fn failures(&self) -> Result<Vec<crate::model::SyncIssue>, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let mut statement = connection.prepare(
+            "select kind, source_key, stage, reason, attempts, updated_at
+             from sync_failures order by updated_at desc limit 100",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::model::SyncIssue {
+                kind: row.get(0)?,
+                source_key: row.get(1)?,
+                stage: row.get(2)?,
+                reason: row.get(3)?,
+                attempts: row.get::<_, i64>(4)?.max(0) as u32,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn retry_failures(&self) -> Result<(), StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        connection.execute_batch(
+            "insert into pending_objects (
+               kind, source_key, source_hash, payload, shot_source_key, updated_at
+             )
+             select kind, source_key, source_hash, payload, shot_source_key, unixepoch()
+             from sync_failures
+             where payload is not null and source_hash is not null
+             on conflict (kind, source_key) do update
+               set source_hash = excluded.source_hash,
+                   payload = excluded.payload,
+                   shot_source_key = excluded.shot_source_key,
+                   updated_at = unixepoch();
+             delete from settings
+             where key like 'shot_fingerprint_v2:%'
+                or key in ('last_profile_scan', 'last_recent_notes_scan',
+                           'last_full_notes_scan');
+             delete from sync_failures;",
+        )?;
+        Ok(())
+    }
+
+    pub fn reset_scan_state(&self) -> Result<(), StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        connection.execute("delete from pending_objects", [])?;
+        connection.execute("delete from sync_failures", [])?;
+        connection.execute(
+            "delete from settings
+             where key like 'shot_fingerprint_%'
+                or key in ('last_profile_scan', 'last_recent_notes_scan',
+                           'last_full_notes_scan', 'notes_reader_version')",
+            [],
+        )?;
+        Ok(())
+    }
+
     pub fn clear_account_data(&self) -> Result<(), StoreError> {
         self.connection
             .lock()
             .map_err(|_| StoreError::InvalidCredentials)?
             .execute_batch(
                 "delete from pending_objects;
+                 delete from sync_failures;
                  delete from settings where key not in ('machine_host', 'installation_id');",
             )?;
         Ok(())

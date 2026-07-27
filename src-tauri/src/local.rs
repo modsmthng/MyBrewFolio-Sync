@@ -192,29 +192,25 @@ impl GaggiMateClient {
     }
 
     pub async fn notes(&self, id: u32) -> Result<Option<Value>, LocalError> {
-        let path = format!("/api/history/{id:06}.json");
         let response = self
-            .http
-            .get(self.http_url(&path))
-            .send()
-            .await
-            .map_err(|_| LocalError::Unreachable)?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            .websocket_request("req:history:notes:get", json!({ "id": id.to_string() }))
+            .await?;
+        let notes = response
+            .get("notes")
+            .cloned()
+            .ok_or(LocalError::InvalidData)?;
+        let object = notes.as_object().ok_or(LocalError::InvalidData)?;
+        if object.is_empty() {
             return Ok(None);
         }
-        if !response.status().is_success() || !self.response_is_local(&response) {
-            return Err(LocalError::Unreachable);
-        }
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| LocalError::InvalidData)?;
-        if bytes.len() > 64 * 1024 {
+        if serde_json::to_vec(&notes)
+            .map_err(|_| LocalError::InvalidData)?
+            .len()
+            > 64 * 1024
+        {
             return Err(LocalError::InvalidData);
         }
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|_| LocalError::InvalidData)
+        Ok(Some(notes))
     }
 
     async fn websocket_request(

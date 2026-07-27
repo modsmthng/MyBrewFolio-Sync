@@ -83,11 +83,6 @@ const server = http.createServer((request, response) => {
     response.end(shotFixture);
     return;
   }
-  if (request.url === '/api/history/000001.json') {
-    response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify(fixture.notes));
-    return;
-  }
   response.writeHead(404);
   response.end();
 });
@@ -114,6 +109,14 @@ websocket.on('connection', socket => {
         tp: 'res:profiles:load',
         rid: request.rid,
         profile: fixture.profile
+      }));
+      return;
+    }
+    if (request.tp === 'req:history:notes:get') {
+      socket.send(JSON.stringify({
+        tp: 'res:history:notes:get',
+        rid: request.rid,
+        notes: request.id === '1' ? fixture.notes : {}
       }));
       return;
     }

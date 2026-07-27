@@ -17,6 +17,20 @@ pub struct AppStatus {
     pub notes: usize,
     pub conflicts: usize,
     pub suppressed: usize,
+    pub initial_sync_configured: bool,
+    pub duplicate_policy: String,
+    pub issues: Vec<SyncIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncIssue {
+    pub kind: String,
+    pub source_key: String,
+    pub stage: String,
+    pub reason: String,
+    pub attempts: u32,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

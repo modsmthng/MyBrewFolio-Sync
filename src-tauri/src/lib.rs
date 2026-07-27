@@ -91,6 +91,68 @@ async fn sync_now(app: tauri::AppHandle, engine: State<'_, Arc<SyncEngine>>) -> 
 }
 
 #[tauri::command]
+async fn configure_sync(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+    reuse_matching: bool,
+) -> Result<(), String> {
+    engine
+        .configure_sync(reuse_matching)
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = engine.sync_once().await.map_err(|error| error.to_string());
+    engine.emit_status(&app).await;
+    result
+}
+
+#[tauri::command]
+async fn retry_failed_items(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<(), String> {
+    engine
+        .retry_failures()
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = engine.sync_once().await.map_err(|error| error.to_string());
+    engine.emit_status(&app).await;
+    result
+}
+
+#[tauri::command]
+async fn preview_complete_resync(
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<serde_json::Value, String> {
+    engine
+        .resync_preview()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn apply_complete_resync(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+    decisions: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let applied = engine
+        .apply_resync(decisions)
+        .await
+        .map_err(|error| error.to_string())?;
+    let follow_up_error = engine
+        .sync_once()
+        .await
+        .err()
+        .map(|error| error.to_string());
+    engine.emit_status(&app).await;
+    let mut result = applied;
+    if let (Some(object), Some(error)) = (result.as_object_mut(), follow_up_error) {
+        object.insert("followUpError".into(), serde_json::Value::String(error));
+    }
+    Ok(result)
+}
+
+#[tauri::command]
 async fn disconnect_account(
     app: tauri::AppHandle,
     engine: State<'_, Arc<SyncEngine>>,
@@ -302,6 +364,10 @@ pub fn run() {
             begin_oauth,
             complete_oauth,
             sync_now,
+            configure_sync,
+            retry_failed_items,
+            preview_complete_resync,
+            apply_complete_resync,
             disconnect_account,
             install_update,
         ])

@@ -20,8 +20,24 @@ try {
   if (!index.ok || (await index.arrayBuffer()).byteLength !== 160) {
     throw new Error('Shot index fixture is invalid');
   }
-  const notes = await fetch(`http://127.0.0.1:${port}/api/history/000001.json`).then(response => response.json());
+  const readNotes = id => new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    socket.addEventListener('open', () => socket.send(JSON.stringify({
+      tp: 'req:history:notes:get', rid: `notes-${id}`, id
+    })));
+    socket.addEventListener('message', event => {
+      const value = JSON.parse(String(event.data));
+      if (value.rid === `notes-${id}`) {
+        socket.close();
+        resolve(value.notes);
+      }
+    });
+    socket.addEventListener('error', reject);
+  });
+  const notes = await readNotes('1');
   if (notes.rating !== 4) throw new Error('Notes fixture is invalid');
+  const emptyNotes = await readNotes('999');
+  if (Object.keys(emptyNotes).length !== 0) throw new Error('Empty notes fixture is invalid');
 
   const profile = await new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
