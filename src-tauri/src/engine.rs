@@ -59,9 +59,57 @@ pub struct SyncEngine {
     sync_lock: Mutex<()>,
 }
 
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => {
+            if let Some(integer) = value.as_i64() {
+                integer.to_string()
+            } else if let Some(integer) = value.as_u64() {
+                integer.to_string()
+            } else if let Some(float) = value.as_f64() {
+                if float == 0.0 {
+                    "0".to_string()
+                } else if float.fract() == 0.0 && float.abs() < 1e21 {
+                    format!("{float:.0}")
+                } else {
+                    value.to_string()
+                }
+            } else {
+                value.to_string()
+            }
+        }
+        Value::String(value) => serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into()),
+        Value::Array(values) => format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        Value::Object(values) => {
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            format!(
+                "{{{}}}",
+                entries
+                    .into_iter()
+                    .map(|(key, value)| format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".into()),
+                        canonical_json(value)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        }
+    }
+}
+
 fn hash_value(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).unwrap_or_default();
-    hex_digest(&bytes)
+    hex_digest(canonical_json(value).as_bytes())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -310,7 +358,9 @@ impl SyncEngine {
                 entry.volume.unwrap_or_default(),
                 entry.rating.unwrap_or_default()
             );
-            let fingerprint_key = format!("shot_fingerprint:{source_key}");
+            // v2 deliberately requeues shots once after the original client
+            // used non-canonical JSON hashes that the API could not accept.
+            let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
             let changed = self.store.setting(&fingerprint_key)?.as_deref() != Some(&fingerprint);
             if changed {
                 let mut shot = match local.shot(entry.id).await {
@@ -582,5 +632,35 @@ impl SyncEngine {
             let _ = item.0.set_text(text);
         }
         let _ = app.emit("sync-status-changed", status);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_value;
+
+    #[test]
+    fn hashes_json_like_the_sync_api() {
+        let value = serde_json::json!({
+            "b": 1,
+            "a": [true, { "z": null, "x": "café" }],
+            "n": 1.25
+        });
+        assert_eq!(
+            hash_value(&value),
+            "383410d6c75c6bd29378b3b9da39e37fde1ab284f8f1cb0230ecc2c196f5d346"
+        );
+    }
+
+    #[test]
+    fn normalizes_integer_shaped_numbers() {
+        let value = serde_json::json!({
+            "samples": [0, 1.0, 1.25, -2.5],
+            "name": "Shot"
+        });
+        assert_eq!(
+            hash_value(&value),
+            "8022fd9de6812be583b599abbf16921a856d33314b7c0db32dba8b9d515b0f3f"
+        );
     }
 }
