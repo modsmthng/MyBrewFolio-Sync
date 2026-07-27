@@ -17,7 +17,7 @@ button:disabled { cursor: wait; opacity: .58; }
 .brand-row > div { display: flex; align-items: center; gap: 14px; }
 .mark { width: 74px; font-size: 22px; line-height: .77; letter-spacing: -.08em; font-weight: 900; color: #243c59; }
 .mark.compact { width: 48px; font-size: 15px; }
-.experimental, .eyebrow { letter-spacing: .18em; font-size: 11px; font-weight: 900; color: #7b8da3; }
+.alpha-label, .eyebrow { letter-spacing: .18em; font-size: 11px; font-weight: 900; color: #7b8da3; }
 .hero { margin: 54px 0 30px; }
 .hero h1 { max-width: 600px; margin: 8px 0 16px; font-size: clamp(34px, 7vw, 58px); line-height: 1.02; letter-spacing: -.045em; }
 .hero p:not(.eyebrow) { max-width: 580px; color: #667b93; line-height: 1.65; }

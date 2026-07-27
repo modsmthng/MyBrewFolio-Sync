@@ -73,7 +73,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Experimental MyBrewFolio Sync companion. Review the generated installers and signatures before publishing this draft.'
+          releaseBody: 'MyBrewFolio Sync Alpha. Review the generated installers and signatures before publishing this draft.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: true

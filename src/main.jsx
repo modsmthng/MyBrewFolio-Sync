@@ -75,7 +75,7 @@ function Setup({ status, refresh, externalMessage }) {
     <main className="shell setup">
       <header className="brand-row">
         <div className="mark">my<br />brew<br />folio</div>
-        <span className="experimental">EXPERIMENTAL</span>
+        <span className="alpha-label">ALPHA</span>
       </header>
       <section className="hero">
         <p className="eyebrow">MYBREWFOLIO SYNC</p>
