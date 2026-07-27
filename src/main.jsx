@@ -110,6 +110,7 @@ function Dashboard({ status, refresh }) {
   const [restoreIds, setRestoreIds] = useState([]);
   const [duplicateDecisions, setDuplicateDecisions] = useState([]);
   const [syncActivity, setSyncActivity] = useState('');
+  const [confirmingResync, setConfirmingResync] = useState(false);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
@@ -240,6 +241,7 @@ function Dashboard({ status, refresh }) {
         selected: true,
         notesResolution: item.notes_conflict ? '' : undefined,
       })));
+      setConfirmingResync(false);
       setMessage('');
     } catch (error) {
       setMessage(String(error));
@@ -255,7 +257,10 @@ function Dashboard({ status, refresh }) {
       setMessage('Choose which notes to keep for every selected notes conflict.');
       return;
     }
-    if (!confirm('Apply this complete resync? Selected deleted items will be restored and selected duplicate Sync copies will be removed.')) return;
+    if (!confirmingResync) {
+      setConfirmingResync(true);
+      return;
+    }
     setBusy(true);
     setSyncActivity('resync-apply');
     try {
@@ -267,6 +272,7 @@ function Dashboard({ status, refresh }) {
       };
       const result = await invoke('apply_complete_resync', { decisions });
       setResync(null);
+      setConfirmingResync(false);
       setMessage(result.followUpError
         ? `The resync plan was applied, but the full upload needs another attempt: ${result.followUpError}`
         : `Complete resync finished. ${result.restored} restored, ${result.merged} duplicates merged.`);
@@ -422,9 +428,25 @@ function Dashboard({ status, refresh }) {
             ))}
           </fieldset> : null}
           <div className="dialog-actions">
-            <button className="secondary inline-action" disabled={busy} onClick={() => setResync(null)}>Cancel</button>
+            {confirmingResync ? (
+              <p className="message" role="alert">
+                Confirm restoring {restoreIds.length} selected machine items
+                {duplicateDecisions.filter(item => item.selected).length
+                  ? ` and merging ${duplicateDecisions.filter(item => item.selected).length} selected duplicate shots`
+                  : ''}.
+              </p>
+            ) : null}
+            <button className="secondary inline-action" disabled={busy} onClick={() => {
+              if (confirmingResync) {
+                setConfirmingResync(false);
+              } else {
+                setResync(null);
+              }
+            }}>{confirmingResync ? 'Back' : 'Cancel'}</button>
             <button className="primary compact-button" disabled={busy} onClick={applyResync}>
-              <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">Apply complete resync</ActionLabel>
+              <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">
+                {confirmingResync ? 'Confirm complete resync' : 'Apply complete resync'}
+              </ActionLabel>
             </button>
           </div>
         </section>
