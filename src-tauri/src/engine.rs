@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
@@ -157,6 +157,10 @@ fn parse_time(value: Option<String>) -> Option<DateTime<Utc>> {
     value
         .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
         .map(|value| value.with_timezone(&Utc))
+}
+
+fn api_timestamp(value: DateTime<Utc>) -> String {
+    value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 impl SyncEngine {
@@ -503,7 +507,7 @@ impl SyncEngine {
                 return Err(CloudError::Unreachable.into());
             }
             let invalid = self.flush_queue(&device_id).await?;
-            let synchronized_at = Utc::now().to_rfc3339();
+            let synchronized_at = api_timestamp(Utc::now());
             let warning_code =
                 (!skipped.is_empty() || invalid > 0).then_some("LOCAL_ITEMS_SKIPPED");
             self.cloud
@@ -637,7 +641,8 @@ impl SyncEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::hash_value;
+    use super::{api_timestamp, hash_value};
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn hashes_json_like_the_sync_api() {
@@ -662,5 +667,14 @@ mod tests {
             hash_value(&value),
             "8022fd9de6812be583b599abbf16921a856d33314b7c0db32dba8b9d515b0f3f"
         );
+    }
+
+    #[test]
+    fn formats_api_timestamps_as_utc_zulu_time() {
+        let timestamp = Utc
+            .with_ymd_and_hms(2026, 7, 27, 9, 41, 33)
+            .single()
+            .expect("valid timestamp");
+        assert_eq!(api_timestamp(timestamp), "2026-07-27T09:41:33.000Z");
     }
 }
