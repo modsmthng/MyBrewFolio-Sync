@@ -78,6 +78,17 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .inline-field button { min-height: 42px; color: white; background: #326b8e; }
 .toggle { display: flex; align-items: center; gap: 10px; margin-top: 18px; font-weight: 700; font-size: 14px; }
 .toggle input { width: 18px; height: 18px; }
+.setting-with-info { display: flex; align-items: center; gap: 8px; }
+.setting-with-info .toggle { min-width: 0; }
+.action-with-info { display: flex; align-items: center; gap: 8px; }
+.action-with-info .info-button { margin-top: 14px; }
+.info-button { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; margin-top: 18px; padding: 0; border: 1px solid #aebdca; border-radius: 50%; color: #326b8e; background: rgba(255,255,255,.5); }
+.info-button:hover { background: rgba(50,107,142,.1); }
+.info-button:focus-visible { outline: 3px solid rgba(50,107,142,.24); outline-offset: 2px; }
+.info-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+.setting-info { margin: 10px 0 0 36px; max-width: 560px; font-size: 13px; line-height: 1.55; }
+.action-info { margin-left: 0; }
+.update-available { width: fit-content; margin: 16px 0 0; padding: 8px 12px; border: 1px solid rgba(49,115,90,.35); border-radius: 999px; color: #1f684d; background: rgba(220,235,228,.75); font-size: 13px; font-weight: 800; }
 .app-version { margin-bottom: 0; font-size: 12px; }
 .account-action h3 { margin-top: 0; }
 @media (prefers-color-scheme: dark) {
@@ -87,6 +98,9 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .hero p:not(.eyebrow), .message, .privacy, .muted, .steps small, .counts span, .overview small { color: #9fb0c2; }
   .steps li, .card, input { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
   .secondary { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
+  .info-button { color: #9fc8df; border-color: #52677a; background: rgba(34,46,58,.72); }
+  .info-button:hover { background: rgba(115,171,204,.16); }
+  .update-available { color: #a9dbc6; border-color: rgba(91,167,137,.45); background: rgba(49,115,90,.2); }
   .resync-preview { background: #202d39; }
   .issue-details li { background: rgba(211,91,97,.12); }
   .issue-details li span { color: #9fb0c2; }

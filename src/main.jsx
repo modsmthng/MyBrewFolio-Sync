@@ -26,6 +26,12 @@ const initialStatus = {
   issues: [],
 };
 
+const REUSE_MATCHING_SHOTS_EXPLANATION =
+  'Matches use the GaggiMate shot ID and recording time. Existing MyBrewFolio changes are not silently overwritten.';
+
+const COMPLETE_RESYNC_EXPLANATION =
+  'Reads the complete GaggiMate library again. Shots and profiles deleted from MyBrewFolio can be restored if they are still on the machine. You review the changes before anything is applied, and nothing on your GaggiMate is changed.';
+
 function formatDate(value) {
   if (!value) return 'Not synced yet';
   const date = new Date(value);
@@ -42,6 +48,15 @@ function ActionLabel({ active, activeText, children }) {
       {active ? <SyncSpinner /> : null}
       {active ? activeText : children}
     </span>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 10.75v5.5M12 7.75h.01" />
+    </svg>
   );
 }
 
@@ -111,10 +126,22 @@ function Dashboard({ status, refresh }) {
   const [duplicateDecisions, setDuplicateDecisions] = useState([]);
   const [syncActivity, setSyncActivity] = useState('');
   const [confirmingResync, setConfirmingResync] = useState(false);
+  const [showMatchingInfo, setShowMatchingInfo] = useState(false);
+  const [showCompleteResyncInfo, setShowCompleteResyncInfo] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState('');
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
     getVersion().then(setAppVersion).catch(() => setAppVersion('Unknown'));
+    invoke('check_update')
+      .then(result => {
+        if (result.startsWith('available:')) {
+          setAvailableUpdate(result.slice('available:'.length));
+        }
+      })
+      .catch(() => {
+        // A background update check must never interrupt synchronization.
+      });
   }, []);
   useEffect(() => {
     if (!policyDirty) setReuseMatching(status.duplicatePolicy !== 'import_all');
@@ -185,6 +212,7 @@ function Dashboard({ status, refresh }) {
         'not-configured': 'Automatic updates are not available in this development build.',
       };
       setMessage(messages[result] || 'Update check completed.');
+      if (result === 'installed' || result === 'up-to-date') setAvailableUpdate('');
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -329,7 +357,7 @@ function Dashboard({ status, refresh }) {
             }} />
             <span>Reuse matching shots already in MyBrewFolio</span>
           </label>
-          <p className="muted">Matches use the GaggiMate shot ID and recording time. Existing MyBrewFolio changes are not silently overwritten.</p>
+          <p className="muted">{REUSE_MATCHING_SHOTS_EXPLANATION}</p>
           <button className="primary compact-button" disabled={busy} onClick={configure}>
             <ActionLabel active={syncActivity === 'first-sync'} activeText="Starting first sync…">Save and start first sync</ActionLabel>
           </button>
@@ -362,25 +390,66 @@ function Dashboard({ status, refresh }) {
       <section className="card settings">
         <h3>GaggiMate settings</h3>
         <div className="inline-field"><input value={host} onInput={event => setHost(event.currentTarget.value)} /><button onClick={saveHost} disabled={busy}>Save</button></div>
-        <label className="toggle">
-          <input type="checkbox" checked={reuseMatching} onChange={event => {
-            setReuseMatching(event.currentTarget.checked);
-            setPolicyDirty(true);
-          }} />
-          <span>Reuse matching MyBrewFolio shots</span>
-        </label>
+        <div className="setting-with-info">
+          <label className="toggle">
+            <input type="checkbox" checked={reuseMatching} onChange={event => {
+              setReuseMatching(event.currentTarget.checked);
+              setPolicyDirty(true);
+            }} />
+            <span>Reuse matching MyBrewFolio shots</span>
+          </label>
+          <button
+            type="button"
+            className="info-button"
+            aria-label="Explain reuse matching MyBrewFolio shots"
+            aria-expanded={showMatchingInfo}
+            aria-controls="reuse-matching-shots-info"
+            onClick={() => setShowMatchingInfo(current => !current)}
+          >
+            <InfoIcon />
+          </button>
+        </div>
+        {showMatchingInfo ? (
+          <p className="setting-info muted" id="reuse-matching-shots-info">
+            {REUSE_MATCHING_SHOTS_EXPLANATION}
+          </p>
+        ) : null}
         {status.initialSyncConfigured && policyDirty ? (
           <button className="secondary inline-action" disabled={busy} onClick={configure}>Save matching preference</button>
         ) : null}
         <p className="muted">Sync is one-way. Nothing is selected, overwritten, or deleted on your GaggiMate.</p>
-        <button className="secondary inline-action" disabled={busy} onClick={previewResync}>
-          <ActionLabel active={syncActivity === 'resync-preview'} activeText="Reading library…">Complete resync</ActionLabel>
-        </button>
+        <div className="action-with-info">
+          <button className="secondary inline-action" disabled={busy} onClick={previewResync}>
+            <ActionLabel active={syncActivity === 'resync-preview'} activeText="Reading library…">Complete resync</ActionLabel>
+          </button>
+          <button
+            type="button"
+            className="info-button"
+            aria-label="Explain complete resync"
+            aria-expanded={showCompleteResyncInfo}
+            aria-controls="complete-resync-info"
+            onClick={() => setShowCompleteResyncInfo(current => !current)}
+          >
+            <InfoIcon />
+          </button>
+        </div>
+        {showCompleteResyncInfo ? (
+          <p className="setting-info action-info muted" id="complete-resync-info">
+            {COMPLETE_RESYNC_EXPLANATION}
+          </p>
+        ) : null}
       </section>
       <section className="card settings">
         <h3>App settings</h3>
         <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} /><span>Start Sync with this computer</span></label>
-        <button className="secondary inline-action" disabled={busy} onClick={update}>Check for updates</button>
+        {availableUpdate ? (
+          <p className="update-available" role="status">
+            Update {availableUpdate} is available.
+          </p>
+        ) : null}
+        <button className="secondary inline-action" disabled={busy} onClick={update}>
+          {availableUpdate ? `Install update ${availableUpdate}` : 'Check for updates'}
+        </button>
         <p className="muted app-version">Installed version {appVersion || '…'}</p>
       </section>
       {resync ? (

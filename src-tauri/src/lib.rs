@@ -166,6 +166,29 @@ async fn disconnect_account(
 }
 
 #[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = app;
+        return Ok("store-managed".into());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
+            .unwrap_or("")
+            .trim();
+        if public_key.is_empty() {
+            return Ok("not-configured".into());
+        }
+        let updater = app.updater().map_err(|error| error.to_string())?;
+        let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
+            return Ok("up-to-date".into());
+        };
+        Ok(format!("available:{}", update.version))
+    }
+}
+
+#[tauri::command]
 async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -217,7 +240,7 @@ pub fn run() {
         updater = updater.pubkey(public_key);
     }
 
-    builder
+    let app = builder
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(updater.build())
@@ -369,8 +392,18 @@ pub fn run() {
             preview_complete_resync,
             apply_complete_resync,
             disconnect_account,
+            check_update,
             install_update,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running MyBrewFolio Sync");
+
+    app.run(|app, event| {
+        let _ = app;
+        match event {
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => show_main_window(app),
+            _ => {}
+        }
+    });
 }
