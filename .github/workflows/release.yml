@@ -21,7 +21,7 @@ jobs:
           - os: windows-latest
             args: '--bundles msi'
           - os: macos-latest
-            args: '--target universal-apple-darwin --bundles dmg'
+            args: '--target universal-apple-darwin --bundles app,dmg'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
