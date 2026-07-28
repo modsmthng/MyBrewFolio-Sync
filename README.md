@@ -80,11 +80,17 @@ cargo test --locked --lib
 The trust boundary, synchronization behavior, public API contract, and release process are described
 in [docs/architecture.md](docs/architecture.md).
 
-The supplied logo masters live in `assets/`. Rebuild all native icon formats reproducibly with:
+The supplied logo masters live in `assets/`. Rebuild and verify all native, tray, and Microsoft
+Store icon formats reproducibly with:
 
 ```bash
-npm exec tauri icon -- assets/textlogosync-1024.png --output src-tauri/icons
+./scripts/generate-icons.sh
 ```
+
+The monochrome `assets/tray-template.svg` is rendered separately to
+`src-tauri/icons/tray-template.png`. macOS treats it as a template image so the menu-bar icon stays
+visible in both Light and Dark appearances. Microsoft Store listing artwork is kept in
+`assets/microsoft-store/` at the exact requested 72, 150 and 300 pixel sizes.
 
 ## Security and privacy
 
@@ -95,6 +101,8 @@ npm exec tauri icon -- assets/textlogosync-1024.png --output src-tauri/icons
 - Release update metadata is signed. The private signing key is never stored in this repository.
 - Windows GitHub MSI releases use the signed MyBrewFolio updater. Microsoft Store MSIX releases use
   Microsoft Store updates instead.
+- Microsoft Store submission packages are kept in separate `store-vX.Y.Z` draft releases. These
+  drafts are for Partner Center submission only and must never be published.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

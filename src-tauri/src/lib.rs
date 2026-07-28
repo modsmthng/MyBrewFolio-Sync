@@ -309,7 +309,11 @@ pub fn run() {
                     &quit_item,
                 ],
             )?;
+            let tray_icon =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
             TrayIconBuilder::new()
+                .icon(tray_icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("MyBrewFolio Sync")
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {

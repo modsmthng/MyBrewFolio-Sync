@@ -73,7 +73,10 @@ Windows has two deliberately separate update channels. The direct GitHub MSI bui
 MyBrewFolio updater and `latest.json`. When Partner Center identity variables are configured, the
 release workflow additionally builds an MSIX Store-submission package with
 `MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD=true`; that package delegates updates to Microsoft Store.
-The MSIX manifest registers `mybrewfolio-sync://` so the OAuth return path works in the Store build.
+The MSIX is uploaded only to a separate `store-vX.Y.Z` draft release. This draft is visible only to
+repository collaborators with push access and must never be published. The normal `vX.Y.Z` release
+therefore contains only public direct-download and updater assets. The MSIX manifest registers
+`mybrewfolio-sync://` so the OAuth return path works in the Store build.
 
 Required GitHub repository configuration:
 

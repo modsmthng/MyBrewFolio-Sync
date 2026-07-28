@@ -107,7 +107,7 @@ jobs:
                 --clobber
               ;;
           esac
-      - name: Build unsigned Microsoft Store submission package
+      - name: Build private Microsoft Store submission package
         if: matrix.os == 'windows-latest' && vars.MYBREWFOLIO_MSIX_IDENTITY_NAME != '' && vars.MYBREWFOLIO_MSIX_PUBLISHER != ''
         shell: pwsh
         env:
@@ -127,4 +127,25 @@ jobs:
             -Version $packageVersion `
             -Executable './src-tauri/target/release/mybrewfolio-sync.exe' `
             -Output './MyBrewFolio-Sync-Store.msix'
-          gh release upload '${{ github.ref_name }}' './MyBrewFolio-Sync-Store.msix' --clobber
+
+          $storeTag = 'store-${{ github.ref_name }}'
+          $storeTitle = 'Microsoft Store submission ${{ github.ref_name }}'
+          $isDraft = gh release view $storeTag --json isDraft --jq '.isDraft' 2>$null
+
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $storeTag `
+              --target '${{ github.sha }}' `
+              --draft `
+              --title $storeTitle `
+              --notes 'Private Microsoft Store submission package. Never publish this draft release.'
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to create the private Microsoft Store draft release'
+            }
+          } elseif ($isDraft -ne 'true') {
+            throw "$storeTag already exists as a published release. The Microsoft Store package must remain private."
+          }
+
+          gh release upload $storeTag './MyBrewFolio-Sync-Store.msix' --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to upload the Microsoft Store submission package'
+          }
