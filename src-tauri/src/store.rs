@@ -297,3 +297,41 @@ impl AppStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AppStore;
+
+    #[test]
+    fn clearing_account_data_keeps_machine_and_installation_settings() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AppStore::open(&directory.path().join("sync.sqlite")).expect("store opens");
+        store
+            .set_setting("machine_host", "gaggimate.local")
+            .expect("machine host saved");
+        store
+            .set_setting("installation_id", "stable-installation")
+            .expect("installation ID saved");
+        store
+            .set_setting("device_id", "account-device")
+            .expect("device ID saved");
+        store
+            .set_setting("source_id", "account-source")
+            .expect("source ID saved");
+
+        store.clear_account_data().expect("account data cleared");
+
+        assert_eq!(
+            store.setting("machine_host").expect("machine host read"),
+            Some("gaggimate.local".into())
+        );
+        assert_eq!(
+            store
+                .setting("installation_id")
+                .expect("installation ID read"),
+            Some("stable-installation".into())
+        );
+        assert_eq!(store.setting("device_id").expect("device ID read"), None);
+        assert_eq!(store.setting("source_id").expect("source ID read"), None);
+    }
+}

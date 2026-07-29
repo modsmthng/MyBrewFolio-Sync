@@ -60,13 +60,35 @@ function InfoIcon() {
   );
 }
 
+function ExternalLink({ page, children, className = '' }) {
+  return (
+    <button
+      type="button"
+      className={`text-link ${className}`.trim()}
+      onClick={() => invoke('open_mybrewfolio_page', { page }).catch(() => {})}
+    >
+      {children}
+    </button>
+  );
+}
+
+function AppFooter() {
+  return (
+    <footer className="app-footer" aria-label="MyBrewFolio links">
+      <ExternalLink page="syncHelp">Support</ExternalLink>
+      <span aria-hidden="true">·</span>
+      <ExternalLink page="privacy">Privacy</ExternalLink>
+    </footer>
+  );
+}
+
 function StatusPill({ status }) {
   const kind = status.syncing ? 'working' : status.lastError ? 'error' : status.connected ? 'ok' : 'idle';
   const text = status.syncing ? 'Syncing' : status.lastError ? 'Needs attention' : status.connected ? 'Connected' : 'Not connected';
   return <span className={`status status-${kind}`}>{status.syncing ? <SyncSpinner /> : null}{text}</span>;
 }
 
-function Setup({ status, refresh, externalMessage }) {
+function Setup({ status, refresh, externalNotice }) {
   const [host, setHost] = useState(status.machineHost || 'gaggimate.local');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -94,8 +116,9 @@ function Setup({ status, refresh, externalMessage }) {
       </header>
       <section className="hero">
         <p className="eyebrow">MYBREWFOLIO SYNC</p>
-        <h1>Your GaggiMate library, available everywhere.</h1>
+        <h1>Your smart coffee machine library, available everywhere.</h1>
         <p>Shots, profiles, and notes are copied to your private MyBrewFolio library. Nothing is changed on your machine.</p>
+        <ExternalLink page="syncHelp" className="setup-help">Sync help</ExternalLink>
       </section>
       <ol className="steps">
         <li className="done"><span>1</span><div><strong>Install Sync</strong><small>Done on this computer</small></div></li>
@@ -107,13 +130,20 @@ function Setup({ status, refresh, externalMessage }) {
         <input value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" />
       </label>
       <button className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : 'Connect MyBrewFolio'}</button>
-      {message || externalMessage ? <p className="message" aria-live="polite">{message || externalMessage}</p> : null}
+      {message ? <p className="message" aria-live="polite">{message}</p> : null}
+      {!message && externalNotice ? (
+        <div className="message disconnect-notice" aria-live="polite">
+          <span>{externalNotice.message}</span>
+          {externalNotice.page ? <ExternalLink page={externalNotice.page}>{externalNotice.action}</ExternalLink> : null}
+        </div>
+      ) : null}
       <p className="privacy">The local address stays on this computer. Only the library content you synchronize is sent to MyBrewFolio.</p>
+      <AppFooter />
     </main>
   );
 }
 
-function Dashboard({ status, refresh }) {
+function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
   const [autostart, setAutostart] = useState(true);
   const [host, setHost] = useState(status.machineHost);
   const [busy, setBusy] = useState(false);
@@ -129,6 +159,7 @@ function Dashboard({ status, refresh }) {
   const [showMatchingInfo, setShowMatchingInfo] = useState(false);
   const [showCompleteResyncInfo, setShowCompleteResyncInfo] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState('');
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
@@ -143,6 +174,9 @@ function Dashboard({ status, refresh }) {
         // A background update check must never interrupt synchronization.
       });
   }, []);
+  useEffect(() => {
+    if (disconnectRequestToken > 0) setConfirmDisconnect(true);
+  }, [disconnectRequestToken]);
   useEffect(() => {
     if (!policyDirty) setReuseMatching(status.duplicatePolicy !== 'import_all');
   }, [status.duplicatePolicy, policyDirty]);
@@ -188,11 +222,11 @@ function Dashboard({ status, refresh }) {
   };
 
   const disconnect = async () => {
-    if (!confirm('Disconnect this Sync installation from MyBrewFolio?')) return;
     setBusy(true);
     try {
-      await invoke('disconnect_account');
-      refresh();
+      const result = await invoke('disconnect_account');
+      setConfirmDisconnect(false);
+      await onDisconnected(result);
     } catch (error) {
       setMessage(String(error));
     } finally {
@@ -523,9 +557,20 @@ function Dashboard({ status, refresh }) {
       <section className="card account-action">
         <h3>Account</h3>
         <p className="muted">This installation is connected to your private MyBrewFolio library.</p>
-        <button className="secondary" disabled={busy} onClick={disconnect}>Disconnect account</button>
+        {confirmDisconnect ? (
+          <div className="disconnect-confirm" role="alertdialog" aria-labelledby="disconnect-title">
+            <strong id="disconnect-title">Disconnect this computer?</strong>
+            <div>
+              <button className="secondary compact-button" disabled={busy} onClick={() => setConfirmDisconnect(false)}>Cancel</button>
+              <button className="primary compact-button" disabled={busy} onClick={disconnect}>Disconnect</button>
+            </div>
+          </div>
+        ) : (
+          <button className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
+        )}
       </section>
       {message ? <p className="message" aria-live="polite">{message}</p> : null}
+      <AppFooter />
     </main>
   );
 }
@@ -534,20 +579,25 @@ function App() {
   const [status, setStatus] = useState(initialStatus);
   const [loading, setLoading] = useState(true);
   const [oauthError, setOauthError] = useState('');
+  const [disconnectNotice, setDisconnectNotice] = useState(null);
+  const [disconnectRequestToken, setDisconnectRequestToken] = useState(0);
   const refresh = async () => {
     try { setStatus(await invoke('get_status')); } finally { setLoading(false); }
   };
 
   useEffect(() => {
+    invoke('frontend_ready').catch(() => {});
     refresh();
     const poll = setInterval(refresh, 5000);
     let unlistenDeepLink;
     let unlistenStatus;
     let unlistenSync;
+    let unlistenDisconnect;
     const handleUrls = urls => {
       const callback = urls?.find(url => url.startsWith('mybrewfolio-sync://oauth/callback'));
       if (callback) {
         setOauthError('');
+        setDisconnectNotice(null);
         invoke('complete_oauth', { callbackUrl: callback })
           .then(refresh)
           .catch(error => setOauthError(`MyBrewFolio could not finish connecting this installation: ${String(error)}`));
@@ -557,18 +607,40 @@ function App() {
     onOpenUrl(handleUrls).then(unlisten => { unlistenDeepLink = unlisten; });
     listen('sync-status-changed', refresh).then(unlisten => { unlistenStatus = unlisten; });
     listen('sync-requested', () => invoke('sync_now').finally(refresh)).then(unlisten => { unlistenSync = unlisten; });
+    listen('disconnect-confirmation-requested', () => setDisconnectRequestToken(value => value + 1))
+      .then(unlisten => { unlistenDisconnect = unlisten; });
     return () => {
       clearInterval(poll);
       unlistenDeepLink?.();
       unlistenStatus?.();
       unlistenSync?.();
+      unlistenDisconnect?.();
     };
   }, []);
 
+  const handleDisconnected = async result => {
+    if (!result?.credentialsRemoved) {
+      setDisconnectNotice({
+        message: 'Disconnected, but the stored sign-in could not be removed.',
+        page: 'syncHelp',
+        action: 'Get help',
+      });
+    } else if (!result?.serverRevoked) {
+      setDisconnectNotice({
+        message: 'Disconnected here. Revoke the installation at MyBrewFolio Account → Sync.',
+        page: 'accountSync',
+        action: 'Open Account → Sync',
+      });
+    } else {
+      setDisconnectNotice({ message: 'This computer was disconnected.' });
+    }
+    await refresh();
+  };
+
   if (loading) return <main className="shell loading">Loading MyBrewFolio Sync…</main>;
   return status.connected
-    ? <Dashboard status={status} refresh={refresh} />
-    : <Setup status={status} refresh={refresh} externalMessage={oauthError} />;
+    ? <Dashboard status={status} refresh={refresh} onDisconnected={handleDisconnected} disconnectRequestToken={disconnectRequestToken} />
+    : <Setup status={status} refresh={refresh} externalNotice={oauthError ? { message: oauthError } : disconnectNotice} />;
 }
 
 render(<App />, document.getElementById('app'));

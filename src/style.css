@@ -35,6 +35,12 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .secondary { width: 100%; color: #263d59; border-color: #bdcad6; background: rgba(255,255,255,.55); }
 .message, .privacy { line-height: 1.5; color: #64788f; font-size: 13px; }
 .privacy { margin-top: 26px; text-align: center; }
+.text-link { width: auto; min-height: 0; padding: 0; border: 0; border-radius: 0; color: #326b8e; background: transparent; font-weight: 800; text-decoration: underline; text-underline-offset: 3px; }
+.text-link:hover { color: #224f6b; }
+.text-link:focus-visible { outline: 3px solid rgba(50,107,142,.24); outline-offset: 3px; border-radius: 4px; }
+.setup-help { margin-top: 2px; }
+.app-footer { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 34px; color: #718399; font-size: 12px; }
+.disconnect-notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
 .dashboard-header h1 { margin: 0; font-size: 28px; }
 .status { display: inline-flex; align-items: center; gap: 7px; border-radius: 999px; padding: 7px 12px; font-size: 12px; font-weight: 900; }
 .status-ok { color: #1f684d; background: #dcebe4; }
@@ -91,6 +97,9 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .update-available { width: fit-content; margin: 16px 0 0; padding: 8px 12px; border: 1px solid rgba(49,115,90,.35); border-radius: 999px; color: #1f684d; background: rgba(220,235,228,.75); font-size: 13px; font-weight: 800; }
 .app-version { margin-bottom: 0; font-size: 12px; }
 .account-action h3 { margin-top: 0; }
+.disconnect-confirm { display: grid; gap: 14px; padding: 14px 16px; border: 1px solid rgba(157,48,56,.28); border-radius: 16px; background: rgba(244,223,224,.55); }
+.disconnect-confirm > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.disconnect-confirm .primary, .disconnect-confirm .secondary { margin: 0; }
 @media (prefers-color-scheme: dark) {
   :root { color: #d7e2ed; background: #17202a; }
   body { background: radial-gradient(circle at 10% 0%, #293744 0, transparent 36%), #17202a; }
@@ -98,6 +107,8 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .hero p:not(.eyebrow), .message, .privacy, .muted, .steps small, .counts span, .overview small { color: #9fb0c2; }
   .steps li, .card, input { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
   .secondary { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
+  .text-link { color: #9fc8df; }
+  .text-link:hover { color: #c4e3f3; }
   .info-button { color: #9fc8df; border-color: #52677a; background: rgba(34,46,58,.72); }
   .info-button:hover { background: rgba(115,171,204,.16); }
   .update-available { color: #a9dbc6; border-color: rgba(91,167,137,.45); background: rgba(49,115,90,.2); }
@@ -105,6 +116,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .issue-details li { background: rgba(211,91,97,.12); }
   .issue-details li span { color: #9fb0c2; }
   .sync-activity { color: #b9d8eb; border-color: rgba(115,171,204,.38); background: rgba(39,94,128,.22); }
+  .disconnect-confirm { border-color: rgba(211,91,97,.38); background: rgba(141,52,58,.12); }
 }
 @media (prefers-reduced-motion: reduce) {
   .sync-spinner { animation: none; border-right-color: currentColor; opacity: .72; }

@@ -77,6 +77,16 @@ The MSIX is uploaded only to a separate `store-vX.Y.Z` draft release. This draft
 repository collaborators with push access and must never be published. The normal `vX.Y.Z` release
 therefore contains only public direct-download and updater assets. The MSIX manifest registers
 `mybrewfolio-sync://` so the OAuth return path works in the Store build.
+The Store manifest declares `Microsoft.VCLibs.140.00.UWPDesktop`. Packaging verifies the Visual C++
+dependency, Windows GUI subsystem, package identity and embedded payload before upload. The private
+draft also contains an equivalent self-signed test MSIX, its short-lived public certificate, the
+VCLibs framework and install/removal scripts in a ZIP. Only the unsigned MSIX is submitted to
+Partner Center. Startup diagnostics record app, OS and WebView2 versions and frontend readiness in
+the app data directory without recording tokens, machine addresses or synchronized content.
+Support, privacy and account-management links are restricted to a fixed MyBrewFolio URL allowlist
+and open in the operating system browser. Disconnect is local-first after explicit confirmation:
+the app clears local account state even when the server cannot be reached, and then directs the
+user to Account → Sync when server-side revocation still needs to be completed.
 
 Required GitHub repository configuration:
 

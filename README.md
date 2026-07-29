@@ -96,13 +96,19 @@ visible in both Light and Dark appearances. Microsoft Store listing artwork is k
 
 - OAuth tokens are stored in the operating-system keychain.
 - The GaggiMate hostname or local IP remains on the computer.
+- Support and privacy links use a fixed allowlist and open in the operating system's browser.
 - Only explicitly synchronized library content is sent to the MyBrewFolio Sync API.
 - The companion permits only loopback and private-network machine targets.
 - Release update metadata is signed. The private signing key is never stored in this repository.
 - Windows GitHub MSI releases use the signed MyBrewFolio updater. Microsoft Store MSIX releases use
   Microsoft Store updates instead.
+- Disconnect always removes the local Sync connection after confirmation. If immediate server
+  revocation is unavailable, the app links directly to Account → Sync for manual revocation.
 - Microsoft Store submission packages are kept in separate `store-vX.Y.Z` draft releases. These
-  drafts are for Partner Center submission only and must never be published.
+  drafts are for Partner Center submission only and must never be published. Each draft contains
+  the unsigned Partner Center MSIX and a temporary self-signed test bundle for an exact local
+  Windows installation test. Store packaging declares the required Microsoft Visual C++ framework
+  dependency and verifies the executable subsystem, package identity and embedded files.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

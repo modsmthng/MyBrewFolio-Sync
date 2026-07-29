@@ -723,14 +723,17 @@ impl SyncEngine {
         result
     }
 
-    pub async fn disconnect(&self) -> Result<(), EngineError> {
-        if let Some(device_id) = self.store.setting("device_id")? {
-            // Do not claim that an installation was disconnected when the
-            // server could not be reached. The user can retry here or revoke
-            // it immediately from Account -> Sync on the website.
-            self.cloud.revoke(&device_id).await?;
-        }
-        self.store.delete_tokens()?;
+    pub async fn disconnect(&self) -> Result<Value, EngineError> {
+        let server_revoked = match self.store.setting("device_id")? {
+            Some(device_id) => tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.cloud.revoke(&device_id),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok()),
+            None => true,
+        };
+        let credentials_removed = self.store.delete_tokens().is_ok();
         self.store.clear_account_data()?;
         let host = self
             .store
@@ -752,7 +755,10 @@ impl SyncEngine {
             duplicate_policy: "reuse_matching".into(),
             issues: Vec::new(),
         };
-        Ok(())
+        Ok(serde_json::json!({
+            "serverRevoked": server_revoked,
+            "credentialsRemoved": credentials_removed,
+        }))
     }
 
     pub async fn emit_status(&self, app: &tauri::AppHandle) {

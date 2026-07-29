@@ -57,6 +57,27 @@ jobs:
       - run: cargo test --locked --lib
         working-directory: src-tauri
 
+      - name: Verify Microsoft Store packaging sources
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem scripts/*.ps1,windows/test-package/*.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              throw "PowerShell syntax error in $($_.FullName): $($errors -join '; ')"
+            }
+          }
+          [xml]$manifest = Get-Content windows/Package.appxmanifest.xml -Raw
+          $namespace = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+          $namespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+          $dependency = $manifest.SelectSingleNode("/f:Package/f:Dependencies/f:PackageDependency[@Name='Microsoft.VCLibs.140.00.UWPDesktop']", $namespace)
+          if (-not $dependency) {
+            throw 'Microsoft.VCLibs.140.00.UWPDesktop is missing from the Store manifest'
+          }
+
   sonarqube:
     name: SonarQube Cloud
     needs:

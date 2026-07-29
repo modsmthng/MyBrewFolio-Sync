@@ -7,7 +7,16 @@ mod local;
 mod model;
 mod store;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use engine::SyncEngine;
 use model::AppStatus;
@@ -15,7 +24,7 @@ use store::AppStore;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, State,
+    Emitter, Manager, State,
 };
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -26,6 +35,77 @@ pub(crate) struct TrayStatusItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayMachineItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayErrorItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayAutostartItem(MenuItem<tauri::Wry>);
+
+struct StartupDiagnostics {
+    path: PathBuf,
+    frontend_ready: AtomicBool,
+}
+
+impl StartupDiagnostics {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            frontend_ready: AtomicBool::new(false),
+        }
+    }
+
+    fn reset(&self, app_version: &str) {
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let webview_version =
+            tauri::webview_version().unwrap_or_else(|error| format!("unavailable ({error})"));
+        let content = format!(
+            "MyBrewFolio Sync startup diagnostics\nstarted_utc={}\napp_version={}\nos={}\nwebview2_version={}\ntauri_started=true\nfrontend_ready=false\n",
+            chrono::Utc::now().to_rfc3339(),
+            app_version,
+            windows_version(),
+            webview_version,
+        );
+        let _ = fs::write(&self.path, content);
+    }
+
+    fn append(&self, line: &str) {
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
+    fn mark_frontend_ready(&self) {
+        if !self.frontend_ready.swap(true, Ordering::SeqCst) {
+            self.append(&format!(
+                "frontend_ready=true\nfrontend_ready_utc={}",
+                chrono::Utc::now().to_rfc3339()
+            ));
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_version() -> String {
+    std::process::Command::new("cmd")
+        .args(["/C", "ver"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Windows (version unavailable)".into())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_version() -> String {
+    std::env::consts::OS.into()
+}
+
+#[tauri::command]
+fn frontend_ready(diagnostics: State<'_, Arc<StartupDiagnostics>>) {
+    diagnostics.mark_frontend_ready();
+}
 
 #[tauri::command]
 async fn get_status(engine: State<'_, Arc<SyncEngine>>) -> Result<AppStatus, String> {
@@ -156,13 +236,26 @@ async fn apply_complete_resync(
 async fn disconnect_account(
     app: tauri::AppHandle,
     engine: State<'_, Arc<SyncEngine>>,
-) -> Result<(), String> {
-    engine
+) -> Result<serde_json::Value, String> {
+    let result = engine
         .disconnect()
         .await
         .map_err(|error| error.to_string())?;
     engine.emit_status(&app).await;
-    Ok(())
+    Ok(result)
+}
+
+#[tauri::command]
+fn open_mybrewfolio_page(app: tauri::AppHandle, page: String) -> Result<(), String> {
+    let url = match page.as_str() {
+        "syncHelp" => "https://mybrewfolio.com/support/sync",
+        "privacy" => "https://mybrewfolio.com/legal/privacy",
+        "accountSync" => "https://mybrewfolio.com/account/sync",
+        _ => return Err("Unknown MyBrewFolio page".into()),
+    };
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -248,6 +341,11 @@ pub fn run() {
         ))
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            let startup_diagnostics = Arc::new(StartupDiagnostics::new(
+                data_dir.join("startup-diagnostics.log"),
+            ));
+            startup_diagnostics.reset(&app.package_info().version.to_string());
+            app.manage(startup_diagnostics.clone());
             let store = Arc::new(
                 AppStore::open(&data_dir.join("sync.sqlite")).map_err(|error| error.to_string())?,
             );
@@ -345,12 +443,8 @@ pub fn run() {
                         }
                     }
                     "disconnect" => {
-                        let engine = app.state::<Arc<SyncEngine>>().inner().clone();
-                        let handle = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = engine.disconnect().await;
-                            engine.emit_status(&handle).await;
-                        });
+                        show_main_window(app);
+                        let _ = app.emit("disconnect-confirmation-requested", ());
                     }
                     "quit" => app.exit(0),
                     _ => {}
@@ -370,6 +464,16 @@ pub fn run() {
                 }
             });
 
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                if !startup_diagnostics.frontend_ready.load(Ordering::SeqCst) {
+                    startup_diagnostics.append(&format!(
+                        "frontend_timeout=true\nfrontend_timeout_utc={}",
+                        chrono::Utc::now().to_rfc3339()
+                    ));
+                }
+            });
+
             if let Some(window) = app.get_webview_window("main") {
                 let window_handle = app.handle().clone();
                 window.on_window_event(move |event| {
@@ -384,6 +488,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            frontend_ready,
             get_status,
             set_machine_host,
             begin_oauth,
@@ -394,6 +499,7 @@ pub fn run() {
             preview_complete_resync,
             apply_complete_resync,
             disconnect_account,
+            open_mybrewfolio_page,
             check_update,
             install_update,
         ])
