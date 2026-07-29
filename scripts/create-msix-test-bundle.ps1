@@ -41,7 +41,7 @@ try {
   $verificationOutput = (& $signTool.FullName verify /pa /v $signedMsix 2>&1 | Out-String)
   $verificationExitCode = $LASTEXITCODE
   if ($verificationExitCode -ne 0) {
-    $hasExpectedSelfSignedTrustError = $verificationOutput -match "(?i)(0x800B0109|root certificate which is not trusted by the trust provider)"
+    $hasExpectedSelfSignedTrustError = $verificationOutput -match "(?is)(0x800B0109|root\s+certificate\s+which\s+is\s+not\s+trusted\s+by\s+the\s+trust\s+provider)"
     if (-not $hasExpectedSelfSignedTrustError) {
       Write-Host $verificationOutput
       throw "The local MSIX test signature could not be verified"
