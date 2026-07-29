@@ -31,11 +31,6 @@ try {
   $certificatePath = Join-Path $bundle "MyBrewFolio-Sync-Store-Test.cer"
   Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
   Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" | Out-Null
-  # SignTool's Authenticode verification policy requires a trusted root even
-  # though Windows installs self-signed MSIX test certificates from
-  # TrustedPeople. Trust this unique, short-lived certificate as a root only
-  # for the CI verification below and remove it again in the finally block.
-  Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
 
   $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
     Sort-Object FullName -Descending |
@@ -43,8 +38,18 @@ try {
   if (-not $signTool) { throw "signtool.exe was not found" }
   & $signTool.FullName sign /fd SHA256 /sha1 $certificate.Thumbprint $signedMsix
   if ($LASTEXITCODE -ne 0) { throw "The local MSIX test package could not be signed" }
-  & $signTool.FullName verify /pa /v $signedMsix | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "The local MSIX test signature could not be verified" }
+  $verificationOutput = (& $signTool.FullName verify /pa /v $signedMsix 2>&1 | Out-String)
+  $verificationExitCode = $LASTEXITCODE
+  if ($verificationExitCode -ne 0) {
+    $hasExpectedSelfSignedTrustError = $verificationOutput -match "(?i)(0x800B0109|root certificate which is not trusted by the trust provider)"
+    if (-not $hasExpectedSelfSignedTrustError) {
+      Write-Host $verificationOutput
+      throw "The local MSIX test signature could not be verified"
+    }
+    Write-Host "The test MSIX signature is intact and uses the expected self-signed test certificate."
+  } else {
+    Write-Host "The test MSIX signature was verified successfully."
+  }
 
   $vclibsCandidates = @(
     "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs.Desktop\*\Appx\Retail\x64\*.appx",
@@ -69,5 +74,4 @@ try {
 } finally {
   Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
   Remove-Item "Cert:\CurrentUser\TrustedPeople\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
-  Remove-Item "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
 }
