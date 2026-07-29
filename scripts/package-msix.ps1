@@ -62,15 +62,45 @@ Write-Logo 44 44 "Square44x44Logo.png"
 Write-Logo 150 150 "Square150x150Logo.png"
 Write-Logo 310 150 "Wide310x150Logo.png"
 
-$dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue |
-  Sort-Object FullName -Descending |
-  Select-Object -First 1
-if (-not $dumpbin) { throw "dumpbin.exe was not found; the Store package cannot be verified" }
-$dependencies = (& $dumpbin.FullName /dependents $Executable 2>&1 | Out-String)
+$dumpbinPath = $null
+$dumpbinCommand = Get-Command "dumpbin.exe" -ErrorAction SilentlyContinue
+if ($dumpbinCommand) {
+  $dumpbinPath = $dumpbinCommand.Source
+}
+
+if (-not $dumpbinPath) {
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+  if (Test-Path $vswhere) {
+    $dumpbinMatches = @(& $vswhere `
+      -latest `
+      -products * `
+      -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+      -find "VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe")
+    if ($dumpbinMatches.Count -gt 0) {
+      $dumpbinPath = $dumpbinMatches |
+        Where-Object { $_ -and (Test-Path $_) } |
+        Sort-Object -Descending |
+        Select-Object -First 1
+    }
+  }
+}
+
+if (-not $dumpbinPath) {
+  $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio\2022\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
+  if ($dumpbin) {
+    $dumpbinPath = $dumpbin.FullName
+  }
+}
+
+if (-not $dumpbinPath) { throw "dumpbin.exe was not found; the Store package cannot be verified" }
+Write-Host "Using dumpbin.exe at $dumpbinPath"
+$dependencies = (& $dumpbinPath /dependents $Executable 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "Could not inspect Windows runtime dependencies" }
 $needsVclibs = $dependencies -match "(?i)VCRUNTIME140(?:_1)?\.dll"
 if ($needsVclibs -and -not $vclibs) { throw "The executable imports Visual C++ runtime DLLs without a VCLibs manifest dependency" }
-$headers = (& $dumpbin.FullName /headers $Executable 2>&1 | Out-String)
+$headers = (& $dumpbinPath /headers $Executable 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $headers -notmatch "(?i)Windows GUI") {
   throw "The Store executable must use the Windows GUI subsystem"
 }
