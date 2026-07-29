@@ -31,6 +31,11 @@ try {
   $certificatePath = Join-Path $bundle "MyBrewFolio-Sync-Store-Test.cer"
   Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
   Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" | Out-Null
+  # SignTool's Authenticode verification policy requires a trusted root even
+  # though Windows installs self-signed MSIX test certificates from
+  # TrustedPeople. Trust this unique, short-lived certificate as a root only
+  # for the CI verification below and remove it again in the finally block.
+  Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\Root" | Out-Null
 
   $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
     Sort-Object FullName -Descending |
@@ -64,4 +69,5 @@ try {
 } finally {
   Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
   Remove-Item "Cert:\CurrentUser\TrustedPeople\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
+  Remove-Item "Cert:\CurrentUser\Root\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
 }
