@@ -78,7 +78,7 @@ function Write-AppPackageDiagnostics([System.Management.Automation.ErrorRecord]$
   )
   if ($activityMatch.Success) {
     $activityId = [Guid]$activityMatch.Groups[1].Value
-    Write-Host "App package deployment log for ActivityId $activityId:"
+    Write-Host "App package deployment log for ActivityId ${activityId}:"
     try {
       $deploymentLog = Get-AppPackageLog -ActivityID $activityId |
         Format-List |
