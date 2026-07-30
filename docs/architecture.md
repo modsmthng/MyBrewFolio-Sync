@@ -80,7 +80,9 @@ manifest registers `mybrewfolio-sync://` so the OAuth return path works in the S
 The Store manifest declares `Microsoft.VCLibs.140.00.UWPDesktop`. Packaging verifies the Visual C++
 dependency, Windows GUI subsystem, package identity and embedded payload before upload. The private
 draft also contains an equivalent self-signed test MSIX, its short-lived public certificate, the
-VCLibs framework and install/removal scripts in a ZIP. The installer compares the bundled
+matching UWPDesktop VCLibs framework and install/removal scripts in a ZIP. The bundle builder reads
+the framework Appx manifest and rejects generic or wrong-architecture VCLibs packages before upload.
+The installer repeats that identity check, compares the bundled
 certificate with the MSIX signer, requests elevation only to add it temporarily to Local Computer
 → Trusted People, verifies a valid signature and then registers the package for the original test
 user. The removal script deletes both package and certificate. Only the unsigned MSIX is submitted

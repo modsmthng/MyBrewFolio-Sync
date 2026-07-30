@@ -10,6 +10,43 @@ $identityName = "__IDENTITY_NAME__"
 $certificatePath = Join-Path $root "MyBrewFolio-Sync-Store-Test.cer"
 $msixPath = Join-Path $root "MyBrewFolio-Sync-Store-Test.msix"
 $vclibsPath = Join-Path $root "Microsoft.VCLibs.x64.14.00.Desktop.appx"
+$expectedVclibsName = "Microsoft.VCLibs.140.00.UWPDesktop"
+$expectedVclibsPublisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+$minimumVclibsVersion = [version]"14.0.24217.0"
+
+function Get-AppxIdentity([string]$Path) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+  $resolvedPath = (Resolve-Path $Path).Path
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($resolvedPath)
+  try {
+    $manifestEntry = $archive.GetEntry("AppxManifest.xml")
+    if (-not $manifestEntry) {
+      throw "$resolvedPath does not contain AppxManifest.xml"
+    }
+    $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+    try {
+      [xml]$manifest = $reader.ReadToEnd()
+    } finally {
+      $reader.Dispose()
+    }
+  } finally {
+    $archive.Dispose()
+  }
+
+  $namespace = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+  $namespace.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+  $identity = $manifest.SelectSingleNode("/f:Package/f:Identity", $namespace)
+  if (-not $identity) {
+    throw "$resolvedPath does not declare a package identity"
+  }
+
+  return [PSCustomObject]@{
+    Name = [string]$identity.Name
+    Publisher = [string]$identity.Publisher
+    Version = [version]$identity.Version
+    Architecture = [string]$identity.ProcessorArchitecture
+  }
+}
 
 function Test-IsAdministrator {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -101,6 +138,21 @@ foreach ($requiredPath in @($certificatePath, $msixPath, $vclibsPath)) {
   }
 }
 
+$vclibsIdentity = Get-AppxIdentity $vclibsPath
+if (
+  $vclibsIdentity.Name -ne $expectedVclibsName -or
+  $vclibsIdentity.Publisher -ne $expectedVclibsPublisher -or
+  $vclibsIdentity.Architecture -ne "x64" -or
+  $vclibsIdentity.Version -lt $minimumVclibsVersion
+) {
+  throw (
+    "The test ZIP contains the wrong Visual C++ framework package. " +
+    "Expected $expectedVclibsName x64 version $minimumVclibsVersion or newer, " +
+    "but found $($vclibsIdentity.Name) $($vclibsIdentity.Version) $($vclibsIdentity.Architecture)."
+  )
+}
+Write-Host "Verified Visual C++ framework: $($vclibsIdentity.Name) $($vclibsIdentity.Version)."
+
 $certificate = Get-BundledCertificate
 $untrustedSignature = Get-AuthenticodeSignature -FilePath $msixPath
 if (-not $untrustedSignature.SignerCertificate) {
@@ -131,18 +183,26 @@ if ($trustedSignature.Status -ne [System.Management.Automation.SignatureStatus]:
 }
 Write-Host "Test package signature is valid and trusted."
 
-Write-Host "Installing Microsoft Visual C++ framework dependency..."
-$installedVclibs = Get-AppxPackage -Name "Microsoft.VCLibs.140.00.UWPDesktop"
-if (-not $installedVclibs) {
-  Add-AppxPackage -Path $vclibsPath -ErrorAction Stop
+$compatibleVclibs = Get-AppxPackage -Name $expectedVclibsName |
+  Where-Object {
+    $_.Architecture -eq "X64" -and
+    [version]$_.Version -ge $minimumVclibsVersion
+  }
+$installParameters = @{
+  Path = $msixPath
+  ErrorAction = "Stop"
+}
+if ($compatibleVclibs) {
+  Write-Host "A compatible Microsoft Visual C++ framework is already installed."
 } else {
-  Write-Host "Microsoft Visual C++ framework is already installed."
+  Write-Host "Microsoft Visual C++ framework will be installed with the test package."
+  $installParameters.DependencyPath = $vclibsPath
 }
 
 Write-Host "Installing the MyBrewFolio Sync Store test package..."
 Get-AppxPackage -Name $identityName | Remove-AppxPackage -ErrorAction SilentlyContinue
 try {
-  Add-AppxPackage -Path $msixPath -DependencyPath $vclibsPath -ErrorAction Stop
+  Add-AppxPackage @installParameters
 } catch {
   Write-AppPackageDiagnostics $_
   throw

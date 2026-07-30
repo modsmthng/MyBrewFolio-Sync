@@ -88,6 +88,13 @@ jobs:
           if ($installScript -notmatch 'Get-AuthenticodeSignature') {
             throw 'The MSIX test installer must verify the package signer before installation'
           }
+          if ($installScript -notmatch 'Microsoft\.VCLibs\.140\.00\.UWPDesktop') {
+            throw 'The MSIX test installer must validate the exact UWPDesktop framework identity'
+          }
+          $bundleScript = Get-Content scripts/create-msix-test-bundle.ps1 -Raw
+          if ($bundleScript -notmatch 'Microsoft\.VCLibs\.140\.00\.UWPDesktop') {
+            throw 'The MSIX test bundle must select the exact UWPDesktop framework identity'
+          }
           if ($uninstallScript -notmatch 'LocalMachine\\TrustedPeople') {
             throw 'The MSIX test uninstaller must remove the machine-wide test certificate'
           }

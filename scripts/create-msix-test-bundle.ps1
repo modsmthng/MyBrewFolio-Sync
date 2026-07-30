@@ -10,8 +10,46 @@ param(
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $bundle = Join-Path $env:RUNNER_TEMP "mybrewfolio-sync-msix-test"
+$expectedVclibsName = "Microsoft.VCLibs.140.00.UWPDesktop"
+$expectedVclibsPublisher = "CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+$minimumVclibsVersion = [version]"14.0.24217.0"
 if (Test-Path $bundle) { Remove-Item -Recurse -Force $bundle }
 New-Item -ItemType Directory -Path $bundle | Out-Null
+
+function Get-AppxIdentity([string]$Path) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
+  $resolvedPath = (Resolve-Path $Path).Path
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($resolvedPath)
+  try {
+    $manifestEntry = $archive.GetEntry("AppxManifest.xml")
+    if (-not $manifestEntry) {
+      throw "$resolvedPath does not contain AppxManifest.xml"
+    }
+    $reader = [System.IO.StreamReader]::new($manifestEntry.Open())
+    try {
+      [xml]$manifest = $reader.ReadToEnd()
+    } finally {
+      $reader.Dispose()
+    }
+  } finally {
+    $archive.Dispose()
+  }
+
+  $namespace = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
+  $namespace.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+  $identity = $manifest.SelectSingleNode("/f:Package/f:Identity", $namespace)
+  if (-not $identity) {
+    throw "$resolvedPath does not declare a package identity"
+  }
+
+  return [PSCustomObject]@{
+    Path = $resolvedPath
+    Name = [string]$identity.Name
+    Publisher = [string]$identity.Publisher
+    Version = [version]$identity.Version
+    Architecture = [string]$identity.ProcessorArchitecture
+  }
+}
 
 $signedMsix = Join-Path $bundle "MyBrewFolio-Sync-Store-Test.msix"
 Copy-Item $Msix $signedMsix
@@ -62,11 +100,32 @@ try {
     "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs.Desktop\*\Appx\Retail\x64\*.appx",
     "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs\*\Appx\Retail\x64\*.appx"
   )
-  $vclibs = Get-ChildItem $vclibsCandidates -ErrorAction SilentlyContinue |
-    Sort-Object FullName -Descending |
+  $discoveredVclibs = Get-ChildItem $vclibsCandidates -File -ErrorAction SilentlyContinue |
+    Sort-Object FullName -Unique |
+    ForEach-Object {
+      try {
+        Get-AppxIdentity $_.FullName
+      } catch {
+        Write-Host "Skipping unreadable framework package $($_.FullName): $($_.Exception.Message)"
+      }
+    }
+  $vclibs = $discoveredVclibs |
+    Where-Object {
+      $_.Name -eq $expectedVclibsName -and
+      $_.Publisher -eq $expectedVclibsPublisher -and
+      $_.Architecture -eq "x64" -and
+      $_.Version -ge $minimumVclibsVersion
+    } |
+    Sort-Object Version -Descending |
     Select-Object -First 1
-  if (-not $vclibs) { throw "The x64 Microsoft VCLibs Desktop framework package was not found" }
-  Copy-Item $vclibs.FullName (Join-Path $bundle "Microsoft.VCLibs.x64.14.00.Desktop.appx")
+  if (-not $vclibs) {
+    $observed = ($discoveredVclibs | ForEach-Object {
+      "$($_.Name) $($_.Version) $($_.Architecture)"
+    }) -join ", "
+    throw "The required $expectedVclibsName x64 framework package was not found. Observed: $observed"
+  }
+  Write-Host "Bundling $($vclibs.Name) $($vclibs.Version) for $($vclibs.Architecture)."
+  Copy-Item $vclibs.Path (Join-Path $bundle "Microsoft.VCLibs.x64.14.00.Desktop.appx")
 
   Copy-Item (Join-Path $root "windows\test-package\Install-TestPackage.ps1") $bundle
   Copy-Item (Join-Path $root "windows\test-package\Uninstall-TestPackage.ps1") $bundle
