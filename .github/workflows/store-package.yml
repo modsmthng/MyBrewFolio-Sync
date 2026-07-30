@@ -1,0 +1,171 @@
+name: Microsoft Store package
+run-name: Microsoft Store package v${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: App version without the leading v
+        required: true
+        default: "0.2.8"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: microsoft-store-package-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: github.repository == 'modsmthng/MyBrewFolio-Sync'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Verify Store package configuration
+        shell: pwsh
+        env:
+          OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+          UPDATER_PUBLIC_KEY: ${{ vars.MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY }}
+          MSIX_IDENTITY_NAME: ${{ vars.MYBREWFOLIO_MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MYBREWFOLIO_MSIX_PUBLISHER }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:REQUESTED_VERSION -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'The version must use MAJOR.MINOR.PATCH without a leading v'
+          }
+          foreach ($requiredValue in @(
+            @{ Name = 'MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID'; Value = $env:OAUTH_CLIENT_ID },
+            @{ Name = 'MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY'; Value = $env:UPDATER_PUBLIC_KEY },
+            @{ Name = 'MYBREWFOLIO_MSIX_IDENTITY_NAME'; Value = $env:MSIX_IDENTITY_NAME },
+            @{ Name = 'MYBREWFOLIO_MSIX_PUBLISHER'; Value = $env:MSIX_PUBLISHER }
+          )) {
+            if ([string]::IsNullOrWhiteSpace($requiredValue.Value)) {
+              throw "Missing repository variable $($requiredValue.Name)"
+            }
+          }
+
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargoVersion = (
+            Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "([^"]+)"' |
+              Select-Object -First 1
+          ).Matches.Groups[1].Value
+          foreach ($actualVersion in @($packageVersion, $tauriVersion, $cargoVersion)) {
+            if ($actualVersion -ne $env:REQUESTED_VERSION) {
+              throw "Requested version $env:REQUESTED_VERSION does not match project version $actualVersion"
+            }
+          }
+
+      - name: Build embedded frontend
+        run: npm run build
+
+      - name: Build and upload private Store package
+        shell: pwsh
+        env:
+          MYBREWFOLIO_SYNC_API_URL: https://mybrewfolio.com
+          MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+          MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY: ${{ vars.MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY }}
+          MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD: 'true'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          MSIX_IDENTITY_NAME: ${{ vars.MYBREWFOLIO_MSIX_IDENTITY_NAME }}
+          MSIX_PUBLISHER: ${{ vars.MYBREWFOLIO_MSIX_PUBLISHER }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = $env:REQUESTED_VERSION.Split('.')
+          $packageVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+
+          cargo build --manifest-path src-tauri/Cargo.toml --release
+          ./scripts/package-msix.ps1 `
+            -IdentityName $env:MSIX_IDENTITY_NAME `
+            -Publisher $env:MSIX_PUBLISHER `
+            -Version $packageVersion `
+            -Executable './src-tauri/target/release/mybrewfolio-sync.exe' `
+            -Output './MyBrewFolio-Sync-Store.msix'
+          ./scripts/create-msix-test-bundle.ps1 `
+            -Msix './MyBrewFolio-Sync-Store.msix' `
+            -IdentityName $env:MSIX_IDENTITY_NAME `
+            -Publisher $env:MSIX_PUBLISHER `
+            -Output './MyBrewFolio-Sync-Store-Test.zip'
+
+          $verificationDirectory = Join-Path $env:RUNNER_TEMP 'store-test-workflow-verification'
+          Expand-Archive `
+            -Path './MyBrewFolio-Sync-Store-Test.zip' `
+            -DestinationPath $verificationDirectory `
+            -Force
+          $requiredFiles = @(
+            'MyBrewFolio-Sync-Store-Test.msix',
+            'MyBrewFolio-Sync-Store-Test.cer',
+            'Microsoft.VCLibs.x64.14.00.Desktop.appx',
+            'Install-TestPackage.ps1',
+            'Uninstall-TestPackage.ps1',
+            'README.txt'
+          )
+          foreach ($relativePath in $requiredFiles) {
+            if (-not (Test-Path (Join-Path $verificationDirectory $relativePath))) {
+              throw "The generated Store test ZIP is missing $relativePath"
+            }
+          }
+
+          $certificate = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+            (Join-Path $verificationDirectory 'MyBrewFolio-Sync-Store-Test.cer')
+          )
+          $signature = Get-AuthenticodeSignature `
+            -FilePath (Join-Path $verificationDirectory 'MyBrewFolio-Sync-Store-Test.msix')
+          if (-not $signature.SignerCertificate) {
+            throw 'The test MSIX does not expose its signing certificate'
+          }
+          if ($signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+            throw 'The test MSIX signer does not match its bundled public certificate'
+          }
+
+          $storeTag = "store-v$env:REQUESTED_VERSION"
+          $storeTitle = "Microsoft Store submission v$env:REQUESTED_VERSION"
+          $isDraft = gh release view $storeTag --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $storeTag `
+              --target $env:GITHUB_SHA `
+              --draft `
+              --title $storeTitle `
+              --notes 'Private Microsoft Store submission package. Never publish this draft release.'
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to create the private Microsoft Store draft release'
+            }
+          } elseif ($isDraft -ne 'true') {
+            throw "$storeTag already exists as a published release. The Microsoft Store package must remain private."
+          }
+
+          gh release upload $storeTag `
+            './MyBrewFolio-Sync-Store.msix' `
+            './MyBrewFolio-Sync-Store-Test.zip' `
+            './docs/microsoft-store-submission.md' `
+            --clobber
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to upload the Microsoft Store submission package'
+          }
+
+          "### Microsoft Store package v$env:REQUESTED_VERSION" >> $env:GITHUB_STEP_SUMMARY
+          "- Private draft: ``$storeTag``" >> $env:GITHUB_STEP_SUMMARY
+          "- Store submission: ``MyBrewFolio-Sync-Store.msix``" >> $env:GITHUB_STEP_SUMMARY
+          "- Local Windows test: ``MyBrewFolio-Sync-Store-Test.zip``" >> $env:GITHUB_STEP_SUMMARY

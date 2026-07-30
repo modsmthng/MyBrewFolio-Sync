@@ -108,7 +108,9 @@ visible in both Light and Dark appearances. Microsoft Store listing artwork is k
   drafts are for Partner Center submission only and must never be published. Each draft contains
   the unsigned Partner Center MSIX and a temporary self-signed test bundle for an exact local
   Windows installation test. Store packaging declares the required Microsoft Visual C++ framework
-  dependency and verifies the executable subsystem, package identity and embedded files.
+  dependency and verifies the executable subsystem, package identity and embedded files. Store
+  packages are rebuilt independently through the manual `Microsoft Store package` workflow, so
+  testing never changes an already published GitHub release.
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 

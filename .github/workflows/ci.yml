@@ -77,6 +77,20 @@ jobs:
           if (-not $dependency) {
             throw 'Microsoft.VCLibs.140.00.UWPDesktop is missing from the Store manifest'
           }
+          $installScript = Get-Content windows/test-package/Install-TestPackage.ps1 -Raw
+          $uninstallScript = Get-Content windows/test-package/Uninstall-TestPackage.ps1 -Raw
+          if ($installScript -match 'CurrentUser\\TrustedPeople') {
+            throw 'The MSIX test installer must not trust certificates for only the current user'
+          }
+          if ($installScript -notmatch 'LocalMachine\\TrustedPeople') {
+            throw 'The MSIX test installer must use Local Computer > Trusted People'
+          }
+          if ($installScript -notmatch 'Get-AuthenticodeSignature') {
+            throw 'The MSIX test installer must verify the package signer before installation'
+          }
+          if ($uninstallScript -notmatch 'LocalMachine\\TrustedPeople') {
+            throw 'The MSIX test uninstaller must remove the machine-wide test certificate'
+          }
 
   sonarqube:
     name: SonarQube Cloud

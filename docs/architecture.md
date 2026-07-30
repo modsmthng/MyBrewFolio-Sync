@@ -70,19 +70,22 @@ The MyBrewFolio Support page links these aliases through GitHub's `releases/late
 while updater-only `.sig` files remain outside the normal installation flow.
 
 Windows has two deliberately separate update channels. The direct GitHub MSI build uses the signed
-MyBrewFolio updater and `latest.json`. When Partner Center identity variables are configured, the
-release workflow additionally builds an MSIX Store-submission package with
-`MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD=true`; that package delegates updates to Microsoft Store.
-The MSIX is uploaded only to a separate `store-vX.Y.Z` draft release. This draft is visible only to
-repository collaborators with push access and must never be published. The normal `vX.Y.Z` release
-therefore contains only public direct-download and updater assets. The MSIX manifest registers
-`mybrewfolio-sync://` so the OAuth return path works in the Store build.
+MyBrewFolio updater and `latest.json`. The manual `Microsoft Store package` workflow builds the
+MSIX with `MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD=true`; that package delegates updates to Microsoft
+Store. A version input must match `package.json`, `tauri.conf.json` and `Cargo.toml`. The workflow is
+limited to 30 minutes and uploads only to a separate `store-vX.Y.Z` draft release. This draft is
+visible only to repository collaborators with push access and must never be published. The normal
+`vX.Y.Z` release therefore contains only public direct-download and updater assets. The MSIX
+manifest registers `mybrewfolio-sync://` so the OAuth return path works in the Store build.
 The Store manifest declares `Microsoft.VCLibs.140.00.UWPDesktop`. Packaging verifies the Visual C++
 dependency, Windows GUI subsystem, package identity and embedded payload before upload. The private
 draft also contains an equivalent self-signed test MSIX, its short-lived public certificate, the
-VCLibs framework and install/removal scripts in a ZIP. Only the unsigned MSIX is submitted to
-Partner Center. Startup diagnostics record app, OS and WebView2 versions and frontend readiness in
-the app data directory without recording tokens, machine addresses or synchronized content.
+VCLibs framework and install/removal scripts in a ZIP. The installer compares the bundled
+certificate with the MSIX signer, requests elevation only to add it temporarily to Local Computer
+→ Trusted People, verifies a valid signature and then registers the package for the original test
+user. The removal script deletes both package and certificate. Only the unsigned MSIX is submitted
+to Partner Center. Startup diagnostics record app, OS and WebView2 versions and frontend readiness
+in the app data directory without recording tokens, machine addresses or synchronized content.
 Support, privacy and account-management links are restricted to a fixed MyBrewFolio URL allowlist
 and open in the operating system browser. Disconnect is local-first after explicit confirmation:
 the app clears local account state even when the server cannot be reached, and then directs the
@@ -96,8 +99,8 @@ Required GitHub repository configuration:
 | Variable | `MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY` |
 | Secret | `TAURI_SIGNING_PRIVATE_KEY` |
 | Secret | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
-| Variable | `MYBREWFOLIO_MSIX_IDENTITY_NAME` (optional) |
-| Variable | `MYBREWFOLIO_MSIX_PUBLISHER` (optional) |
+| Variable | `MYBREWFOLIO_MSIX_IDENTITY_NAME` |
+| Variable | `MYBREWFOLIO_MSIX_PUBLISHER` |
 
 Release signing secrets are unavailable to workflows triggered from forks. Releases remain drafts
 until their installers and signed updater metadata have been reviewed.

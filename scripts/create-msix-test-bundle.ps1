@@ -30,7 +30,6 @@ $certificate = New-SelfSignedCertificate `
 try {
   $certificatePath = Join-Path $bundle "MyBrewFolio-Sync-Store-Test.cer"
   Export-Certificate -Cert $certificate -FilePath $certificatePath | Out-Null
-  Import-Certificate -FilePath $certificatePath -CertStoreLocation "Cert:\CurrentUser\TrustedPeople" | Out-Null
 
   $signTool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
     Sort-Object FullName -Descending |
@@ -51,6 +50,14 @@ try {
     Write-Host "The test MSIX signature was verified successfully."
   }
 
+  $embeddedSignature = Get-AuthenticodeSignature -FilePath $signedMsix
+  if (-not $embeddedSignature.SignerCertificate) {
+    throw "The signed test MSIX does not expose a signing certificate"
+  }
+  if ($embeddedSignature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) {
+    throw "The test MSIX signer does not match the bundled public certificate"
+  }
+
   $vclibsCandidates = @(
     "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs.Desktop\*\Appx\Retail\x64\*.appx",
     "${env:ProgramFiles(x86)}\Microsoft SDKs\Windows Kits\10\ExtensionSDKs\Microsoft.VCLibs\*\Appx\Retail\x64\*.appx"
@@ -69,9 +76,34 @@ try {
   (Get-Content (Join-Path $bundle "Uninstall-TestPackage.ps1") -Raw).Replace("__IDENTITY_NAME__", $IdentityName) |
     Set-Content (Join-Path $bundle "Uninstall-TestPackage.ps1") -Encoding utf8
 
+  $requiredBundleFiles = @(
+    "MyBrewFolio-Sync-Store-Test.msix",
+    "MyBrewFolio-Sync-Store-Test.cer",
+    "Microsoft.VCLibs.x64.14.00.Desktop.appx",
+    "Install-TestPackage.ps1",
+    "Uninstall-TestPackage.ps1",
+    "README.txt"
+  )
+  foreach ($relativePath in $requiredBundleFiles) {
+    if (-not (Test-Path (Join-Path $bundle $relativePath))) {
+      throw "The MSIX test bundle is missing $relativePath"
+    }
+  }
+
   Compress-Archive -Path (Join-Path $bundle "*") -DestinationPath $Output -Force
+
+  $verificationDirectory = Join-Path $env:RUNNER_TEMP "mybrewfolio-sync-msix-test-verification"
+  if (Test-Path $verificationDirectory) {
+    Remove-Item -Recurse -Force $verificationDirectory
+  }
+  Expand-Archive -Path $Output -DestinationPath $verificationDirectory -Force
+  foreach ($relativePath in $requiredBundleFiles) {
+    if (-not (Test-Path (Join-Path $verificationDirectory $relativePath))) {
+      throw "The generated MSIX test ZIP is missing $relativePath"
+    }
+  }
+
   Write-Host "Created locally installable MSIX test bundle: $Output"
 } finally {
   Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
-  Remove-Item "Cert:\CurrentUser\TrustedPeople\$($certificate.Thumbprint)" -Force -ErrorAction SilentlyContinue
 }

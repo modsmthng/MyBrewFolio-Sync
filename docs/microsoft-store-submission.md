@@ -22,10 +22,15 @@ Copy this short instruction into Partner Center with the certification notes:
 
 1. Download `MyBrewFolio-Sync-Store-Test.zip` from the private `store-v0.2.8` draft.
 2. Use a Windows 11 account without a previous MyBrewFolio Sync MSI installation.
-3. Follow the included `README.txt` and run `Install-TestPackage.ps1`.
-4. Start the application online and offline. Its embedded interface must render in both cases.
-5. Test OAuth return, tray actions, window reopening and a manual synchronization.
-6. If an Edge WebView2 error page appears, stop the submission and collect `startup-diagnostics.log`.
-7. Run `Uninstall-TestPackage.ps1` after the test.
+3. Extract the ZIP locally, open a normal PowerShell window and run `Install-TestPackage.ps1`.
+4. Accept the UAC prompt that temporarily trusts the package certificate under Local Computer →
+   Trusted People. Do not install the certificate manually.
+5. Confirm that the script reports a valid signature and successful package registration.
+6. Start the application online and offline. Its embedded interface must render in both cases.
+7. Test OAuth return, tray actions, window reopening and a manual synchronization.
+8. If an Edge WebView2 error page appears, stop the submission and collect
+   `startup-diagnostics.log`.
+9. Run `Uninstall-TestPackage.ps1`, accept its UAC prompt and confirm that package and certificate
+   were removed.
 
 The unsigned `MyBrewFolio-Sync-Store.msix` is the only file submitted to Partner Center. The test ZIP and certificate are never submitted or published.
