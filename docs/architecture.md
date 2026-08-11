@@ -37,13 +37,15 @@ Shots and profiles are one-way. Deleting a synchronized object in MyBrewFolio su
 automatic reimport but does not modify the GaggiMate.
 
 Two-way Notes synchronization is off by default and is bound to one active writer installation.
-Activation requires a complete, finalized machine-Notes backup. Differences are shown before the
+Activation requires a complete, finalized machine-Notes backup, shown as **First Backup** in the
+interface. Differences are shown before the
 first write and existing MyBrewFolio Notes are preselected. The server issues short-lived,
 idempotent operations containing the expected machine hash. The app reads and compares the current
 machine state before `req:history:notes:save`, reads it back after the write, and acknowledges only
 the verified target hash. A changed precondition becomes a conflict rather than an overwrite.
-Before later outbound batches or a restore, the app replaces the latest safety backup; the protected
-activation backup remains separate. Disabling the feature invalidates outstanding server leases.
+Before later outbound batches or a restore, the app replaces the backup shown as **Latest Backup**;
+the protected first backup remains separate. Disabling the feature invalidates outstanding server
+leases.
 
 Before the first import, the source stores whether exact GaggiMate-ID/recording-time matches reuse
 existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.
@@ -107,6 +109,11 @@ Support, privacy and account-management links are restricted to a fixed MyBrewFo
 and open in the operating system browser. Disconnect is local-first after explicit confirmation:
 the app clears local account state even when the server cannot be reached, and then directs the
 user to Account → Sync when server-side revocation still needs to be completed.
+
+The desktop interface keeps connectivity separate from activity: its header reports only connected
+or not connected, while one fixed status line carries operations, short-lived success messages and
+persistent failures. Shot and Notes conflicts are resolved from the affected Brew in the hosted
+Analyzer; profile conflicts and suppressed objects remain under Account → Sync → Not synchronized.
 
 Required GitHub repository configuration:
 

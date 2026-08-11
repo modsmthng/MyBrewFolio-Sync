@@ -13,23 +13,24 @@ the companion never selects profiles or edits/deletes shots on the machine.
 
 The application then starts with the computer, checks for new shots every 30 seconds, compares
 profiles every five minutes, and catches up after either the computer, machine, or internet was
-offline. Visible Sync actions and background synchronization show a stable activity indicator so
-the user can see when work is still in progress.
+offline. One fixed status line reports the current operation and retains actionable failures without
+replacing the separate connection indicator.
 
 Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
 be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
 machine content and safe duplicate merges, then apply only the user's confirmed choices.
 After applying a resync, Sync refreshes the authoritative cloud state before rebuilding its local
 scan so restored items are imported without disconnecting the account.
-When suppressed items need attention, the app directs users first to MyBrewFolio.com. Under
-**Account → MyBrewFolio Sync**, every suppressed import can be allowed again with one confirmed
-bulk action.
+When items were not synchronized, the app directs users first to MyBrewFolio.com. Under
+**Account → MyBrewFolio Sync → Not synchronized**, every suppressed import can be allowed again
+with one confirmed bulk action. Shot and Notes conflicts are reviewed in the affected Brew; profile
+conflicts remain on the Not synchronized page.
 
 Optional **Two-way Notes Sync** is limited to exact, already mapped GaggiMate shots. Activation
-creates the protected activation backup first. If existing MyBrewFolio and GaggiMate Notes differ,
+creates the protected **First Backup** first. If existing MyBrewFolio and GaggiMate Notes differ,
 MyBrewFolio is preselected and every choice remains editable before any machine write. The app
-rechecks the machine copy immediately before writing, verifies it afterwards, and creates a latest
-safety backup before later outgoing write batches. Both backup slots can be downloaded on the
+rechecks the machine copy immediately before writing, verifies it afterwards, and creates a
+**Latest Backup** before later outgoing write batches. Both backup slots can be downloaded on the
 MyBrewFolio Account page and restored from the desktop app.
 
 ## Code quality

@@ -1156,7 +1156,7 @@ impl SyncEngine {
             let text = if status.syncing {
                 "Syncing…"
             } else if status.last_error.is_some() {
-                "Sync needs attention"
+                "Items not synchronized"
             } else if status.connected {
                 "MyBrewFolio connected"
             } else {

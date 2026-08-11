@@ -47,6 +47,10 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .status-error { color: #9d3038; background: #f4dfe0; }
 .status-working { color: #275e80; background: #dce9f0; }
 .status-idle { color: #65768a; background: #dde3e8; }
+.central-status { position: fixed; z-index: 60; top: 14px; left: 50%; width: min(680px, calc(100% - 28px)); transform: translateX(-50%); padding: 11px 16px; border: 1px solid rgba(50,107,142,.32); border-radius: 16px; color: #275e80; background: rgba(236,244,248,.96); box-shadow: 0 12px 32px rgba(26,45,62,.18); font-size: 13px; text-align: center; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.central-status-error { color: #8d343a; border-color: rgba(157,48,56,.35); background: rgba(249,231,232,.97); }
+.central-status-success { color: #1f684d; border-color: rgba(49,115,90,.35); background: rgba(229,242,235,.97); }
+.central-status-info, .central-status-working { color: #275e80; }
 .card { border: 1px solid rgba(154,171,187,.48); border-radius: 24px; background: rgba(255,255,255,.62); box-shadow: 0 18px 45px rgba(61,79,96,.08); }
 .overview { margin-top: 36px; padding: 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .overview div { display: grid; gap: 5px; }
@@ -65,6 +69,8 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .alert p, .attention p { margin: 5px 0 0; font-size: 13px; }
 .attention, .settings, .first-sync, .issue-details, .resync-preview, .account-action, .modal-card { margin-bottom: 14px; padding: 20px; }
 .settings h3, .first-sync h2, .resync-preview h2 { margin-top: 0; }
+.settings-title-with-info, .intro-with-info, .modal-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.settings-title-with-info h3, .intro-with-info p, .modal-title-row h2 { margin: 0; }
 .section-title { margin: 30px 0 12px; }
 .first-sync { border-color: rgba(50,107,142,.55); }
 .issue-details summary { cursor: pointer; }
@@ -103,9 +109,14 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .action-with-info { display: flex; align-items: center; gap: 8px; }
 .action-with-info .info-button { margin-top: 14px; }
 .info-button { display: grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; margin-top: 18px; padding: 0; border: 1px solid #aebdca; border-radius: 50%; color: #326b8e; background: rgba(255,255,255,.5); }
+.info-button-inline { margin-top: 0; }
 .info-button:hover { background: rgba(50,107,142,.1); }
 .info-button:focus-visible { outline: 3px solid rgba(50,107,142,.24); outline-offset: 2px; }
 .info-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+.scroll-confirm-button { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 38px; padding: 0; border: 0; border-radius: 50%; color: white; background: #326b8e; box-shadow: 0 10px 24px rgba(50,107,142,.28); }
+.scroll-confirm-button:hover { background: #275b79; }
+.scroll-confirm-button:focus-visible { outline: 3px solid rgba(50,107,142,.3); outline-offset: 3px; }
+.scroll-confirm-button svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .setting-info { margin: 10px 0 0 36px; max-width: 560px; font-size: 13px; line-height: 1.55; }
 .action-info { margin-left: 0; }
 .update-available { width: fit-content; margin: 16px 0 0; padding: 8px 12px; border: 1px solid rgba(49,115,90,.35); border-radius: 999px; color: #1f684d; background: rgba(220,235,228,.75); font-size: 13px; font-weight: 800; }
@@ -131,6 +142,9 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .issue-details li { background: rgba(211,91,97,.12); }
   .issue-details li span { color: #9fb0c2; }
   .sync-activity { color: #b9d8eb; border-color: rgba(115,171,204,.38); background: rgba(39,94,128,.22); }
+  .central-status { color: #b9d8eb; border-color: rgba(115,171,204,.45); background: rgba(31,44,56,.97); }
+  .central-status-error { color: #f0a7aa; border-color: rgba(211,91,97,.5); background: rgba(63,34,39,.97); }
+  .central-status-success { color: #a9dbc6; border-color: rgba(91,167,137,.5); background: rgba(30,57,48,.97); }
   .disconnect-confirm { border-color: rgba(211,91,97,.38); background: rgba(141,52,58,.12); }
 }
 @media (prefers-reduced-motion: reduce) {
