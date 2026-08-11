@@ -40,6 +40,19 @@ try {
   if (nullNotes !== null) throw new Error('Null notes fixture is invalid');
   const emptyNotes = await readNotes('999');
   if (emptyNotes !== null) throw new Error('Missing notes fixture is invalid');
+  await new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    socket.addEventListener('open', () => socket.send(JSON.stringify({
+      tp: 'req:history:notes:save', rid: 'save-notes', id: '1', notes: { rating: 5, notes: 'Written by Sync' }
+    })));
+    socket.addEventListener('message', event => {
+      const value = JSON.parse(String(event.data));
+      if (value.rid === 'save-notes') { socket.close(); resolve(); }
+    });
+    socket.addEventListener('error', reject);
+  });
+  const writtenNotes = await readNotes('1');
+  if (writtenNotes.notes !== 'Written by Sync') throw new Error('Notes save fixture is invalid');
 
   const profile = await new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);

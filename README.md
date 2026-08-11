@@ -1,8 +1,9 @@
 # MyBrewFolio Sync
 
 MyBrewFolio Sync is the open-source desktop companion for copying shots, profiles, and notes from
-one local GaggiMate to a private MyBrewFolio library. It is intentionally one-way: the companion
-never selects, edits, or deletes anything on the machine.
+one local GaggiMate to a private MyBrewFolio library. Shots and profiles are always one-way. Users
+may separately enable two-way Notes synchronization after a full machine-Notes backup and review;
+the companion never selects profiles or edits/deletes shots on the machine.
 
 ## User flow
 
@@ -23,6 +24,13 @@ scan so restored items are imported without disconnecting the account.
 When suppressed items need attention, the app directs users first to MyBrewFolio.com. Under
 **Account → MyBrewFolio Sync**, every suppressed import can be allowed again with one confirmed
 bulk action.
+
+Optional **Two-way Notes Sync** is limited to exact, already mapped GaggiMate shots. Activation
+creates the protected activation backup first. If existing MyBrewFolio and GaggiMate Notes differ,
+MyBrewFolio is preselected and every choice remains editable before any machine write. The app
+rechecks the machine copy immediately before writing, verifies it afterwards, and creates a latest
+safety backup before later outgoing write batches. Both backup slots can be downloaded on the
+MyBrewFolio Account page and restored from the desktop app.
 
 ## Code quality
 https://sonarcloud.io/project/overview?id=modsmthng_MyBrewFolio-Sync

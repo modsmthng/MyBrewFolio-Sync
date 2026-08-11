@@ -223,6 +223,23 @@ impl GaggiMateClient {
         Ok(Some(notes))
     }
 
+    pub async fn save_notes(&self, id: u32, notes: &Value) -> Result<Value, LocalError> {
+        let object = notes.as_object().ok_or(LocalError::InvalidData)?;
+        if serde_json::to_vec(notes)
+            .map_err(|_| LocalError::InvalidData)?
+            .len()
+            > 64 * 1024
+        {
+            return Err(LocalError::InvalidData);
+        }
+        self.websocket_request(
+            "req:history:notes:save",
+            json!({ "id": id.to_string(), "notes": object }),
+        )
+        .await?;
+        Ok(self.notes(id).await?.unwrap_or_else(|| json!({})))
+    }
+
     async fn websocket_request(
         &self,
         request_type: &str,

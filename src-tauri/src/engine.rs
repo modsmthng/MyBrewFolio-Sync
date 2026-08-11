@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::{
     cloud::{CloudClient, CloudError, PendingOAuth},
     local::{normalize_host, GaggiMateClient, LocalError},
-    model::{AppStatus, SyncObject},
+    model::{AppStatus, NoteBackupSummary, SyncObject},
     store::{AppStore, StoreError},
 };
 
@@ -170,6 +170,8 @@ impl SyncEngine {
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".to_string());
         let connected = store.tokens()?.is_some() && store.setting("device_id")?.is_some();
+        let device_id = store.setting("device_id")?;
+        let notes_sync_intro_seen = store.setting("notes_sync_intro_seen")?.as_deref() == Some("1");
         let issues = store.failures().unwrap_or_default();
         Ok(Self {
             store,
@@ -189,6 +191,12 @@ impl SyncEngine {
                 suppressed: 0,
                 initial_sync_configured: false,
                 duplicate_policy: "reuse_matching".into(),
+                notes_sync_status: "one_way".into(),
+                notes_sync_target_device_id: None,
+                notes_sync_writer_device_id: None,
+                this_device_id: device_id,
+                notes_sync_intro_seen,
+                note_backups: Vec::new(),
                 issues,
             }),
             sync_lock: Mutex::new(()),
@@ -226,6 +234,219 @@ impl SyncEngine {
     pub async fn retry_failures(&self) -> Result<(), EngineError> {
         self.store.retry_failures()?;
         Ok(())
+    }
+
+    pub async fn dismiss_notes_sync_intro(&self) -> Result<(), EngineError> {
+        self.store.set_setting("notes_sync_intro_seen", "1")?;
+        self.status.write().await.notes_sync_intro_seen = true;
+        Ok(())
+    }
+
+    fn device_id(&self) -> Result<String, EngineError> {
+        self.store
+            .setting("device_id")?
+            .ok_or_else(|| CloudError::Revoked.into())
+    }
+
+    fn local_client(&self) -> Result<GaggiMateClient, EngineError> {
+        let host = self
+            .store
+            .setting("machine_host")?
+            .unwrap_or_else(|| "gaggimate.local".into());
+        Ok(GaggiMateClient::new(&host)?)
+    }
+
+    async fn create_notes_backup(&self, slot: &str) -> Result<String, EngineError> {
+        let device_id = self.device_id()?;
+        let local = self.local_client()?;
+        let started = self.cloud.begin_notes_backup(&device_id, slot).await?;
+        let backup_id = started
+            .get("backup")
+            .and_then(|backup| backup.get("id"))
+            .and_then(Value::as_str)
+            .ok_or(CloudError::Rejected)?
+            .to_string();
+        let mut items = Vec::new();
+        for entry in local.shot_index().await? {
+            let notes = local
+                .notes(entry.id)
+                .await?
+                .unwrap_or_else(|| serde_json::json!({}));
+            items.push(serde_json::json!({
+                "sourceKey": format!("{}:{}", entry.id, entry.timestamp),
+                "machineShotId": entry.id.to_string(),
+                "shotTimestamp": entry.timestamp,
+                "notesHash": hash_value(&notes),
+                "notes": notes,
+            }));
+        }
+        for chunk in items.chunks(25) {
+            self.cloud
+                .add_notes_backup_items(&device_id, &backup_id, chunk)
+                .await?;
+        }
+        let inventory_hash = hash_value(&Value::Array(items));
+        self.cloud
+            .finalize_notes_backup(&device_id, &backup_id, &inventory_hash)
+            .await?;
+        Ok(backup_id)
+    }
+
+    pub async fn begin_two_way_notes_activation(&self) -> Result<Value, EngineError> {
+        let device_id = self.device_id()?;
+        let status = self.status.read().await.clone();
+        if status.notes_sync_status == "one_way" {
+            self.cloud.request_two_way_notes(&device_id).await?;
+        } else if status.notes_sync_status == "two_way" {
+            return Err(CloudError::Rejected.into());
+        } else if status.notes_sync_target_device_id.as_deref() != Some(device_id.as_str()) {
+            return Err(CloudError::Rejected.into());
+        }
+        self.dismiss_notes_sync_intro().await?;
+        let backup_id = self.create_notes_backup("activation").await?;
+        let mut preview = self
+            .cloud
+            .notes_activation_preview(&device_id, &backup_id)
+            .await?;
+        if let Some(object) = preview.as_object_mut() {
+            object.insert("backupId".into(), Value::String(backup_id));
+        }
+        Ok(preview)
+    }
+
+    pub async fn activate_two_way_notes(
+        &self,
+        backup_id: &str,
+        decisions: Value,
+    ) -> Result<Value, EngineError> {
+        let device_id = self.device_id()?;
+        let result = self
+            .cloud
+            .activate_two_way_notes(&device_id, backup_id, decisions)
+            .await?;
+        let state = self.cloud.state(&device_id).await?;
+        self.store.set_setting("cloud_state", &state.to_string())?;
+        self.update_from_cloud_state(&state).await;
+        Ok(result)
+    }
+
+    pub async fn disable_two_way_notes(&self) -> Result<(), EngineError> {
+        let device_id = self.device_id()?;
+        self.cloud.disable_two_way_notes(&device_id).await?;
+        let state = self.cloud.state(&device_id).await?;
+        self.store.set_setting("cloud_state", &state.to_string())?;
+        self.update_from_cloud_state(&state).await;
+        Ok(())
+    }
+
+    pub async fn create_latest_notes_backup(&self) -> Result<String, EngineError> {
+        let backup_id = self.create_notes_backup("latest").await?;
+        let device_id = self.device_id()?;
+        let state = self.cloud.state(&device_id).await?;
+        self.store.set_setting("cloud_state", &state.to_string())?;
+        self.update_from_cloud_state(&state).await;
+        Ok(backup_id)
+    }
+
+    pub async fn preview_notes_restore(&self, backup_id: &str) -> Result<Value, EngineError> {
+        let device_id = self.device_id()?;
+        let local = self.local_client()?;
+        let index: HashSet<String> = local
+            .shot_index()
+            .await?
+            .into_iter()
+            .map(|entry| format!("{}:{}", entry.id, entry.timestamp))
+            .collect();
+        let mut backup = self.cloud.notes_backup_items(&device_id, backup_id).await?;
+        if let Some(items) = backup.get_mut("items").and_then(Value::as_array_mut) {
+            for item in items {
+                let source_key = item
+                    .get("source_key")
+                    .or_else(|| item.get("sourceKey"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(object) = item.as_object_mut() {
+                    object.insert("available".into(), Value::Bool(index.contains(&source_key)));
+                }
+            }
+        }
+        Ok(backup)
+    }
+
+    pub async fn restore_notes_backup(
+        &self,
+        backup_id: &str,
+        source_keys: &[String],
+    ) -> Result<Value, EngineError> {
+        let device_id = self.device_id()?;
+        self.create_notes_backup("latest").await?;
+        let local = self.local_client()?;
+        let index: HashSet<String> = local
+            .shot_index()
+            .await?
+            .into_iter()
+            .map(|entry| format!("{}:{}", entry.id, entry.timestamp))
+            .collect();
+        let backup = self.cloud.notes_backup_items(&device_id, backup_id).await?;
+        let requested: HashSet<&str> = source_keys.iter().map(String::as_str).collect();
+        let mut verified = Vec::new();
+        let mut skipped = 0;
+        for item in backup
+            .get("items")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(source_key) = item
+                .get("source_key")
+                .or_else(|| item.get("sourceKey"))
+                .and_then(Value::as_str)
+            else {
+                continue;
+            };
+            if !requested.is_empty() && !requested.contains(source_key) {
+                continue;
+            }
+            if !index.contains(source_key) {
+                skipped += 1;
+                continue;
+            }
+            let Some(id) = source_key
+                .split(':')
+                .next()
+                .and_then(|value| value.parse::<u32>().ok())
+            else {
+                skipped += 1;
+                continue;
+            };
+            let notes = item
+                .get("notes_data")
+                .or_else(|| item.get("notes"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            let actual = local.save_notes(id, &notes).await?;
+            let actual_hash = hash_value(&actual);
+            let expected_hash = item
+                .get("notes_hash")
+                .or_else(|| item.get("notesHash"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if actual_hash == expected_hash {
+                verified.push(
+                    serde_json::json!({ "sourceKey": source_key, "verifiedHash": actual_hash }),
+                );
+            } else {
+                skipped += 1;
+            }
+        }
+        let applied = self
+            .cloud
+            .apply_notes_restore_results(&device_id, backup_id, Value::Array(verified))
+            .await?;
+        Ok(
+            serde_json::json!({ "applied": applied.get("applied").and_then(Value::as_u64).unwrap_or(0), "skipped": skipped }),
+        )
     }
 
     pub async fn resync_preview(&self) -> Result<Value, EngineError> {
@@ -303,6 +524,7 @@ impl SyncEngine {
         self.store.set_setting("source_id", &device.source_id)?;
         let mut status = self.status.write().await;
         status.connected = true;
+        status.this_device_id = Some(device.id);
         status.last_error = None;
         Ok(())
     }
@@ -360,6 +582,61 @@ impl SyncEngine {
             .and_then(Value::as_str)
             .unwrap_or("reuse_matching")
             .to_string();
+        status.notes_sync_status = source
+            .get("notes_sync_status")
+            .or_else(|| source.get("notesSyncStatus"))
+            .and_then(Value::as_str)
+            .unwrap_or("one_way")
+            .to_string();
+        status.notes_sync_target_device_id = source
+            .get("notes_sync_target_device_id")
+            .or_else(|| source.get("notesSyncTargetDeviceId"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        status.notes_sync_writer_device_id = source
+            .get("notes_sync_writer_device_id")
+            .or_else(|| source.get("notesSyncWriterDeviceId"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        status.this_device_id = self.store.setting("device_id").ok().flatten();
+        status.notes_sync_intro_seen = self
+            .store
+            .setting("notes_sync_intro_seen")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1");
+        status.note_backups = value
+            .get("noteBackups")
+            .or_else(|| value.get("note_backups"))
+            .and_then(Value::as_array)
+            .map(|backups| {
+                backups
+                    .iter()
+                    .filter_map(|backup| {
+                        Some(NoteBackupSummary {
+                            id: backup.get("id")?.as_str()?.to_string(),
+                            slot: backup.get("slot")?.as_str()?.to_string(),
+                            item_count: backup
+                                .get("item_count")
+                                .or_else(|| backup.get("itemCount"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0) as usize,
+                            created_at: backup
+                                .get("created_at")
+                                .or_else(|| backup.get("createdAt"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            finalized_at: backup
+                                .get("finalized_at")
+                                .or_else(|| backup.get("finalizedAt"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         status.issues = self.store.failures().unwrap_or_default();
         status.last_sync_at = source
             .get("last_sync_at")
@@ -597,6 +874,103 @@ impl SyncEngine {
         Ok(invalid)
     }
 
+    async fn process_outbound_notes(
+        &self,
+        local: &GaggiMateClient,
+        device_id: &str,
+    ) -> Result<(), EngineError> {
+        let mut claim = self.cloud.claim_outbound_notes(device_id).await?;
+        if claim.get("status").and_then(Value::as_str) == Some("backup_required") {
+            self.create_notes_backup("latest").await?;
+            claim = self.cloud.claim_outbound_notes(device_id).await?;
+        }
+        for operation in claim
+            .get("operations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let operation_id = operation
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?;
+            let lease_token = operation
+                .get("leaseToken")
+                .or_else(|| operation.get("lease_token"))
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?;
+            let source_key = operation
+                .get("sourceKey")
+                .or_else(|| operation.get("source_key"))
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?;
+            let machine_id = source_key
+                .split(':')
+                .next()
+                .and_then(|value| value.parse::<u32>().ok())
+                .ok_or(CloudError::Rejected)?;
+            let current = local
+                .notes(machine_id)
+                .await?
+                .unwrap_or_else(|| serde_json::json!({}));
+            let current_hash = hash_value(&current);
+            let base_hash = operation
+                .get("baseSourceHash")
+                .or_else(|| operation.get("base_source_hash"))
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?;
+            if current_hash != base_hash {
+                self.cloud
+                    .complete_outbound_note(
+                        device_id,
+                        operation_id,
+                        serde_json::json!({
+                            "leaseToken": lease_token,
+                            "status": "conflict",
+                            "actualHash": current_hash,
+                            "actualNotes": current,
+                        }),
+                    )
+                    .await?;
+                continue;
+            }
+            let desired = operation
+                .get("desiredNotes")
+                .or_else(|| operation.get("desired_data"))
+                .cloned()
+                .ok_or(CloudError::Rejected)?;
+            match local.save_notes(machine_id, &desired).await {
+                Ok(actual) => {
+                    self.cloud
+                        .complete_outbound_note(
+                            device_id,
+                            operation_id,
+                            serde_json::json!({
+                                "leaseToken": lease_token,
+                                "status": "applied",
+                                "actualHash": hash_value(&actual),
+                            }),
+                        )
+                        .await?;
+                }
+                Err(error) => {
+                    self.cloud
+                        .complete_outbound_note(
+                            device_id,
+                            operation_id,
+                            serde_json::json!({
+                                "leaseToken": lease_token,
+                                "status": "failed",
+                                "error": error.to_string(),
+                            }),
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn sync_once(&self) -> Result<(), EngineError> {
         let guard = self.sync_lock.try_lock().map_err(|_| EngineError::Busy)?;
         let device_id = self
@@ -648,6 +1022,7 @@ impl SyncEngine {
                 return Err(CloudError::Unreachable.into());
             }
             let invalid = self.flush_queue(&device_id).await?;
+            self.process_outbound_notes(&local, &device_id).await?;
             let synchronized_at = api_timestamp(Utc::now());
             let warning_code =
                 (!skipped.is_empty() || invalid > 0).then_some("LOCAL_ITEMS_SKIPPED");
@@ -696,6 +1071,13 @@ impl SyncEngine {
                     suppressed: 0,
                     initial_sync_configured: false,
                     duplicate_policy: "reuse_matching".into(),
+                    notes_sync_status: "one_way".into(),
+                    notes_sync_target_device_id: None,
+                    notes_sync_writer_device_id: None,
+                    this_device_id: None,
+                    notes_sync_intro_seen: self.store.setting("notes_sync_intro_seen")?.as_deref()
+                        == Some("1"),
+                    note_backups: Vec::new(),
                     issues: Vec::new(),
                 };
                 drop(guard);
@@ -753,6 +1135,13 @@ impl SyncEngine {
             suppressed: 0,
             initial_sync_configured: false,
             duplicate_policy: "reuse_matching".into(),
+            notes_sync_status: "one_way".into(),
+            notes_sync_target_device_id: None,
+            notes_sync_writer_device_id: None,
+            this_device_id: None,
+            notes_sync_intro_seen: self.store.setting("notes_sync_intro_seen")?.as_deref()
+                == Some("1"),
+            note_backups: Vec::new(),
             issues: Vec::new(),
         };
         Ok(serde_json::json!({

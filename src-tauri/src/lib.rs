@@ -200,6 +200,99 @@ async fn retry_failed_items(
 }
 
 #[tauri::command]
+async fn dismiss_notes_sync_intro(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<(), String> {
+    engine
+        .dismiss_notes_sync_intro()
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn begin_two_way_notes_activation(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<serde_json::Value, String> {
+    let result = engine
+        .begin_two_way_notes_activation()
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn activate_two_way_notes(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+    backup_id: String,
+    decisions: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let result = engine
+        .activate_two_way_notes(&backup_id, decisions)
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn disable_two_way_notes(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<(), String> {
+    engine
+        .disable_two_way_notes()
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+async fn create_latest_notes_backup(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+) -> Result<String, String> {
+    let result = engine
+        .create_latest_notes_backup()
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn preview_notes_restore(
+    engine: State<'_, Arc<SyncEngine>>,
+    backup_id: String,
+) -> Result<serde_json::Value, String> {
+    engine
+        .preview_notes_restore(&backup_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn restore_notes_backup(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+    backup_id: String,
+    source_keys: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let result = engine
+        .restore_notes_backup(&backup_id, &source_keys)
+        .await
+        .map_err(|error| error.to_string())?;
+    engine.emit_status(&app).await;
+    Ok(result)
+}
+
+#[tauri::command]
 async fn preview_complete_resync(
     engine: State<'_, Arc<SyncEngine>>,
 ) -> Result<serde_json::Value, String> {
@@ -496,6 +589,13 @@ pub fn run() {
             sync_now,
             configure_sync,
             retry_failed_items,
+            dismiss_notes_sync_intro,
+            begin_two_way_notes_activation,
+            activate_two_way_notes,
+            disable_two_way_notes,
+            create_latest_notes_backup,
+            preview_notes_restore,
+            restore_notes_backup,
             preview_complete_resync,
             apply_complete_resync,
             disconnect_account,

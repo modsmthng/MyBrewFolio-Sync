@@ -19,7 +19,23 @@ pub struct AppStatus {
     pub suppressed: usize,
     pub initial_sync_configured: bool,
     pub duplicate_policy: String,
+    pub notes_sync_status: String,
+    pub notes_sync_target_device_id: Option<String>,
+    pub notes_sync_writer_device_id: Option<String>,
+    pub this_device_id: Option<String>,
+    pub notes_sync_intro_seen: bool,
+    pub note_backups: Vec<NoteBackupSummary>,
     pub issues: Vec<SyncIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteBackupSummary {
+    pub id: String,
+    pub slot: String,
+    pub item_count: usize,
+    pub created_at: Option<String>,
+    pub finalized_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -299,6 +299,183 @@ impl CloudClient {
         response.json().await.map_err(|_| CloudError::Rejected)
     }
 
+    async fn device_get_json(&self, path: &str, device_id: &str) -> Result<Value, CloudError> {
+        let response = self
+            .authorized(reqwest::Method::GET, path)
+            .await?
+            .header("X-MyBrewFolio-Sync-Device", device_id)
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(CloudError::Revoked);
+        }
+        if !response.status().is_success() {
+            return Err(CloudError::Rejected);
+        }
+        response.json().await.map_err(|_| CloudError::Rejected)
+    }
+
+    async fn device_empty(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        device_id: &str,
+    ) -> Result<(), CloudError> {
+        let response = self
+            .authorized(method, path)
+            .await?
+            .header("X-MyBrewFolio-Sync-Device", device_id)
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(CloudError::Revoked);
+        }
+        if !response.status().is_success() {
+            return Err(CloudError::Rejected);
+        }
+        Ok(())
+    }
+
+    pub async fn request_two_way_notes(&self, device_id: &str) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/notes/two-way/request",
+            device_id,
+            json!({}),
+        )
+        .await
+    }
+
+    pub async fn disable_two_way_notes(&self, device_id: &str) -> Result<(), CloudError> {
+        self.device_empty(reqwest::Method::DELETE, "/v1/sync/notes/two-way", device_id)
+            .await
+    }
+
+    pub async fn begin_notes_backup(
+        &self,
+        device_id: &str,
+        slot: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/notes/backups",
+            device_id,
+            json!({ "slot": slot }),
+        )
+        .await
+    }
+
+    pub async fn add_notes_backup_items(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+        items: &[Value],
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            &format!("/v1/sync/notes/backups/{backup_id}/items"),
+            device_id,
+            json!({ "items": items }),
+        )
+        .await
+    }
+
+    pub async fn finalize_notes_backup(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+        inventory_hash: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            &format!("/v1/sync/notes/backups/{backup_id}/finalize"),
+            device_id,
+            json!({ "inventoryHash": inventory_hash }),
+        )
+        .await
+    }
+
+    pub async fn notes_activation_preview(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_get_json(
+            &format!("/v1/sync/notes/activation-preview/{backup_id}"),
+            device_id,
+        )
+        .await
+    }
+
+    pub async fn activate_two_way_notes(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+        decisions: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/notes/two-way/activate",
+            device_id,
+            json!({ "backupId": backup_id, "decisions": decisions }),
+        )
+        .await
+    }
+
+    pub async fn claim_outbound_notes(&self, device_id: &str) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/notes/outbound/claim",
+            device_id,
+            json!({}),
+        )
+        .await
+    }
+
+    pub async fn complete_outbound_note(
+        &self,
+        device_id: &str,
+        operation_id: &str,
+        result: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            &format!("/v1/sync/notes/outbound/{operation_id}/result"),
+            device_id,
+            result,
+        )
+        .await
+    }
+
+    pub async fn notes_backup_items(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_get_json(
+            &format!("/v1/sync/notes/backups/{backup_id}/items"),
+            device_id,
+        )
+        .await
+    }
+
+    pub async fn apply_notes_restore_results(
+        &self,
+        device_id: &str,
+        backup_id: &str,
+        items: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            &format!("/v1/sync/notes/backups/{backup_id}/restore-results"),
+            device_id,
+            json!({ "items": items }),
+        )
+        .await
+    }
+
     pub async fn save_settings(
         &self,
         device_id: &str,

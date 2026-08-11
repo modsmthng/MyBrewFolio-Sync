@@ -88,6 +88,7 @@ const server = http.createServer((request, response) => {
 });
 
 const websocket = new WebSocketServer({ server, path: '/ws' });
+const savedNotes = new Map([['1', fixture.notes], ['2', null]]);
 websocket.on('connection', socket => {
   socket.on('message', bytes => {
     let request;
@@ -113,26 +114,23 @@ websocket.on('connection', socket => {
       return;
     }
     if (request.tp === 'req:history:notes:get') {
-      if (request.id === '2') {
+      if (savedNotes.has(request.id)) {
         socket.send(JSON.stringify({
           tp: 'res:history:notes:get',
           rid: request.rid,
-          notes: null
+          notes: savedNotes.get(request.id)
         }));
         return;
       }
-      if (request.id !== '1') {
-        socket.send(JSON.stringify({
-          tp: 'res:error',
-          rid: request.rid,
-          error: 'No notes found'
-        }));
-        return;
-      }
+      socket.send(JSON.stringify({ tp: 'res:error', rid: request.rid, error: 'No notes found' }));
+      return;
+    }
+    if (request.tp === 'req:history:notes:save' && request.notes && typeof request.notes === 'object') {
+      savedNotes.set(String(request.id), request.notes);
       socket.send(JSON.stringify({
-        tp: 'res:history:notes:get',
+        tp: 'res:history:notes:save',
         rid: request.rid,
-        notes: fixture.notes
+        msg: 'Ok'
       }));
       return;
     }

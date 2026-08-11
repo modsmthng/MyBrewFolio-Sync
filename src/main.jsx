@@ -23,6 +23,12 @@ const initialStatus = {
   suppressed: 0,
   initialSyncConfigured: false,
   duplicatePolicy: 'reuse_matching',
+  notesSyncStatus: 'one_way',
+  notesSyncTargetDeviceId: null,
+  notesSyncWriterDeviceId: null,
+  thisDeviceId: null,
+  notesSyncIntroSeen: false,
+  noteBackups: [],
   issues: [],
 };
 
@@ -160,6 +166,12 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   const [showCompleteResyncInfo, setShowCompleteResyncInfo] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState('');
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [notesIntroOpen, setNotesIntroOpen] = useState(false);
+  const [notesActivation, setNotesActivation] = useState(null);
+  const [notesDecisions, setNotesDecisions] = useState({});
+  const [restorePreview, setRestorePreview] = useState(null);
+  const [restoreKeys, setRestoreKeys] = useState([]);
+  const [autoActivationStarted, setAutoActivationStarted] = useState(false);
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
@@ -180,6 +192,11 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   useEffect(() => {
     if (!policyDirty) setReuseMatching(status.duplicatePolicy !== 'import_all');
   }, [status.duplicatePolicy, policyDirty]);
+  useEffect(() => {
+    if (status.initialSyncConfigured && !status.notesSyncIntroSeen && status.notesSyncStatus === 'one_way') {
+      setNotesIntroOpen(true);
+    }
+  }, [status.initialSyncConfigured, status.notesSyncIntroSeen, status.notesSyncStatus]);
 
   const syncNow = async () => {
     setBusy(true);
@@ -288,6 +305,122 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     }
   };
 
+  const dismissNotesIntro = async () => {
+    setNotesIntroOpen(false);
+    await invoke('dismiss_notes_sync_intro');
+    refresh();
+  };
+
+  const beginNotesActivation = async () => {
+    setBusy(true);
+    setSyncActivity('notes-backup');
+    setMessage('Creating a protected GaggiMate Notes backup…');
+    try {
+      const preview = await invoke('begin_two_way_notes_activation');
+      const decisions = {};
+      for (const item of preview.items || []) {
+        if (item.differs) decisions[item.sourceKey] = 'mybrewfolio';
+      }
+      setNotesActivation(preview);
+      setNotesDecisions(decisions);
+      setNotesIntroOpen(false);
+      setMessage('');
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+      setSyncActivity('');
+      refresh();
+    }
+  };
+
+  useEffect(() => {
+    const assignedHere = status.notesSyncStatus === 'activation_pending'
+      && status.notesSyncTargetDeviceId
+      && status.notesSyncTargetDeviceId === status.thisDeviceId;
+    if (assignedHere && !autoActivationStarted && !notesActivation) {
+      setAutoActivationStarted(true);
+      beginNotesActivation();
+    }
+    if (!assignedHere) setAutoActivationStarted(false);
+  }, [status.notesSyncStatus, status.notesSyncTargetDeviceId, status.thisDeviceId, autoActivationStarted, notesActivation]);
+
+  const confirmNotesActivation = async () => {
+    setBusy(true);
+    setSyncActivity('notes-write');
+    try {
+      const decisions = Object.entries(notesDecisions).map(([sourceKey, resolution]) => ({ sourceKey, resolution }));
+      await invoke('activate_two_way_notes', { backupId: notesActivation.backupId, decisions });
+      setNotesActivation(null);
+      setMessage('Two-way Notes Sync is active. MyBrewFolio Notes selected below will be written after the protected backup.');
+      await invoke('sync_now');
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+      setSyncActivity('');
+      refresh();
+    }
+  };
+
+  const disableNotesSync = async () => {
+    setBusy(true);
+    try {
+      await invoke('disable_two_way_notes');
+      setMessage('Two-way Notes Sync is off. GaggiMate writes stopped immediately.');
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+      refresh();
+    }
+  };
+
+  const createNotesBackup = async () => {
+    setBusy(true);
+    setSyncActivity('notes-backup');
+    try {
+      await invoke('create_latest_notes_backup');
+      setMessage('Latest GaggiMate Notes backup created.');
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+      setSyncActivity('');
+      refresh();
+    }
+  };
+
+  const previewRestore = async backup => {
+    setBusy(true);
+    try {
+      const preview = await invoke('preview_notes_restore', { backupId: backup.id });
+      const available = (preview.items || []).filter(item => item.available);
+      setRestorePreview({ ...preview, backup });
+      setRestoreKeys(available.map(item => item.source_key || item.sourceKey));
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const restoreNotes = async () => {
+    setBusy(true);
+    setSyncActivity('notes-restore');
+    try {
+      const result = await invoke('restore_notes_backup', { backupId: restorePreview.backup.id, sourceKeys: restoreKeys });
+      setRestorePreview(null);
+      setMessage(`Notes restore finished. ${result.applied} restored, ${result.skipped} skipped.`);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+      setSyncActivity('');
+      refresh();
+    }
+  };
+
   const previewResync = async () => {
     setBusy(true);
     setSyncActivity('resync-preview');
@@ -354,6 +487,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     retry: 'Retrying failed Sync items…',
     'resync-preview': 'Reading the complete GaggiMate library…',
     'resync-apply': 'Applying the complete resync…',
+    'notes-backup': 'Backing up GaggiMate Notes…',
+    'notes-write': 'Enabling two-way Notes Sync…',
+    'notes-restore': 'Restoring GaggiMate Notes…',
   };
 
   return (
@@ -451,7 +587,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
         {status.initialSyncConfigured && policyDirty ? (
           <button className="secondary inline-action" disabled={busy} onClick={configure}>Save matching preference</button>
         ) : null}
-        <p className="muted">Sync is one-way. Nothing is selected, overwritten, or deleted on your GaggiMate.</p>
+        <p className="muted">Shots and profiles remain one-way from GaggiMate to MyBrewFolio. Notes can be synchronized in both directions only after a protected backup and your confirmation.</p>
         <div className="action-with-info">
           <button className="secondary inline-action" disabled={busy} onClick={previewResync}>
             <ActionLabel active={syncActivity === 'resync-preview'} activeText="Reading library…">Complete resync</ActionLabel>
@@ -473,6 +609,43 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           </p>
         ) : null}
       </section>
+      <section className="card settings notes-sync-settings">
+        <h3>Notes sync and backups</h3>
+        {status.notesSyncStatus === 'two_way' ? (
+          <>
+            <p><strong>Two-way Notes Sync is active on this computer.</strong></p>
+            <p className="muted">MyBrewFolio and GaggiMate Notes can update each other. Shots and profiles remain read-only on the machine.</p>
+            <div className="button-row">
+              <button className="secondary inline-action" disabled={busy} onClick={createNotesBackup}>Create safety backup</button>
+              <button className="secondary inline-action danger-action" disabled={busy} onClick={disableNotesSync}>Turn off two-way Notes Sync</button>
+            </div>
+          </>
+        ) : status.notesSyncStatus === 'activation_pending' ? (
+          <>
+            <p><strong>Two-way Notes Sync is waiting for activation.</strong></p>
+            {status.notesSyncTargetDeviceId === status.thisDeviceId ? (
+              <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Create backup and review Notes</button>
+            ) : <p className="muted">The selected Sync computer must finish the backup and review.</p>}
+            <button className="secondary inline-action" disabled={busy} onClick={disableNotesSync}>Cancel activation</button>
+          </>
+        ) : (
+          <>
+            <p><strong>Two-way Notes Sync is off.</strong></p>
+            <p className="muted">Activation first backs up every available GaggiMate Note. When existing MyBrewFolio and machine Notes differ, MyBrewFolio is preselected and you can change each choice before anything is written.</p>
+            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Set up two-way Notes Sync</button>
+          </>
+        )}
+        {(status.noteBackups || []).length ? (
+          <div className="backup-list">
+            {status.noteBackups.map(backup => (
+              <article className="backup-row" key={backup.id}>
+                <div><strong>{backup.slot === 'activation' ? 'Activation backup' : 'Latest safety backup'}</strong><small>{backup.itemCount} shots · {formatDate(backup.finalizedAt || backup.createdAt)}</small></div>
+                <button className="secondary compact-button" disabled={busy} onClick={() => previewRestore(backup)}>Restore</button>
+              </article>
+            ))}
+          </div>
+        ) : null}
+      </section>
       <section className="card settings">
         <h3>App settings</h3>
         <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} /><span>Start Sync with this computer</span></label>
@@ -486,6 +659,65 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
         </button>
         <p className="muted app-version">Installed version {appVersion || '…'}</p>
       </section>
+      {notesIntroOpen ? (
+        <section className="card modal-card" role="dialog" aria-labelledby="notes-intro-title">
+          <p className="eyebrow">OPTIONAL</p>
+          <h2 id="notes-intro-title">Keep your shot Notes in sync both ways?</h2>
+          <p>MyBrewFolio can update Notes on matching GaggiMate shots. Shots and profiles stay one-way and are never written to the machine.</p>
+          <p className="muted">Before enabling this, Sync creates a complete GaggiMate Notes backup. Existing MyBrewFolio Notes are preselected when the two copies differ, and you review every choice before the first write.</p>
+          <div className="dialog-actions">
+            <button className="secondary compact-button" disabled={busy} onClick={dismissNotesIntro}>Not now</button>
+            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Create backup and review</button>
+          </div>
+        </section>
+      ) : null}
+      {notesActivation ? (
+        <section className="card modal-card" role="dialog" aria-labelledby="notes-activation-title">
+          <h2 id="notes-activation-title">Review the first Notes sync</h2>
+          <p>A protected activation backup is complete. MyBrewFolio is preselected for every difference because these Notes already exist in your library.</p>
+          {(notesActivation.items || []).filter(item => item.differs).length ? (
+            <fieldset>
+              <legend>Different Notes</legend>
+              <div className="bulk-actions">
+                <button className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries((notesActivation.items || []).filter(item => item.differs).map(item => [item.sourceKey, 'mybrewfolio'])))}>Use MyBrewFolio for all</button>
+                <button className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries((notesActivation.items || []).filter(item => item.differs).map(item => [item.sourceKey, 'gaggimate'])))}>Use GaggiMate for all</button>
+              </div>
+              {(notesActivation.items || []).filter(item => item.differs).map(item => (
+                <label className="activation-choice" key={item.sourceKey}>
+                  <span><strong>{item.displayName}</strong><small>Shot {item.sourceKey}</small></span>
+                  <select value={notesDecisions[item.sourceKey] || 'mybrewfolio'} onChange={event => setNotesDecisions(current => ({ ...current, [item.sourceKey]: event.currentTarget.value }))}>
+                    <option value="mybrewfolio">Use MyBrewFolio Notes</option>
+                    <option value="gaggimate">Use GaggiMate Notes</option>
+                  </select>
+                </label>
+              ))}
+            </fieldset>
+          ) : <p className="muted">All matching Notes already agree. No initial overwrite is needed.</p>}
+          <div className="dialog-actions">
+            <button className="secondary compact-button" disabled={busy} onClick={() => setNotesActivation(null)}>Cancel</button>
+            <button className="primary compact-button" disabled={busy} onClick={confirmNotesActivation}>Enable two-way Notes Sync</button>
+          </div>
+        </section>
+      ) : null}
+      {restorePreview ? (
+        <section className="card modal-card" role="dialog" aria-labelledby="restore-notes-title">
+          <h2 id="restore-notes-title">Restore GaggiMate Notes</h2>
+          <p>Select Notes to restore. Only shots whose machine ID and recording time still match can be written.</p>
+          <fieldset className="restore-list">
+            {(restorePreview.items || []).map(item => {
+              const key = item.source_key || item.sourceKey;
+              return <label className="toggle" key={key}>
+                <input type="checkbox" disabled={!item.available} checked={restoreKeys.includes(key)} onChange={event => setRestoreKeys(current => event.currentTarget.checked ? [...current, key] : current.filter(value => value !== key))} />
+                <span>{key}{item.available ? '' : ' · no longer available on this GaggiMate'}</span>
+              </label>;
+            })}
+          </fieldset>
+          <div className="dialog-actions">
+            <button className="secondary compact-button" disabled={busy} onClick={() => setRestorePreview(null)}>Cancel</button>
+            <button className="primary compact-button" disabled={busy || !restoreKeys.length} onClick={restoreNotes}>Restore selected Notes</button>
+          </div>
+        </section>
+      ) : null}
       {resync ? (
         <section className="card resync-preview" role="dialog" aria-labelledby="resync-title">
           <h2 id="resync-title">Complete resync preview</h2>

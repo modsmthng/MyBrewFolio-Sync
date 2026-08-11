@@ -14,7 +14,9 @@ MyBrewFolio Sync API
 ```
 
 The companion never sends the local hostname, IP address, or a GaggiMate hardware identifier to
-MyBrewFolio. It never writes to, selects, favorites, or deletes anything on the machine.
+MyBrewFolio. It never writes shots or profiles, selects profiles, favorites profiles, or deletes
+anything on the machine. Only explicitly enabled two-way Notes synchronization can write a Notes
+object for an exact mapped shot.
 
 OAuth tokens are stored in the operating-system keychain. SQLite stores settings, cached server
 state, source hashes, and validated content waiting for an upload retry.
@@ -31,8 +33,17 @@ state, source hashes, and validated content waiting for an upload retry.
   that no notes exist.
 - Validated data remains in the local queue while the internet or MyBrewFolio is unavailable.
 
-Synchronization is one-way. Deleting a synchronized object in MyBrewFolio suppresses its automatic
-reimport but does not modify the GaggiMate.
+Shots and profiles are one-way. Deleting a synchronized object in MyBrewFolio suppresses its
+automatic reimport but does not modify the GaggiMate.
+
+Two-way Notes synchronization is off by default and is bound to one active writer installation.
+Activation requires a complete, finalized machine-Notes backup. Differences are shown before the
+first write and existing MyBrewFolio Notes are preselected. The server issues short-lived,
+idempotent operations containing the expected machine hash. The app reads and compares the current
+machine state before `req:history:notes:save`, reads it back after the write, and acknowledges only
+the verified target hash. A changed precondition becomes a conflict rather than an overwrite.
+Before later outbound batches or a restore, the app replaces the latest safety backup; the protected
+activation backup remains separate. Disabling the feature invalidates outstanding server leases.
 
 Before the first import, the source stores whether exact GaggiMate-ID/recording-time matches reuse
 existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.
@@ -53,6 +64,10 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 | `POST /v1/sync/resync/preview` | Preview recoverable items and duplicate candidates |
 | `POST /v1/sync/resync/apply` | Apply selected restores and validated merges transactionally |
 | `POST /v1/sync/batches` | Submit bounded, validated synchronization batches |
+| `POST/DELETE /v1/sync/notes/two-way/*` | Request, activate, or immediately disable the optional writer permission |
+| `POST /v1/sync/notes/backups/*` | Upload/finalize the activation or latest Notes backup in bounded chunks |
+| `POST /v1/sync/notes/outbound/*` | Claim and acknowledge short-lived compare-before-write operations |
+| `GET/POST /v1/sync/notes/backups/:id/*` | Read backup contents and report verified restore results |
 | `POST /v1/sync/heartbeat` | Report app and machine availability without a local address |
 | `POST /v1/sync/conflicts/:itemId/resolve` | Resolve a synchronization conflict |
 | `DELETE /v1/sync/devices/:id` | Disconnect an installation |
