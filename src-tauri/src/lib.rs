@@ -126,6 +126,52 @@ async fn set_machine_host(
     Ok(())
 }
 
+fn apply_app_icon_visibility(app: &tauri::AppHandle, hidden: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let policy = if hidden {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        };
+        app.set_activation_policy(policy)
+            .map_err(|error| error.to_string())?;
+        app.set_dock_visibility(!hidden)
+            .map_err(|error| error.to_string())?;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_skip_taskbar(hidden)
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_hide_app_icon(engine: State<'_, Arc<SyncEngine>>) -> Result<bool, String> {
+    engine.hide_app_icon().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn set_hide_app_icon(
+    app: tauri::AppHandle,
+    engine: State<'_, Arc<SyncEngine>>,
+    hidden: bool,
+) -> Result<(), String> {
+    let previous = engine.hide_app_icon().map_err(|error| error.to_string())?;
+    engine
+        .set_hide_app_icon(hidden)
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = apply_app_icon_visibility(&app, hidden) {
+        let _ = engine.set_hide_app_icon(previous);
+        return Err(error);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn begin_oauth(
     app: tauri::AppHandle,
@@ -445,6 +491,7 @@ pub fn run() {
             let engine =
                 Arc::new(SyncEngine::open(store.clone()).map_err(|error| error.to_string())?);
             app.manage(engine.clone());
+            apply_app_icon_visibility(app.handle(), engine.hide_app_icon().unwrap_or(false))?;
 
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
             {
@@ -584,6 +631,8 @@ pub fn run() {
             frontend_ready,
             get_status,
             set_machine_host,
+            get_hide_app_icon,
+            set_hide_app_icon,
             begin_oauth,
             complete_oauth,
             sync_now,

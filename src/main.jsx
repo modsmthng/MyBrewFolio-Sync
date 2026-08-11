@@ -158,6 +158,7 @@ function Setup({ status, refresh, externalNotice }) {
 
 function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
   const [autostart, setAutostart] = useState(true);
+  const [hideAppIcon, setHideAppIconState] = useState(false);
   const [host, setHost] = useState(status.machineHost);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -203,6 +204,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
 
   useEffect(() => {
     isEnabled().then(setAutostart).catch(() => setAutostart(false));
+    invoke('get_hide_app_icon').then(setHideAppIconState).catch(() => setHideAppIconState(false));
     getVersion().then(setAppVersion).catch(() => setAppVersion('Unknown'));
     invoke('check_update')
       .then(result => {
@@ -263,6 +265,23 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     } catch (error) {
       setAutostart(!checked);
       showStatusMessage(String(error), 'error');
+    }
+  };
+
+  const toggleAppIcon = async event => {
+    const hidden = event.currentTarget.checked;
+    setHideAppIconState(hidden);
+    setBusy(true);
+    try {
+      await invoke('set_hide_app_icon', { hidden });
+      showStatusMessage(hidden
+        ? 'App icon hidden. Use the menu bar or tray icon to open Sync.'
+        : 'App icon is visible again.');
+    } catch (error) {
+      setHideAppIconState(!hidden);
+      showStatusMessage(String(error), 'error');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -341,7 +360,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
 
   const beginNotesActivation = async () => {
     setBusy(true);
-    setSyncActivity('notes-backup');
+    setSyncActivity('notes-activation');
     setMessage('');
     try {
       const preview = await invoke('begin_two_way_notes_activation');
@@ -516,6 +535,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     retry: 'Retrying failed Sync items…',
     'resync-preview': 'Reading the complete GaggiMate library…',
     'resync-apply': 'Applying the complete resync…',
+    'notes-activation': 'Backing up GaggiMate Notes…',
     'notes-backup': 'Backing up GaggiMate Notes…',
     'notes-write': 'Enabling two-way Notes Sync…',
     'notes-restore': 'Restoring GaggiMate Notes…',
@@ -680,7 +700,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           <>
             <p><strong>Two-way Notes Sync is active on this computer.</strong></p>
             <div className="button-row">
-              <button className="secondary inline-action" disabled={busy} onClick={createNotesBackup}>Create Latest Backup</button>
+              <button className="secondary inline-action" disabled={busy} onClick={createNotesBackup}>
+                <ActionLabel active={syncActivity === 'notes-backup'} activeText="Creating backup…">Create Latest Backup</ActionLabel>
+              </button>
               <button className="secondary inline-action danger-action" disabled={busy} onClick={disableNotesSync}>Turn off two-way Notes Sync</button>
             </div>
           </>
@@ -688,14 +710,18 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           <>
             <p><strong>Two-way Notes Sync is waiting for activation.</strong></p>
             {status.notesSyncTargetDeviceId === status.thisDeviceId ? (
-              <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Create backup and review Notes</button>
+              <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+                <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Create backup and review Notes</ActionLabel>
+              </button>
             ) : <p className="muted">The selected Sync computer must finish the backup and review.</p>}
             <button className="secondary inline-action" disabled={busy} onClick={disableNotesSync}>Cancel activation</button>
           </>
         ) : (
           <>
             <p><strong>Two-way Notes Sync is off.</strong></p>
-            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Set up two-way Notes Sync</button>
+            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+              <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Set up two-way Notes Sync</ActionLabel>
+            </button>
           </>
         )}
         {(status.noteBackups || []).length ? (
@@ -709,9 +735,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           </div>
         ) : null}
       </section>
+      <h2 className="section-title">App settings</h2>
       <section className="card settings">
-        <h3>App settings</h3>
-        <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} /><span>Start Sync with this computer</span></label>
+        <h3>Updates</h3>
         {availableUpdate ? (
           <p className="update-available" role="status">
             Update {availableUpdate} is available.
@@ -721,6 +747,12 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           {availableUpdate ? `Install update ${availableUpdate}` : 'Check for updates'}
         </button>
         <p className="muted app-version">Installed version {appVersion || '…'}</p>
+      </section>
+      <section className="card settings background-app-settings">
+        <h3>Background app</h3>
+        <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy} /><span>Start Sync with this computer</span></label>
+        <label className="toggle"><input type="checkbox" checked={hideAppIcon} onChange={toggleAppIcon} disabled={busy} /><span>Hide app icon from Dock or taskbar</span></label>
+        <p className="muted app-visibility-help">The menu bar or tray icon stays available so you can reopen Sync at any time.</p>
       </section>
       {notesIntroOpen ? (
         <section className="card modal-card" role="dialog" aria-labelledby="notes-intro-title">
@@ -744,7 +776,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           ) : null}
           <div className="dialog-actions">
             <button className="secondary compact-button" disabled={busy} onClick={dismissNotesIntro}>Not now</button>
-            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>Create backup and review</button>
+            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+              <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Create backup and review</ActionLabel>
+            </button>
           </div>
         </section>
       ) : null}
@@ -779,7 +813,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           ) : <p className="muted">All matching Notes already agree. No initial overwrite is needed.</p>}
           <div className="dialog-actions" ref={notesConfirmationRef}>
             <button className="secondary compact-button" disabled={busy} onClick={() => setNotesActivation(null)}>Cancel</button>
-            <button className="primary compact-button" disabled={busy} onClick={confirmNotesActivation}>Enable two-way Notes Sync</button>
+            <button className="primary compact-button" disabled={busy} onClick={confirmNotesActivation}>
+              <ActionLabel active={syncActivity === 'notes-write'} activeText="Enabling…">Enable two-way Notes Sync</ActionLabel>
+            </button>
           </div>
         </section>
       ) : null}

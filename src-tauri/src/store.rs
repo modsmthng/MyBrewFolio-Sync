@@ -264,7 +264,7 @@ impl AppStore {
             .execute_batch(
                 "delete from pending_objects;
                  delete from sync_failures;
-                 delete from settings where key not in ('machine_host', 'installation_id');",
+                 delete from settings where key not in ('machine_host', 'installation_id', 'hide_app_icon');",
             )?;
         Ok(())
     }
@@ -313,6 +313,9 @@ mod tests {
             .set_setting("installation_id", "stable-installation")
             .expect("installation ID saved");
         store
+            .set_setting("hide_app_icon", "1")
+            .expect("app icon setting saved");
+        store
             .set_setting("device_id", "account-device")
             .expect("device ID saved");
         store
@@ -330,6 +333,12 @@ mod tests {
                 .setting("installation_id")
                 .expect("installation ID read"),
             Some("stable-installation".into())
+        );
+        assert_eq!(
+            store
+                .setting("hide_app_icon")
+                .expect("app icon setting read"),
+            Some("1".into())
         );
         assert_eq!(store.setting("device_id").expect("device ID read"), None);
         assert_eq!(store.setting("source_id").expect("source ID read"), None);

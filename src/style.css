@@ -121,6 +121,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .action-info { margin-left: 0; }
 .update-available { width: fit-content; margin: 16px 0 0; padding: 8px 12px; border: 1px solid rgba(49,115,90,.35); border-radius: 999px; color: #1f684d; background: rgba(220,235,228,.75); font-size: 13px; font-weight: 800; }
 .app-version { margin-bottom: 0; font-size: 12px; }
+.app-visibility-help { margin: 10px 0 0 28px; font-size: 12px; line-height: 1.5; }
 .account-action h3 { margin-top: 0; }
 .disconnect-confirm { display: grid; gap: 14px; padding: 14px 16px; border: 1px solid rgba(157,48,56,.28); border-radius: 16px; background: rgba(244,223,224,.55); }
 .disconnect-confirm > div { display: flex; flex-wrap: wrap; gap: 8px; }

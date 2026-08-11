@@ -18,6 +18,11 @@ MyBrewFolio. It never writes shots or profiles, selects profiles, favorites prof
 anything on the machine. Only explicitly enabled two-way Notes synchronization can write a Notes
 object for an exact mapped shot.
 
+The app can locally hide its normal application icon while retaining the tray entry point. macOS
+uses Tauri's accessory activation policy and Dock visibility API; Windows and Linux use the main
+window's skip-taskbar capability. The preference is stored in local SQLite, survives account
+disconnect, and is applied before the background loop starts.
+
 OAuth tokens are stored in the operating-system keychain. SQLite stores settings, cached server
 state, source hashes, and validated content waiting for an upload retry.
 

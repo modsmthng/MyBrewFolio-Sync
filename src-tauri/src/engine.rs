@@ -214,6 +214,16 @@ impl SyncEngine {
         Ok(())
     }
 
+    pub fn hide_app_icon(&self) -> Result<bool, EngineError> {
+        Ok(self.store.setting("hide_app_icon")?.as_deref() == Some("1"))
+    }
+
+    pub fn set_hide_app_icon(&self, hidden: bool) -> Result<(), EngineError> {
+        self.store
+            .set_setting("hide_app_icon", if hidden { "1" } else { "0" })?;
+        Ok(())
+    }
+
     pub async fn configure_sync(&self, reuse_matching: bool) -> Result<(), EngineError> {
         let device_id = self
             .store

@@ -16,6 +16,10 @@ profiles every five minutes, and catches up after either the computer, machine, 
 offline. One fixed status line reports the current operation and retains actionable failures without
 replacing the separate connection indicator.
 
+The optional **Hide app icon from Dock or taskbar** setting keeps the menu bar or tray icon as the
+permanent entry point. On macOS it uses accessory-app mode to hide Sync from the Dock and app
+switcher. On Windows and supported Linux desktops it hides the window from the taskbar or dock.
+
 Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
 be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
 machine content and safe duplicate merges, then apply only the user's confirmed choices.
@@ -113,6 +117,8 @@ visible in both Light and Dark appearances. Microsoft Store listing artwork is k
   Microsoft Store updates instead.
 - Disconnect always removes the local Sync connection after confirmation. If immediate server
   revocation is unavailable, the app links directly to Account → Sync for manual revocation.
+- Dock/taskbar visibility is a local app preference. Hiding the main app icon never removes the
+  menu bar or tray icon and does not affect background synchronization.
 - Microsoft Store submission packages are kept in separate `store-vX.Y.Z` draft releases. These
   drafts are for Partner Center submission only and must never be published. Each draft contains
   the unsigned Partner Center MSIX and a temporary self-signed test bundle for an exact local
