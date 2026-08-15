@@ -359,6 +359,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   };
 
   const beginNotesActivation = async () => {
+    setAutoActivationStarted(true);
     setBusy(true);
     setSyncActivity('notes-activation');
     setMessage('');
