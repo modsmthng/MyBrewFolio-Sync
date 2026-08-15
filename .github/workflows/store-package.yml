@@ -96,7 +96,19 @@ jobs:
           $parts = $env:REQUESTED_VERSION.Split('.')
           $packageVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
 
-          cargo build --manifest-path src-tauri/Cargo.toml --release
+          cargo build --manifest-path src-tauri/Cargo.toml --release `
+            --features tauri/custom-protocol
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The Store build failed to compile the application binary'
+          }
+          $cfgOutput = & cargo rustc --manifest-path src-tauri/Cargo.toml --release `
+            --features tauri/custom-protocol -- --print cfg
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The Store build could not verify its Tauri build mode'
+          }
+          if (@($cfgOutput) -contains 'dev') {
+            throw 'Store build was compiled in Tauri dev mode because tauri/custom-protocol is not active'
+          }
           ./scripts/package-msix.ps1 `
             -IdentityName $env:MSIX_IDENTITY_NAME `
             -Publisher $env:MSIX_PUBLISHER `

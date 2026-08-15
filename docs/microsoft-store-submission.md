@@ -34,3 +34,11 @@ Copy this short instruction into Partner Center with the certification notes:
    were removed.
 
 The unsigned `MyBrewFolio-Sync-Store.msix` is the only file submitted to Partner Center. The test ZIP and certificate are never submitted or published.
+
+## Store build invariants
+
+The Store workflow builds the executable directly with Cargo and must pass
+`--features tauri/custom-protocol`. Without this feature Tauri compiles its development
+configuration, which opens `build.devUrl` (`http://localhost:1420`) in the embedded WebView and
+shows `ERR_CONNECTION_REFUSED` when no dev server is running. The workflow asserts that the
+resulting Rust `cfg` does not contain `dev` before it packages the MSIX.
