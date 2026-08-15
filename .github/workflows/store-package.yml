@@ -102,7 +102,7 @@ jobs:
             throw 'The Store build failed to compile the application binary'
           }
           $cfgOutput = & cargo rustc --manifest-path src-tauri/Cargo.toml --release `
-            --features tauri/custom-protocol -- --print cfg
+            --features tauri/custom-protocol --bin mybrewfolio-sync -- --print cfg
           if ($LASTEXITCODE -ne 0) {
             throw 'The Store build could not verify its Tauri build mode'
           }
