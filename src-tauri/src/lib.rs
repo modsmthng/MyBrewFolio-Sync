@@ -20,6 +20,7 @@ use std::{
 
 use engine::SyncEngine;
 use model::AppStatus;
+use serde::Serialize;
 use store::AppStore;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -35,6 +36,69 @@ pub(crate) struct TrayStatusItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayMachineItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayErrorItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayAutostartItem(MenuItem<tauri::Wry>);
+
+#[cfg(target_os = "windows")]
+const STORE_STARTUP_TASK_ID: &str = "MyBrewFolioSyncStartup";
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct AutostartStatus {
+    enabled: bool,
+    requires_windows_settings: bool,
+    blocked_by_policy: bool,
+    migration_available: bool,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreStartupTaskState {
+    Enabled,
+    Disabled,
+    DisabledByUser,
+    DisabledByPolicy,
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn autostart_status_from_state(
+    state: StoreStartupTaskState,
+    legacy_enabled: bool,
+) -> AutostartStatus {
+    match state {
+        StoreStartupTaskState::Enabled => AutostartStatus {
+            enabled: true,
+            requires_windows_settings: false,
+            blocked_by_policy: false,
+            migration_available: false,
+        },
+        StoreStartupTaskState::Disabled => AutostartStatus {
+            enabled: false,
+            requires_windows_settings: false,
+            blocked_by_policy: false,
+            migration_available: legacy_enabled,
+        },
+        StoreStartupTaskState::DisabledByUser => AutostartStatus {
+            enabled: false,
+            requires_windows_settings: true,
+            blocked_by_policy: false,
+            migration_available: false,
+        },
+        StoreStartupTaskState::DisabledByPolicy => AutostartStatus {
+            enabled: false,
+            requires_windows_settings: false,
+            blocked_by_policy: true,
+            migration_available: false,
+        },
+    }
+}
+
+fn legacy_autostart_status(enabled: bool) -> AutostartStatus {
+    AutostartStatus {
+        enabled,
+        requires_windows_settings: false,
+        blocked_by_policy: false,
+        migration_available: false,
+    }
+}
 
 struct StartupDiagnostics {
     path: PathBuf,
@@ -100,6 +164,163 @@ fn windows_version() -> String {
 #[cfg(not(target_os = "windows"))]
 fn windows_version() -> String {
     std::env::consts::OS.into()
+}
+
+#[cfg(target_os = "windows")]
+fn store_startup_task_state(
+    state: windows::ApplicationModel::StartupTaskState,
+) -> StoreStartupTaskState {
+    use windows::ApplicationModel::StartupTaskState;
+
+    match state {
+        StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy => {
+            StoreStartupTaskState::Enabled
+        }
+        StartupTaskState::DisabledByUser => StoreStartupTaskState::DisabledByUser,
+        StartupTaskState::DisabledByPolicy => StoreStartupTaskState::DisabledByPolicy,
+        _ => StoreStartupTaskState::Disabled,
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn store_startup_task() -> Result<windows::ApplicationModel::StartupTask, String> {
+    use windows::{core::HSTRING, ApplicationModel::StartupTask};
+
+    StartupTask::GetAsync(&HSTRING::from(STORE_STARTUP_TASK_ID))
+        .map_err(|error| error.to_string())?
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+async fn store_autostart_status(legacy_enabled: bool) -> Result<AutostartStatus, String> {
+    let task = store_startup_task().await?;
+    Ok(autostart_status_from_state(
+        store_startup_task_state(task.State().map_err(|error| error.to_string())?),
+        legacy_enabled,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn store_autostart_status(_legacy_enabled: bool) -> Result<AutostartStatus, String> {
+    Err("Microsoft Store autostart is only available on Windows".into())
+}
+
+#[cfg(target_os = "windows")]
+async fn request_store_startup_task_enable(
+    app: &tauri::AppHandle,
+    task: windows::ApplicationModel::StartupTask,
+) -> Result<windows::ApplicationModel::StartupTaskState, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.run_on_main_thread(move || {
+        let _ = sender.send(task.RequestEnableAsync().map_err(|error| error.to_string()));
+    })
+    .map_err(|error| error.to_string())?;
+    let operation = receiver
+        .await
+        .map_err(|_| "Windows could not request startup permission".to_string())??;
+    operation.await.map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+async fn set_store_autostart(
+    app: &tauri::AppHandle,
+    enabled: bool,
+    legacy_enabled: bool,
+) -> Result<AutostartStatus, String> {
+    let task = store_startup_task().await?;
+    if enabled {
+        let state = store_startup_task_state(task.State().map_err(|error| error.to_string())?);
+        if state == StoreStartupTaskState::Disabled {
+            // Windows shows its own consent UI here. A user-disabled task cannot
+            // be re-enabled programmatically and is reported below instead.
+            let state = request_store_startup_task_enable(app, task).await?;
+            return Ok(autostart_status_from_state(
+                store_startup_task_state(state),
+                legacy_enabled,
+            ));
+        }
+    } else {
+        task.Disable().map_err(|error| error.to_string())?;
+    }
+
+    store_autostart_status(legacy_enabled).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn set_store_autostart(
+    _app: &tauri::AppHandle,
+    _enabled: bool,
+    _legacy_enabled: bool,
+) -> Result<AutostartStatus, String> {
+    Err("Microsoft Store autostart is only available on Windows".into())
+}
+
+async fn autostart_status(app: &tauri::AppHandle) -> Result<AutostartStatus, String> {
+    let legacy_enabled = app
+        .autolaunch()
+        .is_enabled()
+        .map_err(|error| error.to_string())?;
+    if store_managed_updates() {
+        store_autostart_status(legacy_enabled).await
+    } else {
+        Ok(legacy_autostart_status(legacy_enabled))
+    }
+}
+
+async fn set_autostart(app: &tauri::AppHandle, enabled: bool) -> Result<AutostartStatus, String> {
+    if store_managed_updates() {
+        let legacy_enabled = app
+            .autolaunch()
+            .is_enabled()
+            .map_err(|error| error.to_string())?;
+        let status = set_store_autostart(app, enabled, legacy_enabled).await?;
+        if !enabled || status.enabled {
+            // Store builds previously used this registry value. Remove it once
+            // the native task is authoritative so it cannot launch a second copy.
+            let _ = app.autolaunch().disable();
+        }
+        Ok(status)
+    } else {
+        if enabled {
+            app.autolaunch().enable()
+        } else {
+            app.autolaunch().disable()
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(legacy_autostart_status(enabled))
+    }
+}
+
+#[tauri::command]
+async fn get_autostart_status(app: tauri::AppHandle) -> Result<AutostartStatus, String> {
+    autostart_status(&app).await
+}
+
+#[tauri::command]
+async fn set_autostart_enabled(
+    app: tauri::AppHandle,
+    enabled: bool,
+) -> Result<AutostartStatus, String> {
+    set_autostart(&app, enabled).await
+}
+
+fn update_autostart_tray_item(app: &tauri::AppHandle, status: &AutostartStatus) {
+    if let Some(item) = app.try_state::<TrayAutostartItem>() {
+        let text = if status.enabled {
+            "Disable start with computer"
+        } else if status.requires_windows_settings {
+            "Enable start with computer in Windows Settings"
+        } else if status.blocked_by_policy {
+            "Start with computer is managed by Windows"
+        } else {
+            "Start with computer"
+        };
+        let _ = item.0.set_text(text);
+        let _ = item
+            .0
+            .set_enabled(!status.requires_windows_settings && !status.blocked_by_policy);
+    }
 }
 
 #[tauri::command]
@@ -196,9 +417,11 @@ async fn complete_oauth(
         .complete_oauth(&callback_url)
         .await
         .map_err(|error| error.to_string())?;
-    // The onboarding promises background synchronization after setup. A user
-    // can turn this off at any time from the dashboard or tray application.
-    let _ = app.autolaunch().enable();
+    // Direct installs retain their existing onboarding behavior. Store builds
+    // must ask Windows for explicit startup-task consent from the setting.
+    if !store_managed_updates() {
+        let _ = app.autolaunch().enable();
+    }
     engine.emit_status(&app).await;
     let engine = engine.inner().clone();
     let handle = app.clone();
@@ -437,18 +660,70 @@ async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
     Ok("installed".into())
 }
 
+fn is_store_managed_build(target_is_windows: bool, store_build: Option<&str>) -> bool {
+    target_is_windows && matches!(store_build, Some("true"))
+}
+
 fn store_managed_updates() -> bool {
-    cfg!(target_os = "windows")
-        && matches!(
-            option_env!("MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD"),
-            Some("true")
-        )
+    is_store_managed_build(
+        cfg!(target_os = "windows"),
+        option_env!("MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD"),
+    )
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{autostart_status_from_state, is_store_managed_build, StoreStartupTaskState};
+
+    #[test]
+    fn store_build_is_limited_to_windows_store_packages() {
+        assert!(is_store_managed_build(true, Some("true")));
+        assert!(!is_store_managed_build(false, Some("true")));
+        assert!(!is_store_managed_build(true, Some("false")));
+        assert!(!is_store_managed_build(true, None));
+    }
+
+    #[test]
+    fn legacy_registry_opt_in_is_offered_for_migration() {
+        let status = autostart_status_from_state(StoreStartupTaskState::Disabled, true);
+
+        assert!(!status.enabled);
+        assert!(status.migration_available);
+        assert!(!status.requires_windows_settings);
+    }
+
+    #[test]
+    fn enabled_startup_has_no_recovery_prompt() {
+        let status = autostart_status_from_state(StoreStartupTaskState::Enabled, true);
+
+        assert!(status.enabled);
+        assert!(!status.migration_available);
+        assert!(!status.requires_windows_settings);
+    }
+
+    #[test]
+    fn user_disabled_startup_requires_windows_settings() {
+        let status = autostart_status_from_state(StoreStartupTaskState::DisabledByUser, true);
+
+        assert!(!status.enabled);
+        assert!(status.requires_windows_settings);
+        assert!(!status.migration_available);
+    }
+
+    #[test]
+    fn policy_disabled_startup_is_not_presented_as_user_configurable() {
+        let status = autostart_status_from_state(StoreStartupTaskState::DisabledByPolicy, false);
+
+        assert!(!status.enabled);
+        assert!(status.blocked_by_policy);
+        assert!(!status.requires_windows_settings);
     }
 }
 
@@ -518,18 +793,8 @@ pub fn run() {
             app.manage(TrayErrorItem(error_item.clone()));
             let show_item = MenuItem::with_id(app, "show", "Open Sync", true, None::<&str>)?;
             let sync_item = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
-            let autostart_enabled = app.autolaunch().is_enabled().unwrap_or(false);
-            let autostart_item = MenuItem::with_id(
-                app,
-                "autostart",
-                if autostart_enabled {
-                    "Disable start with computer"
-                } else {
-                    "Start with computer"
-                },
-                true,
-                None::<&str>,
-            )?;
+            let autostart_item =
+                MenuItem::with_id(app, "autostart", "Start with computer", true, None::<&str>)?;
             app.manage(TrayAutostartItem(autostart_item.clone()));
             let disconnect_item =
                 MenuItem::with_id(app, "disconnect", "Disconnect account", true, None::<&str>)?;
@@ -565,22 +830,15 @@ pub fn run() {
                         });
                     }
                     "autostart" => {
-                        let autostart = app.autolaunch();
-                        let enabled = autostart.is_enabled().unwrap_or(false);
-                        let result = if enabled {
-                            autostart.disable()
-                        } else {
-                            autostart.enable()
-                        };
-                        if result.is_ok() {
-                            if let Some(item) = app.try_state::<TrayAutostartItem>() {
-                                let _ = item.0.set_text(if enabled {
-                                    "Start with computer"
-                                } else {
-                                    "Disable start with computer"
-                                });
+                        let handle = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            let Ok(current) = autostart_status(&handle).await else {
+                                return;
+                            };
+                            if let Ok(updated) = set_autostart(&handle, !current.enabled).await {
+                                update_autostart_tray_item(&handle, &updated);
                             }
-                        }
+                        });
                     }
                     "disconnect" => {
                         show_main_window(app);
@@ -590,6 +848,13 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+
+            let autostart_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(status) = autostart_status(&autostart_handle).await {
+                    update_autostart_tray_item(&autostart_handle, &status);
+                }
+            });
 
             let background_engine = engine.clone();
             let background_handle = app.handle().clone();
@@ -633,6 +898,8 @@ pub fn run() {
             set_machine_host,
             get_hide_app_icon,
             set_hide_app_icon,
+            get_autostart_status,
+            set_autostart_enabled,
             begin_oauth,
             complete_oauth,
             sync_now,

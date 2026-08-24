@@ -24,6 +24,7 @@ Set-Content -Path (Join-Path $staging "AppxManifest.xml") -Value $manifest -Enco
 [xml]$manifestXml = $manifest
 $namespace = New-Object System.Xml.XmlNamespaceManager($manifestXml.NameTable)
 $namespace.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+$namespace.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
 $identity = $manifestXml.SelectSingleNode("/f:Package/f:Identity", $namespace)
 if (-not $identity) { throw "The MSIX manifest does not contain a package identity" }
 if ($identity.GetAttribute("Name") -ne $IdentityName) { throw "The MSIX identity name does not match the requested identity" }
@@ -33,6 +34,13 @@ if ($identity.GetAttribute("ProcessorArchitecture") -ne "x64") { throw "The Stor
 if ($manifest -match "__[A-Z_]+__") { throw "The MSIX manifest still contains an unresolved placeholder" }
 $vclibs = $manifestXml.SelectSingleNode("/f:Package/f:Dependencies/f:PackageDependency[@Name='Microsoft.VCLibs.140.00.UWPDesktop']", $namespace)
 if (-not $vclibs) { throw "The MSIX manifest must declare Microsoft.VCLibs.140.00.UWPDesktop" }
+$startupTask = $manifestXml.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup']", $namespace)
+if (-not $startupTask) { throw "The MSIX manifest must declare the MyBrewFolio Sync startup task" }
+$startupExtension = $startupTask.ParentNode
+if ($startupExtension.GetAttribute("Executable") -ne "MyBrewFolioSync.exe") { throw "The MSIX startup task must launch MyBrewFolioSync.exe" }
+if ($startupExtension.GetAttribute("EntryPoint") -ne "Windows.FullTrustApplication") { throw "The MSIX startup task must use Windows.FullTrustApplication" }
+if ($startupTask.GetAttribute("Enabled") -ne "false") { throw "The MSIX startup task must remain opt-in" }
+if ($startupTask.GetAttribute("DisplayName") -ne "MyBrewFolio Sync") { throw "The MSIX startup task must have the MyBrewFolio Sync display name" }
 
 Add-Type -AssemblyName System.Drawing
 $sourcePath = Join-Path $root "src-tauri\icons\icon.png"
@@ -132,6 +140,9 @@ foreach ($relativePath in $requiredFiles) {
 [xml]$packedManifest = Get-Content (Join-Path $verification "AppxManifest.xml") -Raw
 $packedNamespace = New-Object System.Xml.XmlNamespaceManager($packedManifest.NameTable)
 $packedNamespace.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/foundation/windows10")
+$packedNamespace.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
 $packedVclibs = $packedManifest.SelectSingleNode("/f:Package/f:Dependencies/f:PackageDependency[@Name='Microsoft.VCLibs.140.00.UWPDesktop']", $packedNamespace)
 if (-not $packedVclibs) { throw "The packed MSIX lost its Visual C++ framework dependency" }
+$packedStartupTask = $packedManifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSync.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $packedNamespace)
+if (-not $packedStartupTask) { throw "The packed MSIX lost the opt-in MyBrewFolio Sync startup task" }
 Write-Host "Created Store submission package: $Output"

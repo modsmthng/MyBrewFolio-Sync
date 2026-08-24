@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
          xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
-         IgnorableNamespaces="uap rescap">
+         IgnorableNamespaces="uap desktop rescap">
   <Identity Name="__IDENTITY_NAME__" Publisher="__PUBLISHER__" Version="__VERSION__" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>MyBrewFolio Sync</DisplayName>
@@ -37,6 +38,15 @@
             <uap:DisplayName>MyBrewFolio Sync</uap:DisplayName>
           </uap:Protocol>
         </uap:Extension>
+        <desktop:Extension
+          Category="windows.startupTask"
+          Executable="MyBrewFolioSync.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask
+            TaskId="MyBrewFolioSyncStartup"
+            Enabled="false"
+            DisplayName="MyBrewFolio Sync" />
+        </desktop:Extension>
       </Extensions>
     </Application>
   </Applications>

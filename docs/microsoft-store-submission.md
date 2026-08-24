@@ -10,7 +10,7 @@ The first two lines of the Partner Center description must read:
 
 Use the following notes for the 0.2.8 submission:
 
-> The Microsoft Visual C++ framework dependency is now declared as Microsoft.VCLibs.140.00.UWPDesktop in the package manifest. The application interface is embedded in the MSIX and does not load a remote website at startup. The package was tested from a clean install on Windows 11, online and offline. Internet access is required for account sign-in and cloud synchronization. Synchronization requires a GaggiMate espresso machine on the same local network. The included full-trust desktop process is required for direct local-machine communication, background synchronization, tray integration, autostart and secure OS credential storage.
+> The Microsoft Visual C++ framework dependency is now declared as Microsoft.VCLibs.140.00.UWPDesktop in the package manifest. The application interface is embedded in the MSIX and does not load a remote website at startup. The package was tested from a clean install on Windows 11, online and offline. Internet access is required for account sign-in and cloud synchronization. Synchronization requires a GaggiMate espresso machine on the same local network. The included full-trust desktop process is required for direct local-machine communication, background synchronization, tray integration, the opt-in Windows startup task, and secure OS credential storage.
 
 ## Certification test instructions
 
@@ -27,10 +27,11 @@ Copy this short instruction into Partner Center with the certification notes:
    Trusted People. Do not install the certificate manually.
 5. Confirm that the script reports a valid signature and successful package registration.
 6. Start the application online and offline. Its embedded interface must render in both cases.
-7. Test OAuth return, tray actions, window reopening and a manual synchronization.
-8. If an Edge WebView2 error page appears, stop the submission and collect
+7. Enable **Start Sync with this computer**, accept the Windows confirmation, then sign out and back in to verify that Sync starts in the tray. Disable it and verify that it does not start at the next sign-in.
+8. Test OAuth return, tray actions, window reopening and a manual synchronization.
+9. If an Edge WebView2 error page appears, stop the submission and collect
    `startup-diagnostics.log`.
-9. Run `Uninstall-TestPackage.ps1`, accept its UAC prompt and confirm that package and certificate
+10. Run `Uninstall-TestPackage.ps1`, accept its UAC prompt and confirm that package and certificate
    were removed.
 
 The unsigned `MyBrewFolio-Sync-Store.msix` is the only file submitted to Partner Center. The test ZIP and certificate are never submitted or published.

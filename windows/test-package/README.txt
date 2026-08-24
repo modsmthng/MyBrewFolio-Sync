@@ -8,9 +8,10 @@ MyBrewFolio Sync Microsoft Store package test
 6. Accept the single Windows administrator prompt. It trusts only the temporary test certificate under Local Computer > Trusted People.
 7. Confirm that the script reports a valid signature and a successfully registered package.
 8. Confirm that the interface opens both with and without internet access.
-9. Test sign-in, OAuth return, tray behavior, window reopening and a manual sync.
-10. Close the app and run:  PowerShell -ExecutionPolicy Bypass -File .\Uninstall-TestPackage.ps1
-11. Accept the administrator prompt that removes the temporary certificate.
+9. In App settings, enable Start Sync with this computer and accept the Windows confirmation. Sign out and back in, then confirm that Sync starts and its tray icon is available. Disable it again and confirm it does not start after the next sign-in.
+10. Test sign-in, OAuth return, tray behavior, window reopening and a manual sync.
+11. Close the app and run:  PowerShell -ExecutionPolicy Bypass -File .\Uninstall-TestPackage.ps1
+12. Accept the administrator prompt that removes the temporary certificate.
 
 Do not install the certificate manually and do not move it into Trusted Root Certification Authorities.
 

@@ -6,7 +6,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link';
-import { enable, disable, isEnabled } from '@tauri-apps/plugin-autostart';
 import './style.css';
 
 const initialStatus = {
@@ -158,6 +157,12 @@ function Setup({ status, refresh, externalNotice }) {
 
 function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
   const [autostart, setAutostart] = useState(true);
+  const [autostartStatus, setAutostartStatus] = useState({
+    enabled: true,
+    requiresWindowsSettings: false,
+    blockedByPolicy: false,
+    migrationAvailable: false,
+  });
   const [hideAppIcon, setHideAppIconState] = useState(false);
   const [host, setHost] = useState(status.machineHost);
   const [busy, setBusy] = useState(false);
@@ -203,7 +208,15 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   }, [status.lastError]);
 
   useEffect(() => {
-    isEnabled().then(setAutostart).catch(() => setAutostart(false));
+    invoke('get_autostart_status')
+      .then(result => {
+        setAutostartStatus(result);
+        setAutostart(result.enabled);
+      })
+      .catch(() => {
+        setAutostart(false);
+        setAutostartStatus(current => ({ ...current, enabled: false }));
+      });
     invoke('get_hide_app_icon').then(setHideAppIconState).catch(() => setHideAppIconState(false));
     getVersion().then(setAppVersion).catch(() => setAppVersion('Unknown'));
     invoke('check_update')
@@ -260,11 +273,25 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   const toggleAutostart = async event => {
     const checked = event.currentTarget.checked;
     setAutostart(checked);
+    setBusy(true);
     try {
-      if (checked) await enable(); else await disable();
+      const result = await invoke('set_autostart_enabled', { enabled: checked });
+      setAutostartStatus(result);
+      setAutostart(result.enabled);
+      if (!result.enabled) {
+        if (result.requiresWindowsSettings) {
+          showStatusMessage('Windows has disabled startup for Sync. Re-enable it in Settings > Apps > Startup.');
+        } else if (result.blockedByPolicy) {
+          showStatusMessage('Windows or your organization has blocked startup for Sync.', 'error');
+        } else {
+          showStatusMessage('Windows did not enable startup for Sync.', 'error');
+        }
+      }
     } catch (error) {
       setAutostart(!checked);
       showStatusMessage(String(error), 'error');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -751,7 +778,16 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
       </section>
       <section className="card settings background-app-settings">
         <h3>Background app</h3>
-        <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy} /><span>Start Sync with this computer</span></label>
+        <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy || autostartStatus.requiresWindowsSettings || autostartStatus.blockedByPolicy} /><span>Start Sync with this computer</span></label>
+        {autostartStatus.migrationAvailable ? (
+          <p className="muted app-visibility-help">Windows needs a one-time confirmation to keep your existing startup choice. Turn this on and accept the Windows prompt.</p>
+        ) : null}
+        {autostartStatus.requiresWindowsSettings ? (
+          <p className="muted app-visibility-help">Windows has disabled startup for Sync. Re-enable it in Settings &gt; Apps &gt; Startup.</p>
+        ) : null}
+        {autostartStatus.blockedByPolicy ? (
+          <p className="muted app-visibility-help">Startup for Sync is disabled by Windows or your organization.</p>
+        ) : null}
         <label className="toggle"><input type="checkbox" checked={hideAppIcon} onChange={toggleAppIcon} disabled={busy} /><span>Hide app icon from Dock or taskbar</span></label>
         <p className="muted app-visibility-help">The menu bar or tray icon stays available so you can reopen Sync at any time.</p>
       </section>

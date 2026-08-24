@@ -73,9 +73,14 @@ jobs:
           [xml]$manifest = Get-Content windows/Package.appxmanifest.xml -Raw
           $namespace = New-Object System.Xml.XmlNamespaceManager($manifest.NameTable)
           $namespace.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
+          $namespace.AddNamespace('desktop', 'http://schemas.microsoft.com/appx/manifest/desktop/windows10')
           $dependency = $manifest.SelectSingleNode("/f:Package/f:Dependencies/f:PackageDependency[@Name='Microsoft.VCLibs.140.00.UWPDesktop']", $namespace)
           if (-not $dependency) {
             throw 'Microsoft.VCLibs.140.00.UWPDesktop is missing from the Store manifest'
+          }
+          $startupTask = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSync.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $namespace)
+          if (-not $startupTask) {
+            throw 'The Store manifest must declare the opt-in MyBrewFolio Sync startup task'
           }
           $installScript = Get-Content windows/test-package/Install-TestPackage.ps1 -Raw
           $uninstallScript = Get-Content windows/test-package/Uninstall-TestPackage.ps1 -Raw
