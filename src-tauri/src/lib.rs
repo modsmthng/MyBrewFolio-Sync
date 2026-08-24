@@ -188,7 +188,7 @@ async fn store_startup_task() -> Result<windows::ApplicationModel::StartupTask, 
 
     StartupTask::GetAsync(&HSTRING::from(STORE_STARTUP_TASK_ID))
         .map_err(|error| error.to_string())?
-        .await
+        .get()
         .map_err(|error| error.to_string())
 }
 
@@ -219,7 +219,7 @@ async fn request_store_startup_task_enable(
     let operation = receiver
         .await
         .map_err(|_| "Windows could not request startup permission".to_string())??;
-    operation.await.map_err(|error| error.to_string())
+    operation.get().map_err(|error| error.to_string())
 }
 
 #[cfg(target_os = "windows")]
