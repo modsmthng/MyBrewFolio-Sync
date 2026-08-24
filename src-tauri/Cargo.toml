@@ -1,6 +1,6 @@
 [package]
 name = "mybrewfolio-sync"
-version = "0.3.3"
+version = "0.3.4"
 description = "GaggiMate to MyBrewFolio synchronization companion"
 authors = ["André Tolksdorf"]
 license = "GPL-3.0-or-later"
