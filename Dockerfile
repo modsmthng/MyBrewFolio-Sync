@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.85-bookworm AS build
+FROM rust:1.86-bookworm AS build
 ARG MYBREWFOLIO_SYNC_API_URL=https://mybrewfolio.com
 ARG MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID
 ARG MYBREWFOLIO_SYNC_AUTHORIZE_URL=https://clerk.mybrewfolio.com/oauth/authorize
