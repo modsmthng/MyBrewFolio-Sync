@@ -14,7 +14,7 @@ WORKDIR /source
 COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
 COPY src-tauri/src ./src-tauri/src
 WORKDIR /source/src-tauri
-RUN cargo build --locked --release --no-default-features --bin mybrewfolio-syncd
+RUN cargo build --locked --release --no-default-features --features headless --bin mybrewfolio-syncd
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* \
