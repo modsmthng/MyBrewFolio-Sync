@@ -1,0 +1,23 @@
+services:
+  sync:
+    image: ghcr.io/modsmthng/mybrewfolio-sync:latest
+    restart: unless-stopped
+    environment:
+      MYBREWFOLIO_SYNC_GAGGIMATE_HOST: ${MYBREWFOLIO_SYNC_GAGGIMATE_HOST:-gaggimate.local}
+      MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE: /run/secrets/mybrewfolio_sync_state_key
+    secrets:
+      - mybrewfolio_sync_state_key
+    volumes:
+      - sync-data:/data
+    healthcheck:
+      test: ["CMD", "mybrewfolio-syncd", "health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+secrets:
+  mybrewfolio_sync_state_key:
+    file: ./mybrewfolio-sync-state.key
+
+volumes:
+  sync-data:

@@ -2,15 +2,11 @@
 
 use std::{path::Path, sync::Mutex};
 
-use keyring::Entry;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::model::{OAuthTokens, SyncObject};
-
-const KEYRING_SERVICE: &str = "com.mybrewfolio.sync";
-const KEYRING_USER: &str = "oauth-tokens";
+use crate::model::SyncObject;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -88,6 +84,14 @@ impl AppStore {
              on conflict (key) do update set value = excluded.value",
             params![key, value],
         )?;
+        Ok(())
+    }
+
+    pub fn remove_setting(&self, key: &str) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute("delete from settings where key = ?1", [key])?;
         Ok(())
     }
 
@@ -267,34 +271,6 @@ impl AppStore {
                  delete from settings where key not in ('machine_host', 'installation_id', 'hide_app_icon');",
             )?;
         Ok(())
-    }
-
-    fn keyring() -> Result<Entry, StoreError> {
-        Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|_| StoreError::Keychain)
-    }
-
-    pub fn save_tokens(&self, tokens: &OAuthTokens) -> Result<(), StoreError> {
-        let value = serde_json::to_string(tokens).map_err(|_| StoreError::InvalidCredentials)?;
-        Self::keyring()?
-            .set_password(&value)
-            .map_err(|_| StoreError::Keychain)
-    }
-
-    pub fn tokens(&self) -> Result<Option<OAuthTokens>, StoreError> {
-        match Self::keyring()?.get_password() {
-            Ok(value) => serde_json::from_str(&value)
-                .map(Some)
-                .map_err(|_| StoreError::InvalidCredentials),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(StoreError::Keychain),
-        }
-    }
-
-    pub fn delete_tokens(&self) -> Result<(), StoreError> {
-        match Self::keyring()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(StoreError::Keychain),
-        }
     }
 }
 

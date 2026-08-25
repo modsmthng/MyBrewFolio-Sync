@@ -1,6 +1,6 @@
 [package]
 name = "mybrewfolio-sync"
-version = "0.3.4"
+version = "0.3.5"
 description = "GaggiMate to MyBrewFolio synchronization companion"
 authors = ["André Tolksdorf"]
 license = "GPL-3.0-or-later"
@@ -12,28 +12,51 @@ rust-version = "1.77.2"
 name = "mybrewfolio_sync_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+default = ["desktop"]
+desktop = [
+  "dep:keyring",
+  "dep:tauri",
+  "dep:tauri-plugin-autostart",
+  "dep:tauri-plugin-deep-link",
+  "dep:tauri-plugin-opener",
+  "dep:tauri-plugin-single-instance",
+  "dep:tauri-plugin-updater",
+  "dep:tauri-build",
+]
+
+[[bin]]
+name = "mybrewfolio-sync"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "mybrewfolio-syncd"
+path = "src/daemon.rs"
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+chacha20poly1305 = "0.10"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"], optional = true }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
-tauri = { version = "2", features = ["image-png", "tray-icon"] }
-tauri-plugin-autostart = "2"
-tauri-plugin-deep-link = "2"
-tauri-plugin-opener = "2"
-tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
-tauri-plugin-updater = "2"
+tauri = { version = "2", features = ["image-png", "tray-icon"], optional = true }
+tauri-plugin-autostart = { version = "2", optional = true }
+tauri-plugin-deep-link = { version = "2", optional = true }
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
+tauri-plugin-updater = { version = "2", optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["time", "sync", "net"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net", "io-util"] }
 tokio-tungstenite = "0.26"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

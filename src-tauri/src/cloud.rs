@@ -6,15 +6,15 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use rand::{rngs::OsRng, RngCore};
 use reqwest::{redirect::Policy, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
 use crate::{
+    credentials::CredentialStore,
     model::{DeviceRegistration, OAuthTokens, SyncObject},
-    store::AppStore,
 };
 
 #[derive(Debug, Error)]
@@ -38,6 +38,7 @@ pub struct CloudConfig {
     pub authorize_url: String,
     pub token_url: String,
     pub redirect_uri: String,
+    pub device_redirect_uri: String,
 }
 
 impl CloudConfig {
@@ -57,14 +58,56 @@ impl CloudConfig {
                 .unwrap_or("https://clerk.mybrewfolio.com/oauth/token")
                 .to_string(),
             redirect_uri: "mybrewfolio-sync://oauth/callback".to_string(),
+            device_redirect_uri: option_env!("MYBREWFOLIO_SYNC_DEVICE_CALLBACK_URL")
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/v1/sync/device-auth/callback",
+                        option_env!("MYBREWFOLIO_SYNC_API_URL")
+                            .unwrap_or("https://mybrewfolio.com")
+                            .trim_end_matches('/')
+                    )
+                }),
         }
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PendingOAuth {
     pub verifier: String,
     pub state: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct PendingDeviceAuthorization {
+    pub oauth: PendingOAuth,
+    pub request_id: String,
+    pub poll_token: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceAuthorizationInfo {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAuthorizationStart {
+    request_id: String,
+    user_code: String,
+    verification_uri: String,
+    poll_token: String,
+    expires_in: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceAuthorizationPoll {
+    status: String,
+    authorization_code: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,11 +120,11 @@ struct TokenResponse {
 pub struct CloudClient {
     pub config: CloudConfig,
     http: reqwest::Client,
-    store: Arc<AppStore>,
+    credentials: Arc<dyn CredentialStore>,
 }
 
 impl CloudClient {
-    pub fn new(store: Arc<AppStore>) -> Result<Self, CloudError> {
+    pub fn new(credentials: Arc<dyn CredentialStore>) -> Result<Self, CloudError> {
         let http = reqwest::Client::builder()
             .redirect(Policy::none())
             .timeout(Duration::from_secs(30))
@@ -90,11 +133,14 @@ impl CloudClient {
         Ok(Self {
             config: CloudConfig::bundled(),
             http,
-            store,
+            credentials,
         })
     }
 
-    pub fn authorization(&self) -> Result<(Url, PendingOAuth), CloudError> {
+    fn authorization_for_redirect(
+        &self,
+        redirect_uri: &str,
+    ) -> Result<(Url, PendingOAuth), CloudError> {
         if self.config.client_id.is_empty() {
             return Err(CloudError::NotConfigured);
         }
@@ -110,12 +156,50 @@ impl CloudClient {
         url.query_pairs_mut()
             .append_pair("response_type", "code")
             .append_pair("client_id", &self.config.client_id)
-            .append_pair("redirect_uri", &self.config.redirect_uri)
+            .append_pair("redirect_uri", redirect_uri)
             .append_pair("scope", "openid offline_access")
             .append_pair("code_challenge", &challenge)
             .append_pair("code_challenge_method", "S256")
             .append_pair("state", &state);
         Ok((url, PendingOAuth { verifier, state }))
+    }
+
+    pub fn authorization(&self) -> Result<(Url, PendingOAuth), CloudError> {
+        self.authorization_for_redirect(&self.config.redirect_uri)
+    }
+
+    pub async fn begin_device_authorization(
+        &self,
+    ) -> Result<(DeviceAuthorizationInfo, PendingDeviceAuthorization), CloudError> {
+        let (_url, oauth) = self.authorization_for_redirect(&self.config.device_redirect_uri)?;
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(oauth.verifier.as_bytes()));
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/sync/device-auth/requests",
+                self.config.api_url
+            ))
+            .json(&json!({ "state": oauth.state, "codeChallenge": challenge }))
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if !response.status().is_success() {
+            return Err(CloudError::OAuth);
+        }
+        let started: DeviceAuthorizationStart =
+            response.json().await.map_err(|_| CloudError::OAuth)?;
+        Ok((
+            DeviceAuthorizationInfo {
+                user_code: started.user_code,
+                verification_uri: started.verification_uri,
+                expires_in: started.expires_in,
+            },
+            PendingDeviceAuthorization {
+                oauth,
+                request_id: started.request_id,
+                poll_token: started.poll_token,
+            },
+        ))
     }
 
     pub async fn complete_authorization(
@@ -135,14 +219,24 @@ impl CloudClient {
             return Err(CloudError::OAuth);
         }
         let code = parameters.get("code").ok_or(CloudError::OAuth)?;
+        self.exchange_authorization_code(code, &pending, &self.config.redirect_uri)
+            .await
+    }
+
+    async fn exchange_authorization_code(
+        &self,
+        code: &str,
+        pending: &PendingOAuth,
+        redirect_uri: &str,
+    ) -> Result<(), CloudError> {
         let response = self
             .http
             .post(&self.config.token_url)
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("client_id", self.config.client_id.as_str()),
-                ("redirect_uri", self.config.redirect_uri.as_str()),
-                ("code", code.as_str()),
+                ("redirect_uri", redirect_uri),
+                ("code", code),
                 ("code_verifier", pending.verifier.as_str()),
             ])
             .send()
@@ -152,7 +246,7 @@ impl CloudClient {
             return Err(CloudError::OAuth);
         }
         let token: TokenResponse = response.json().await.map_err(|_| CloudError::OAuth)?;
-        self.store
+        self.credentials
             .save_tokens(&OAuthTokens {
                 access_token: token.access_token,
                 refresh_token: token.refresh_token,
@@ -161,9 +255,40 @@ impl CloudClient {
             .map_err(|_| CloudError::OAuth)
     }
 
+    pub async fn poll_device_authorization(
+        &self,
+        pending: &PendingDeviceAuthorization,
+    ) -> Result<Option<()>, CloudError> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/v1/sync/device-auth/requests/{}/poll",
+                self.config.api_url, pending.request_id
+            ))
+            .json(&json!({ "pollToken": pending.poll_token }))
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::ACCEPTED {
+            return Ok(None);
+        }
+        if !response.status().is_success() {
+            return Err(CloudError::OAuth);
+        }
+        let result: DeviceAuthorizationPoll =
+            response.json().await.map_err(|_| CloudError::OAuth)?;
+        if result.status != "authorized" {
+            return Ok(None);
+        }
+        let code = result.authorization_code.ok_or(CloudError::OAuth)?;
+        self.exchange_authorization_code(&code, &pending.oauth, &self.config.device_redirect_uri)
+            .await?;
+        Ok(Some(()))
+    }
+
     async fn access_token(&self) -> Result<String, CloudError> {
         let mut tokens = self
-            .store
+            .credentials
             .tokens()
             .map_err(|_| CloudError::OAuth)?
             .ok_or(CloudError::Revoked)?;
@@ -189,7 +314,7 @@ impl CloudClient {
         tokens.access_token = refreshed.access_token;
         tokens.refresh_token = refreshed.refresh_token.or(Some(refresh));
         tokens.expires_at = Utc::now().timestamp() + refreshed.expires_in.unwrap_or(3600);
-        self.store
+        self.credentials
             .save_tokens(&tokens)
             .map_err(|_| CloudError::OAuth)?;
         Ok(tokens.access_token)

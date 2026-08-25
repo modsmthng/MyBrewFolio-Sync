@@ -5,13 +5,15 @@ use std::{collections::HashSet, sync::Arc};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::{Emitter, Manager};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
-    cloud::{CloudClient, CloudError, PendingOAuth},
+    cloud::{
+        CloudClient, CloudError, DeviceAuthorizationInfo, PendingDeviceAuthorization, PendingOAuth,
+    },
+    credentials::CredentialStore,
     local::{normalize_host, GaggiMateClient, LocalError},
     model::{AppStatus, NoteBackupSummary, SyncObject},
     store::{AppStore, StoreError},
@@ -54,6 +56,7 @@ impl EngineError {
 pub struct SyncEngine {
     store: Arc<AppStore>,
     cloud: CloudClient,
+    credentials: Arc<dyn CredentialStore>,
     pending_oauth: Mutex<Option<PendingOAuth>>,
     status: RwLock<AppStatus>,
     sync_lock: Mutex<()>,
@@ -164,18 +167,22 @@ fn api_timestamp(value: DateTime<Utc>) -> String {
 }
 
 impl SyncEngine {
-    pub fn open(store: Arc<AppStore>) -> Result<Self, EngineError> {
-        let cloud = CloudClient::new(store.clone())?;
+    pub fn open(
+        store: Arc<AppStore>,
+        credentials: Arc<dyn CredentialStore>,
+    ) -> Result<Self, EngineError> {
+        let cloud = CloudClient::new(credentials.clone())?;
         let host = store
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".to_string());
-        let connected = store.tokens()?.is_some() && store.setting("device_id")?.is_some();
+        let connected = credentials.tokens()?.is_some() && store.setting("device_id")?.is_some();
         let device_id = store.setting("device_id")?;
         let notes_sync_intro_seen = store.setting("notes_sync_intro_seen")?.as_deref() == Some("1");
         let issues = store.failures().unwrap_or_default();
         Ok(Self {
             store,
             cloud,
+            credentials,
             pending_oauth: Mutex::new(None),
             status: RwLock::new(AppStatus {
                 connected,
@@ -515,6 +522,37 @@ impl SyncEngine {
             .take()
             .ok_or(EngineError::OAuthState)?;
         self.cloud.complete_authorization(callback, pending).await?;
+        self.register_connected_device().await
+    }
+
+    pub async fn begin_device_oauth(&self) -> Result<DeviceAuthorizationInfo, EngineError> {
+        let (info, pending) = self.cloud.begin_device_authorization().await?;
+        let value = serde_json::to_string(&pending).map_err(|_| StoreError::InvalidCredentials)?;
+        self.credentials.save_pending_device_authorization(&value)?;
+        Ok(info)
+    }
+
+    pub async fn poll_device_oauth(&self) -> Result<bool, EngineError> {
+        let value = self
+            .credentials
+            .pending_device_authorization()?
+            .ok_or(EngineError::OAuthState)?;
+        let pending = serde_json::from_str::<PendingDeviceAuthorization>(&value)
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        if self
+            .cloud
+            .poll_device_authorization(&pending)
+            .await?
+            .is_some()
+        {
+            self.credentials.delete_pending_device_authorization()?;
+            self.register_connected_device().await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn register_connected_device(&self) -> Result<(), EngineError> {
         let installation_id = self
             .store
             .setting("installation_id")?
@@ -1061,7 +1099,7 @@ impl SyncEngine {
                 // Device revocation is checked by the API for every request.
                 // Clear credentials and queued account data immediately so a
                 // revoked installation cannot keep presenting itself as linked.
-                self.store.delete_tokens()?;
+                self.credentials.delete_tokens()?;
                 self.store.clear_account_data()?;
                 let host = self
                     .store
@@ -1125,7 +1163,7 @@ impl SyncEngine {
             .is_ok_and(|result| result.is_ok()),
             None => true,
         };
-        let credentials_removed = self.store.delete_tokens().is_ok();
+        let credentials_removed = self.credentials.delete_tokens().is_ok();
         self.store.clear_account_data()?;
         let host = self
             .store
@@ -1158,37 +1196,6 @@ impl SyncEngine {
             "serverRevoked": server_revoked,
             "credentialsRemoved": credentials_removed,
         }))
-    }
-
-    pub async fn emit_status(&self, app: &tauri::AppHandle) {
-        let status = self.status().await;
-        if let Some(item) = app.try_state::<crate::TrayStatusItem>() {
-            let text = if status.syncing {
-                "Syncing…"
-            } else if status.last_error.is_some() {
-                "Items not synchronized"
-            } else if status.connected {
-                "MyBrewFolio connected"
-            } else {
-                "MyBrewFolio not connected"
-            };
-            let _ = item.0.set_text(text);
-        }
-        if let Some(item) = app.try_state::<crate::TrayMachineItem>() {
-            let _ = item.0.set_text(format!("Machine: {}", status.machine_host));
-        }
-        if let Some(item) = app.try_state::<crate::TrayErrorItem>() {
-            let text = status
-                .last_error
-                .as_deref()
-                .map(|error| {
-                    let shortened: String = error.chars().take(90).collect();
-                    format!("Last error: {shortened}")
-                })
-                .unwrap_or_else(|| "No Sync errors".to_string());
-            let _ = item.0.set_text(text);
-        }
-        let _ = app.emit("sync-status-changed", status);
     }
 }
 

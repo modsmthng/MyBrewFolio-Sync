@@ -77,12 +77,21 @@ MYBREWFOLIO_SYNC_API_URL=https://mybrewfolio.com
 MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID=<public Clerk OAuth client ID>
 MYBREWFOLIO_SYNC_AUTHORIZE_URL=https://clerk.mybrewfolio.com/oauth/authorize
 MYBREWFOLIO_SYNC_TOKEN_URL=https://clerk.mybrewfolio.com/oauth/token
+MYBREWFOLIO_SYNC_DEVICE_CALLBACK_URL=https://mybrewfolio.com/v1/sync/device-auth/callback
 MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY=<Tauri updater public key>
 ```
 
 OAuth tokens are stored in the operating-system keychain. SQLite stores settings, the local
 offline/retry queue, cached server state, and bounded diagnostics without notes contents,
 credentials, or the machine address.
+
+## Headless Linux and Docker
+
+`mybrewfolio-syncd` is a Tauri-free Linux binary that shares the desktop application's SyncEngine.
+It provides daemon, one-shot, authentication, status, configuration, Notes, and resync commands
+as JSON-producing CLI operations. Docker state is stored under `/data`; tokens are encrypted with
+an explicitly mounted Docker secret instead of an OS keychain. See [docs/headless.md](docs/headless.md)
+for Compose setup, browser pairing, and LAN networking guidance.
 
 ## Verification
 
