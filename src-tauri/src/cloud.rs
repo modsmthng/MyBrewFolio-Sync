@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use rand::{rngs::OsRng, RngCore};
-use reqwest::{redirect::Policy, StatusCode};
+use reqwest::{redirect::Policy, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -70,6 +70,17 @@ impl CloudConfig {
                 }),
         }
     }
+}
+
+/// Every non-2xx response in the OAuth flow collapses into one deliberately
+/// vague user-facing error, which makes a rate limit look exactly like a failed
+/// authorization. Record what the server actually said on stderr so the two can
+/// be told apart. Only failure bodies are logged, and they are truncated.
+async fn log_http_failure(context: &str, response: Response) {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let detail: String = body.trim().chars().take(200).collect();
+    eprintln!("{context}: HTTP {status} {detail}");
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -184,6 +195,7 @@ impl CloudClient {
             .await
             .map_err(|_| CloudError::Unreachable)?;
         if !response.status().is_success() {
+            log_http_failure("device authorization request", response).await;
             return Err(CloudError::OAuth);
         }
         let started: DeviceAuthorizationStart =
@@ -243,6 +255,7 @@ impl CloudClient {
             .await
             .map_err(|_| CloudError::Unreachable)?;
         if !response.status().is_success() {
+            log_http_failure("authorization code exchange", response).await;
             return Err(CloudError::OAuth);
         }
         let token: TokenResponse = response.json().await.map_err(|_| CloudError::OAuth)?;
@@ -273,6 +286,7 @@ impl CloudClient {
             return Ok(None);
         }
         if !response.status().is_success() {
+            log_http_failure("device authorization poll", response).await;
             return Err(CloudError::OAuth);
         }
         let result: DeviceAuthorizationPoll =
@@ -308,6 +322,7 @@ impl CloudClient {
             .await
             .map_err(|_| CloudError::Unreachable)?;
         if !response.status().is_success() {
+            log_http_failure("token refresh", response).await;
             return Err(CloudError::Revoked);
         }
         let refreshed: TokenResponse = response.json().await.map_err(|_| CloudError::OAuth)?;
