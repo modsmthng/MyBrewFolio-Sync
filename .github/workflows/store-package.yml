@@ -174,7 +174,6 @@ jobs:
           gh release upload $storeTag `
             './MyBrewFolio-Sync-Store.msix' `
             './MyBrewFolio-Sync-Store-Test.zip' `
-            './docs/microsoft-store-submission.md' `
             --clobber
           if ($LASTEXITCODE -ne 0) {
             throw 'Failed to upload the Microsoft Store submission package'
