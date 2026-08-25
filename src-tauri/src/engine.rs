@@ -19,6 +19,34 @@ use crate::{
     store::{AppStore, StoreError},
 };
 
+const MAX_SYNC_BATCH_ITEMS: usize = 25;
+// The API accepts 8 MiB batches. Keep a margin so metadata added by a future
+// client version cannot turn an otherwise valid queue entry into a rejected
+// request.
+const MAX_SYNC_BATCH_BYTES: usize = 7 * 1024 * 1024;
+
+fn serialized_batch_bytes(items: &[SyncObject]) -> usize {
+    serde_json::to_vec(&serde_json::json!({ "items": items }))
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
+}
+
+fn select_sync_batch(pending: &[SyncObject]) -> (Vec<SyncObject>, Option<SyncObject>) {
+    let mut selected = Vec::new();
+    for object in pending {
+        let mut candidate = selected.clone();
+        candidate.push(object.clone());
+        if serialized_batch_bytes(&candidate) <= MAX_SYNC_BATCH_BYTES {
+            selected.push(object.clone());
+        } else if selected.is_empty() {
+            return (selected, Some(object.clone()));
+        } else {
+            break;
+        }
+    }
+    (selected, None)
+}
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error(transparent)]
@@ -892,11 +920,25 @@ impl SyncEngine {
     async fn flush_queue(&self, device_id: &str) -> Result<usize, EngineError> {
         let mut invalid = 0;
         loop {
-            let pending = self.store.pending(25)?;
+            let pending = self.store.pending(MAX_SYNC_BATCH_ITEMS)?;
             if pending.is_empty() {
                 break;
             }
-            let response = self.cloud.batch(device_id, &pending).await?;
+            let (batch, oversized) = select_sync_batch(&pending);
+            if let Some(object) = oversized {
+                invalid += 1;
+                self.store.record_failure(
+                    Some(&object),
+                    &object.kind,
+                    &object.source_key,
+                    "upload",
+                    "This item exceeds the maximum MyBrewFolio upload batch size",
+                )?;
+                self.store
+                    .remove_pending(&object.kind, &object.source_key)?;
+                continue;
+            }
+            let response = self.cloud.batch(device_id, &batch).await?;
             let results = response
                 .get("results")
                 .and_then(Value::as_array)
@@ -916,7 +958,7 @@ impl SyncEngine {
                 if status == "invalid" {
                     invalid += 1;
                 }
-                if let Some(object) = pending.get(index) {
+                if let Some(object) = batch.get(index) {
                     if status == "invalid" {
                         let reason = result
                             .get("error")
@@ -946,9 +988,6 @@ impl SyncEngine {
                             .remove_pending(&object.kind, &object.source_key)?;
                     }
                 }
-            }
-            if pending.len() < 25 {
-                break;
             }
         }
         Ok(invalid)
@@ -1285,9 +1324,13 @@ fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> V
 
 #[cfg(test)]
 mod tests {
-    use super::{api_timestamp, diagnostic_guidance, hash_value};
-    use crate::model::AppStatus;
+    use super::{
+        api_timestamp, diagnostic_guidance, hash_value, select_sync_batch, serialized_batch_bytes,
+        MAX_SYNC_BATCH_BYTES,
+    };
+    use crate::model::{AppStatus, SyncObject};
     use chrono::{TimeZone, Utc};
+    use serde_json::json;
 
     fn status() -> AppStatus {
         AppStatus {
@@ -1357,5 +1400,40 @@ mod tests {
             .as_str()
             .expect("diagnostic message")
             .contains("Nothing was restored or imported automatically"));
+    }
+
+    fn sync_object(key: &str, bytes: usize) -> SyncObject {
+        SyncObject {
+            kind: "shot".into(),
+            source_key: key.into(),
+            source_hash: "a".repeat(64),
+            shot_source_key: None,
+            data: json!({ "payload": serde_json::Value::String("x".repeat(bytes)) }),
+        }
+    }
+
+    #[test]
+    fn splits_batches_before_the_api_limit() {
+        let pending = vec![
+            sync_object("one", 3_800_000),
+            sync_object("two", 3_800_000),
+            sync_object("three", 100),
+        ];
+
+        let (batch, oversized) = select_sync_batch(&pending);
+
+        assert!(oversized.is_none());
+        assert_eq!(batch.len(), 1);
+        assert!(serialized_batch_bytes(&batch) <= MAX_SYNC_BATCH_BYTES);
+    }
+
+    #[test]
+    fn identifies_an_object_that_cannot_fit_in_any_batch() {
+        let pending = vec![sync_object("too-large", MAX_SYNC_BATCH_BYTES)];
+
+        let (batch, oversized) = select_sync_batch(&pending);
+
+        assert!(batch.is_empty());
+        assert_eq!(oversized.expect("oversized object").source_key, "too-large");
     }
 }

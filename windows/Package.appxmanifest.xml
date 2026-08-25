@@ -40,7 +40,7 @@
         </uap:Extension>
         <desktop:Extension
           Category="windows.startupTask"
-          Executable="MyBrewFolioSync.exe"
+          Executable="MyBrewFolioSyncStartup.exe"
           EntryPoint="Windows.FullTrustApplication">
           <desktop:StartupTask
             TaskId="MyBrewFolioSyncStartup"

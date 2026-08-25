@@ -1,6 +1,6 @@
 [package]
 name = "mybrewfolio-sync"
-version = "0.3.11"
+version = "0.3.12"
 default-run = "mybrewfolio-sync"
 description = "GaggiMate to MyBrewFolio synchronization companion"
 authors = ["André Tolksdorf"]
@@ -30,6 +30,11 @@ desktop = [
 [[bin]]
 name = "mybrewfolio-sync"
 path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "mybrewfolio-sync-startup"
+path = "src/store_startup.rs"
 required-features = ["desktop"]
 
 [[bin]]

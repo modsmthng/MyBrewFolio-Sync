@@ -35,6 +35,7 @@ if ! command -v sips >/dev/null 2>&1; then
   exit 1
 fi
 sips -z 36 36 "$tray_source" --out src-tauri/icons/tray-template.png >/dev/null
+sips -z 36 36 src-tauri/icons/icon.png --out src-tauri/icons/tray-color.png >/dev/null
 
 node <<'NODE'
 const fs = require("node:fs");
@@ -44,6 +45,7 @@ const expected = new Map([
   ["assets/microsoft-store/MyBrewFolio-Sync-150.png", 150],
   ["assets/microsoft-store/MyBrewFolio-Sync-300.png", 300],
   ["src-tauri/icons/tray-template.png", 36],
+  ["src-tauri/icons/tray-color.png", 36],
 ]);
 
 for (const [filename, size] of expected) {

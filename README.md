@@ -16,10 +16,11 @@ Track and share brews, quickly complete brew notes with smart suggestions from y
 2. Choose **Connect MyBrewFolio** and confirm sign-in in the normal browser.
 3. Confirm the detected `gaggimate.local` address, or enter a private local IP.
 
-The application then starts with the computer, checks for new shots every 30 seconds, compares
-profiles every five minutes, and catches up after either the computer, machine, or internet was
-offline. One fixed status line reports the current operation and retains actionable failures without
-replacing the separate connection indicator.
+The application then starts with the computer in the background, checks for new shots every 30
+seconds, compares profiles every five minutes, and catches up after either the computer, machine,
+or internet was offline. Open Sync from its menu bar or tray icon; manually launched and first-run
+windows still open normally. One fixed status line reports the current operation and retains
+actionable failures without replacing the separate connection indicator.
 
 The optional **Hide app icon from Dock or taskbar** setting keeps the menu bar or tray icon as the
 permanent entry point. On macOS it uses accessory-app mode to hide Sync from the Dock and app
@@ -116,7 +117,8 @@ Store icon formats reproducibly with:
 
 The monochrome `assets/tray-template.svg` is rendered separately to
 `src-tauri/icons/tray-template.png`. macOS treats it as a template image so the menu-bar icon stays
-visible in both Light and Dark appearances. Microsoft Store listing artwork is kept in
+visible in both Light and Dark appearances. Windows and Linux use the generated, high-contrast
+`src-tauri/icons/tray-color.png`. Microsoft Store listing artwork is kept in
 `assets/microsoft-store/` at the exact requested 72, 150 and 300 pixel sizes.
 
 ## Security and privacy

@@ -97,7 +97,9 @@ jobs:
           $packageVersion = "$($parts[0]).$($parts[1]).$($parts[2]).0"
 
           cargo build --manifest-path src-tauri/Cargo.toml --release `
-            --features tauri/custom-protocol
+            --features tauri/custom-protocol `
+            --bin mybrewfolio-sync `
+            --bin mybrewfolio-sync-startup
           if ($LASTEXITCODE -ne 0) {
             throw 'The Store build failed to compile the application binary'
           }
@@ -114,6 +116,7 @@ jobs:
             -Publisher $env:MSIX_PUBLISHER `
             -Version $packageVersion `
             -Executable './src-tauri/target/release/mybrewfolio-sync.exe' `
+            -StartupExecutable './src-tauri/target/release/mybrewfolio-sync-startup.exe' `
             -Output './MyBrewFolio-Sync-Store.msix'
           ./scripts/create-msix-test-bundle.ps1 `
             -Msix './MyBrewFolio-Sync-Store.msix' `

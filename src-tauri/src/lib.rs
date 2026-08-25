@@ -30,6 +30,7 @@ mod desktop {
         tray::TrayIconBuilder,
         Emitter, Manager, State,
     };
+    #[cfg(target_os = "macos")]
     use tauri_plugin_autostart::MacosLauncher;
     use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
     use tauri_plugin_opener::OpenerExt;
@@ -715,9 +716,22 @@ mod desktop {
         }
     }
 
+    fn has_autostart_argument(arguments: impl IntoIterator<Item = String>) -> bool {
+        arguments
+            .into_iter()
+            .any(|argument| argument == "--autostart")
+    }
+
+    fn launched_from_autostart() -> bool {
+        has_autostart_argument(std::env::args().skip(1))
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{autostart_status_from_state, is_store_managed_build, StoreStartupTaskState};
+        use super::{
+            autostart_status_from_state, has_autostart_argument, is_store_managed_build,
+            StoreStartupTaskState,
+        };
 
         #[test]
         fn store_build_is_limited_to_windows_store_packages() {
@@ -763,11 +777,21 @@ mod desktop {
             assert!(status.blocked_by_policy);
             assert!(!status.requires_windows_settings);
         }
+
+        #[test]
+        fn autostart_argument_is_detected_without_matching_other_arguments() {
+            assert!(has_autostart_argument(["--autostart".to_string()]));
+            assert!(!has_autostart_argument([
+                "--autostarted".to_string(),
+                "--other".to_string(),
+            ]));
+        }
     }
 
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
         let mut builder = tauri::Builder::default();
+        let launch_in_background = launched_from_autostart();
 
         #[cfg(desktop)]
         {
@@ -783,15 +807,19 @@ mod desktop {
             updater = updater.pubkey(public_key);
         }
 
+        let autostart = {
+            let builder = tauri_plugin_autostart::Builder::new().arg("--autostart");
+            #[cfg(target_os = "macos")]
+            let builder = builder.macos_launcher(MacosLauncher::LaunchAgent);
+            builder.build()
+        };
+
         let app = builder
             .plugin(tauri_plugin_deep_link::init())
             .plugin(tauri_plugin_opener::init())
             .plugin(updater.build())
-            .plugin(tauri_plugin_autostart::init(
-                MacosLauncher::LaunchAgent,
-                None,
-            ))
-            .setup(|app| {
+            .plugin(autostart)
+            .setup(move |app| {
                 let data_dir = app.path().app_data_dir()?;
                 let startup_diagnostics = Arc::new(StartupDiagnostics::new(
                     data_dir.join("startup-diagnostics.log"),
@@ -854,8 +882,12 @@ mod desktop {
                         &quit_item,
                     ],
                 )?;
+                #[cfg(target_os = "macos")]
                 let tray_icon =
                     tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+                #[cfg(not(target_os = "macos"))]
+                let tray_icon =
+                    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-color.png"))?;
                 TrayIconBuilder::new()
                     .icon(tray_icon)
                     .icon_as_template(cfg!(target_os = "macos"))
@@ -891,6 +923,10 @@ mod desktop {
                         _ => {}
                     })
                     .build(app)?;
+
+                if !launch_in_background {
+                    show_main_window(app.handle());
+                }
 
                 let autostart_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {

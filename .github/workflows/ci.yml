@@ -83,7 +83,7 @@ jobs:
           if (-not $dependency) {
             throw 'Microsoft.VCLibs.140.00.UWPDesktop is missing from the Store manifest'
           }
-          $startupTask = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSync.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $namespace)
+          $startupTask = $manifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSyncStartup.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $namespace)
           if (-not $startupTask) {
             throw 'The Store manifest must declare the opt-in MyBrewFolio Sync startup task'
           }

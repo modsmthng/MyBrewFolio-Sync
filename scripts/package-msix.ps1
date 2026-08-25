@@ -5,6 +5,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Publisher,
   [Parameter(Mandatory = $true)][string]$Version,
   [Parameter(Mandatory = $true)][string]$Executable,
+  [Parameter(Mandatory = $true)][string]$StartupExecutable,
   [string]$Output = "MyBrewFolio-Sync-Store.msix"
 )
 
@@ -14,6 +15,7 @@ $staging = Join-Path $env:RUNNER_TEMP "mybrewfolio-sync-msix"
 if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }
 New-Item -ItemType Directory -Path (Join-Path $staging "Assets") | Out-Null
 Copy-Item $Executable (Join-Path $staging "MyBrewFolioSync.exe")
+Copy-Item $StartupExecutable (Join-Path $staging "MyBrewFolioSyncStartup.exe")
 
 $manifest = Get-Content (Join-Path $root "windows\Package.appxmanifest.xml") -Raw
 $manifest = $manifest.Replace("__IDENTITY_NAME__", $IdentityName)
@@ -37,7 +39,7 @@ if (-not $vclibs) { throw "The MSIX manifest must declare Microsoft.VCLibs.140.0
 $startupTask = $manifestXml.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup']", $namespace)
 if (-not $startupTask) { throw "The MSIX manifest must declare the MyBrewFolio Sync startup task" }
 $startupExtension = $startupTask.ParentNode
-if ($startupExtension.GetAttribute("Executable") -ne "MyBrewFolioSync.exe") { throw "The MSIX startup task must launch MyBrewFolioSync.exe" }
+if ($startupExtension.GetAttribute("Executable") -ne "MyBrewFolioSyncStartup.exe") { throw "The MSIX startup task must launch MyBrewFolioSyncStartup.exe" }
 if ($startupExtension.GetAttribute("EntryPoint") -ne "Windows.FullTrustApplication") { throw "The MSIX startup task must use Windows.FullTrustApplication" }
 if ($startupTask.GetAttribute("Enabled") -ne "false") { throw "The MSIX startup task must remain opt-in" }
 if ($startupTask.GetAttribute("DisplayName") -ne "MyBrewFolio Sync") { throw "The MSIX startup task must have the MyBrewFolio Sync display name" }
@@ -104,6 +106,7 @@ if (-not $dumpbinPath) {
 
 if (-not $dumpbinPath) { throw "dumpbin.exe was not found; the Store package cannot be verified" }
 Write-Host "Using dumpbin.exe at $dumpbinPath"
+if (-not (Test-Path $StartupExecutable)) { throw "The Store startup launcher does not exist: $StartupExecutable" }
 $dependencies = (& $dumpbinPath /dependents $Executable 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0) { throw "Could not inspect Windows runtime dependencies" }
 $needsVclibs = $dependencies -match "(?i)VCRUNTIME140(?:_1)?\.dll"
@@ -111,6 +114,15 @@ if ($needsVclibs -and -not $vclibs) { throw "The executable imports Visual C++ r
 $headers = (& $dumpbinPath /headers $Executable 2>&1 | Out-String)
 if ($LASTEXITCODE -ne 0 -or $headers -notmatch "(?i)Windows GUI") {
   throw "The Store executable must use the Windows GUI subsystem"
+}
+$startupDependencies = (& $dumpbinPath /dependents $StartupExecutable 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0) { throw "Could not inspect Windows startup launcher dependencies" }
+if ($startupDependencies -match "(?i)VCRUNTIME140(?:_1)?\.dll" -and -not $vclibs) {
+  throw "The startup launcher imports Visual C++ runtime DLLs without a VCLibs manifest dependency"
+}
+$startupHeaders = (& $dumpbinPath /headers $StartupExecutable 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $startupHeaders -notmatch "(?i)Windows GUI") {
+  throw "The Store startup launcher must use the Windows GUI subsystem"
 }
 
 $makeAppx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\makeappx.exe" |
@@ -127,6 +139,7 @@ if ($LASTEXITCODE -ne 0) { throw "The generated MSIX could not be unpacked for v
 $requiredFiles = @(
   "AppxManifest.xml",
   "MyBrewFolioSync.exe",
+  "MyBrewFolioSyncStartup.exe",
   "Assets\StoreLogo.png",
   "Assets\Square44x44Logo.png",
   "Assets\Square150x150Logo.png",
@@ -143,6 +156,6 @@ $packedNamespace.AddNamespace("f", "http://schemas.microsoft.com/appx/manifest/f
 $packedNamespace.AddNamespace("desktop", "http://schemas.microsoft.com/appx/manifest/desktop/windows10")
 $packedVclibs = $packedManifest.SelectSingleNode("/f:Package/f:Dependencies/f:PackageDependency[@Name='Microsoft.VCLibs.140.00.UWPDesktop']", $packedNamespace)
 if (-not $packedVclibs) { throw "The packed MSIX lost its Visual C++ framework dependency" }
-$packedStartupTask = $packedManifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSync.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $packedNamespace)
+$packedStartupTask = $packedManifest.SelectSingleNode("/f:Package/f:Applications/f:Application/f:Extensions/desktop:Extension[@Category='windows.startupTask' and @Executable='MyBrewFolioSyncStartup.exe' and @EntryPoint='Windows.FullTrustApplication']/desktop:StartupTask[@TaskId='MyBrewFolioSyncStartup' and @Enabled='false' and @DisplayName='MyBrewFolio Sync']", $packedNamespace)
 if (-not $packedStartupTask) { throw "The packed MSIX lost the opt-in MyBrewFolio Sync startup task" }
 Write-Host "Created Store submission package: $Output"

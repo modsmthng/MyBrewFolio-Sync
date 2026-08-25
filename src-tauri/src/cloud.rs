@@ -72,10 +72,9 @@ impl CloudConfig {
     }
 }
 
-/// Every non-2xx response in the OAuth flow collapses into one deliberately
-/// vague user-facing error, which makes a rate limit look exactly like a failed
-/// authorization. Record what the server actually said on stderr so the two can
-/// be told apart. Only failure bodies are logged, and they are truncated.
+/// Every non-2xx response collapses into a deliberately vague user-facing
+/// error. Record the HTTP status and a bounded server detail on stderr for
+/// diagnostics; only failure bodies are logged, and they are truncated.
 async fn log_http_failure(context: &str, response: Response) {
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -361,6 +360,7 @@ impl CloudClient {
             return Err(CloudError::Revoked);
         }
         if !response.status().is_success() {
+            log_http_failure("device registration", response).await;
             return Err(CloudError::Rejected);
         }
         let body: Value = response.json().await.map_err(|_| CloudError::Rejected)?;
@@ -410,6 +410,7 @@ impl CloudClient {
             return Err(CloudError::Revoked);
         }
         if !response.status().is_success() {
+            log_http_failure("sync batch", response).await;
             return Err(CloudError::Rejected);
         }
         response.json().await.map_err(|_| CloudError::Rejected)

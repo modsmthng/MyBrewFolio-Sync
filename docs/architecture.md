@@ -23,6 +23,11 @@ uses Tauri's accessory activation policy and Dock visibility API; Windows and Li
 window's skip-taskbar capability. The preference is stored in local SQLite, survives account
 disconnect, and is applied before the background loop starts.
 
+Autostart launches carry an internal `--autostart` argument. The initial window stays hidden until
+the tray is ready for that launch mode, while manual starts and first-run setup explicitly show it.
+The Store package uses a small startup launcher because MSIX startup tasks cannot pass arguments to
+the main executable.
+
 OAuth tokens are stored in the operating-system keychain. SQLite stores settings, cached server
 state, source hashes, and validated content waiting for an upload retry.
 
