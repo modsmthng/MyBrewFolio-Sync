@@ -118,6 +118,28 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: ${{ matrix.args }}
+      - name: Verify packaged desktop entrypoint
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            macos-latest)
+              APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/MyBrewFolio Sync.app"
+              test "$(plutil -extract CFBundleExecutable raw "$APP/Contents/Info.plist")" = "mybrewfolio-sync"
+              test -x "$APP/Contents/MacOS/mybrewfolio-sync"
+              ;;
+            ubuntu-22.04)
+              DEB="src-tauri/target/release/bundle/deb/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_amd64.deb"
+              CHECK_DIR="$(mktemp -d)"
+              dpkg-deb -x "$DEB" "$CHECK_DIR"
+              test -x "$CHECK_DIR/usr/bin/mybrewfolio-sync"
+              DESKTOP_FILE="$(find "$CHECK_DIR" -type f -name '*.desktop' -print -quit)"
+              test -n "$DESKTOP_FILE"
+              grep -qx 'Exec=mybrewfolio-sync' "$DESKTOP_FILE"
+              ;;
+            windows-latest)
+              test -f "src-tauri/target/release/mybrewfolio-sync.exe"
+              ;;
+          esac
       - name: Upload stable user-facing download aliases
         shell: bash
         env:
