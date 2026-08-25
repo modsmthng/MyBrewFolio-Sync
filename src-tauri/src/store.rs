@@ -133,6 +133,16 @@ impl AppStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn pending_count(&self) -> Result<usize, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let count: i64 =
+            connection.query_row("select count(*) from pending_objects", [], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
+    }
+
     pub fn remove_pending(&self, kind: &str, source_key: &str) -> Result<(), StoreError> {
         self.connection
             .lock()
@@ -216,6 +226,16 @@ impl AppStore {
             })
         })?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn failure_count(&self) -> Result<usize, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let count: i64 =
+            connection.query_row("select count(*) from sync_failures", [], |row| row.get(0))?;
+        Ok(count.max(0) as usize)
     }
 
     pub fn retry_failures(&self) -> Result<(), StoreError> {

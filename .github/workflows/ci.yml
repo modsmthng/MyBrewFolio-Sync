@@ -21,6 +21,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm run test:fake-gaggimate
+      - run: sh -n scripts/install-headless.sh
+      - run: npm run test:headless-installer
 
   native-check:
     strategy:
@@ -55,6 +57,9 @@ jobs:
         working-directory: src-tauri
 
       - run: cargo test --locked --lib
+        working-directory: src-tauri
+
+      - run: cargo test --locked --no-default-features --features headless
         working-directory: src-tauri
 
       - name: Verify Microsoft Store packaging sources

@@ -7,11 +7,12 @@
 set -eu
 
 INSTALL_DIR="${MYBREWFOLIO_SYNC_HOME:-${HOME:?HOME must be set}/.config/mybrewfolio-sync}"
-MACHINE_HOST="gaggimate.local"
+MACHINE_HOST=""
 START_DAEMON=1
+NON_INTERACTIVE=0
 
 usage() {
-  printf '%s\n' "Usage: install-headless.sh [--host HOST] [--no-start]"
+  printf '%s\n' "Usage: install-headless.sh [--host HOST] [--no-start] [--non-interactive]"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -25,6 +26,10 @@ while [ "$#" -gt 0 ]; do
       START_DAEMON=0
       shift
       ;;
+    --non-interactive)
+      NON_INTERACTIVE=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -35,6 +40,33 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+TTY_AVAILABLE=0
+if ( : </dev/tty ) 2>/dev/null; then
+  TTY_AVAILABLE=1
+fi
+
+read_from_tty() {
+  printf '%s' "$1" >/dev/tty
+  IFS= read -r value </dev/tty || return 1
+  printf '%s' "$value"
+}
+
+if [ -z "$MACHINE_HOST" ]; then
+  if [ "$NON_INTERACTIVE" -eq 1 ]; then
+    printf '%s\n' "--host is required together with --non-interactive." >&2
+    exit 64
+  fi
+  if [ "$TTY_AVAILABLE" -ne 1 ]; then
+    printf '%s\n' "No terminal is available. Use --host HOST --non-interactive for automation." >&2
+    exit 64
+  fi
+  machine_answer=$(read_from_tty "GaggiMate host [gaggimate.local]: ") || {
+    printf '%s\n' "Could not read the GaggiMate host from the terminal." >&2
+    exit 74
+  }
+  MACHINE_HOST=${machine_answer:-gaggimate.local}
+fi
 
 # The value is written to a Compose .env file. Keep it to hostnames, IPv4/IPv6
 # literals, and optional ports so command-line input cannot add Compose entries.
@@ -56,9 +88,11 @@ docker compose version >/dev/null 2>&1 || {
 
 umask 077
 mkdir -p "$INSTALL_DIR"
+chmod 700 "$INSTALL_DIR"
 KEY_FILE="$INSTALL_DIR/state.key"
 COMPOSE_FILE="$INSTALL_DIR/compose.yaml"
 ENV_FILE="$INSTALL_DIR/.env"
+HELPER_FILE="$INSTALL_DIR/sync"
 
 if [ -e "$COMPOSE_FILE" ]; then
   printf '%s\n' "Refusing to overwrite existing configuration: $COMPOSE_FILE" >&2
@@ -106,13 +140,67 @@ secrets:
 volumes:
   sync-data:
 EOF
+
+cat > "$HELPER_FILE" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+
+INSTALL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$#" -eq 0 ]; then
+  set -- help
+fi
+case "$1:${2-}" in
+  help:*|--help:*|-h:*|*:help|*:--help|*:-h)
+    # This works even if the continuous daemon service is currently stopped.
+    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" run --rm --no-deps sync "$@"
+    ;;
+  *)
+    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" exec -T sync mybrewfolio-syncd "$@"
+    ;;
+esac
+EOF
 chmod 600 "$ENV_FILE" "$COMPOSE_FILE"
+chmod 700 "$HELPER_FILE"
 
 printf '%s\n' "Created MyBrewFolio Sync configuration in $INSTALL_DIR"
-if [ "$START_DAEMON" -eq 1 ]; then
-  docker compose --project-directory "$INSTALL_DIR" -f "$COMPOSE_FILE" up -d
+printf '%s\n' "Local command: $HELPER_FILE help"
+
+if [ "$START_DAEMON" -eq 0 ]; then
+  printf '%s\n' "The daemon was not started (--no-start). Start the Compose service when you are ready."
+  exit 0
 fi
 
-printf '%s\n' "Connect your account once with:"
-printf '%s\n' "  docker compose --project-directory '$INSTALL_DIR' -f '$COMPOSE_FILE' exec sync mybrewfolio-syncd auth begin"
-printf '%s\n' "  docker compose --project-directory '$INSTALL_DIR' -f '$COMPOSE_FILE' exec sync mybrewfolio-syncd auth wait"
+docker compose --project-directory "$INSTALL_DIR" -f "$COMPOSE_FILE" up -d
+
+if [ "$NON_INTERACTIVE" -eq 1 ]; then
+  printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
+  exit 0
+fi
+
+if [ "$TTY_AVAILABLE" -ne 1 ]; then
+  printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
+  exit 0
+fi
+
+pair_answer=$(read_from_tty "Connect your MyBrewFolio account now? [Y/n]: ") || {
+  printf '%s\n' "Could not read the pairing choice. Pair later with: $HELPER_FILE auth begin" >&2
+  exit 0
+}
+case "$pair_answer" in
+  n|N|no|NO|No)
+    printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
+    ;;
+  *)
+    printf '%s\n' "Open the authorization URL below in your browser, then finish sign-in."
+    if ! "$HELPER_FILE" auth begin; then
+      printf '%s\n' "Could not begin pairing. Try again later with: $HELPER_FILE auth begin" >&2
+      exit 1
+    fi
+    printf '%s\n' "Waiting for browser authorization (up to 10 minutes)..."
+    if ! "$HELPER_FILE" auth wait; then
+      printf '%s\n' "Pairing was not completed. The installation is intact; retry with: $HELPER_FILE auth begin" >&2
+      exit 1
+    fi
+    printf '%s\n' "MyBrewFolio Sync is connected. Check it any time with: $HELPER_FILE diagnose"
+    ;;
+esac

@@ -1,7 +1,7 @@
 {
   "name": "@mybrewfolio/sync",
   "private": true,
-  "version": "0.3.9",
+  "version": "0.3.10",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "build": "vite build",
     "fake-gaggimate": "node tests/fake-gaggimate.mjs",
     "test:fake-gaggimate": "node tests/verify-fake-gaggimate.mjs",
+    "test:headless-installer": "node tests/verify-headless-installer.mjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

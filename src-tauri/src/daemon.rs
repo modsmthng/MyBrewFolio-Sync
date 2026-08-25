@@ -28,8 +28,73 @@ fn key_path() -> Result<PathBuf, String> {
 }
 
 fn usage() -> &'static str {
-    "Usage: mybrewfolio-syncd <daemon|sync-once|status|health|auth|host|configure|notes|resync|retry|disconnect>\n\
-     All successful commands write JSON to stdout. Configure MYBREWFOLIO_SYNC_DATA_DIR and MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE."
+    "Usage: mybrewfolio-syncd <command> [arguments]\n\
+     Run 'mybrewfolio-syncd help' to list commands. Successful data commands write JSON to stdout."
+}
+
+fn help_text(args: &[String]) -> &'static str {
+    let topic = match args {
+        [first, topic, ..] if first == "help" => Some(topic.as_str()),
+        [topic, flag, ..] if flag == "help" || flag == "--help" || flag == "-h" => {
+            Some(topic.as_str())
+        }
+        _ => None,
+    };
+    match topic {
+        Some("auth") => {
+            "Usage: mybrewfolio-syncd auth <begin|wait>\n\n\
+             auth begin  Create a short-lived browser pairing request.\n\
+             auth wait   Wait for that request to be approved."
+        }
+        Some("host") => "Usage: mybrewfolio-syncd host set <hostname-or-ip>",
+        Some("configure") => {
+            "Usage: mybrewfolio-syncd configure <reuse-matching|import-all>\n\n\
+             reuse-matching protects matching library entries from duplicate import."
+        }
+        Some("notes") => {
+            "Usage: mybrewfolio-syncd notes <backup|activate-preview|activate|disable|restore-preview|restore>\n\n\
+             Writing actions require their preview JSON and --confirm."
+        }
+        Some("resync") => {
+            "Usage: mybrewfolio-syncd resync <preview|apply decisions.json --confirm>\n\n\
+             Preview first. Apply accepts only an explicit decisions JSON file and --confirm."
+        }
+        _ => {
+            "MyBrewFolio Sync daemon\n\n\
+             Usage: mybrewfolio-syncd <command> [arguments]\n\n\
+             Everyday commands:\n\
+               help, --help, -h       Show this help without starting the daemon\n\
+               status                  Show the current synchronization status as JSON\n\
+               diagnose                Show read-only JSON diagnostics and next steps\n\
+               sync-once               Run one synchronization cycle\n\
+               health                  Report container health\n\n\
+             Setup and maintenance:\n\
+               auth begin|wait         Pair this installation in a browser\n\
+               host set <host>         Set the GaggiMate hostname, IP, or host:port\n\
+               configure <policy>      Set reuse-matching or import-all\n\
+               retry                   Retry failed local items\n\
+               disconnect              Remove this installation's connection\n\n\
+             Recovery (preview before writing):\n\
+               notes <subcommand>      Back up, enable, restore, or disable Notes Sync\n\
+               resync preview|apply    Review suppressed items; apply needs JSON and --confirm\n\n\
+             Service:\n\
+               daemon                  Run the continuous local synchronization service\n\n\
+             Successful data commands write JSON to stdout. Logs and errors use stderr.\n\
+             Configure MYBREWFOLIO_SYNC_DATA_DIR and MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE."
+        }
+    }
+}
+
+fn is_help_request(args: &[String]) -> bool {
+    args.is_empty()
+        || matches!(
+            args.first().map(String::as_str),
+            Some("help" | "--help" | "-h")
+        )
+        || matches!(
+            args.get(1).map(String::as_str),
+            Some("help" | "--help" | "-h")
+        )
 }
 
 fn print_json(value: serde_json::Value) {
@@ -92,6 +157,7 @@ async fn execute(
     let mut args = arguments.into_iter();
     match command {
         "status" => Ok(serde_json::to_value(engine.status().await).expect("status JSON")),
+        "diagnose" => engine.diagnose().await.map_err(|error| error.to_string()),
         "health" => Ok(json!({"ok": true})),
         "auth" => match args.next().as_deref() {
             Some("begin") => {
@@ -307,9 +373,12 @@ async fn proxy_control(
 #[tokio::main]
 async fn main() -> ExitCode {
     let all_args: Vec<String> = env::args().skip(1).collect();
+    if is_help_request(&all_args) {
+        println!("{}", help_text(&all_args));
+        return ExitCode::SUCCESS;
+    }
     let Some((command, args)) = all_args.split_first() else {
-        eprintln!("{}", usage());
-        return ExitCode::from(64);
+        unreachable!("an empty command was handled as a help request");
     };
     let socket = data_dir().join("control.sock");
     if command != "daemon" {
@@ -370,5 +439,26 @@ async fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{help_text, is_help_request};
+
+    #[test]
+    fn help_is_available_without_a_running_daemon() {
+        assert!(is_help_request(&[]));
+        assert!(is_help_request(&["diagnose".into(), "--help".into()]));
+        let help = help_text(&["help".into()]);
+        assert!(help.contains("diagnose"));
+        assert!(help.contains("resync preview|apply"));
+    }
+
+    #[test]
+    fn grouped_help_describes_pairing() {
+        let help = help_text(&["auth".into(), "-h".into()]);
+        assert!(help.contains("auth begin"));
+        assert!(help.contains("auth wait"));
     }
 }

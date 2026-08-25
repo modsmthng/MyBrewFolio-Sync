@@ -3,7 +3,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
@@ -212,6 +212,38 @@ impl SyncEngine {
 
     pub async fn status(&self) -> AppStatus {
         self.status.read().await.clone()
+    }
+
+    /// Returns local, read-only diagnostics. This intentionally reports the
+    /// cached cloud state so asking for help never triggers another import or
+    /// changes duplicate handling.
+    pub async fn diagnose(&self) -> Result<Value, EngineError> {
+        let status = self.status().await;
+        let pending = self.store.pending_count()?;
+        let failures = self.store.failure_count()?;
+        Ok(json!({
+            "connection": {
+                "connected": status.connected,
+                "machineHost": status.machine_host,
+                "machineReachable": status.machine_reachable,
+                "syncing": status.syncing,
+                "lastSyncAt": status.last_sync_at,
+                "lastError": status.last_error,
+            },
+            "items": {
+                "profiles": status.profiles,
+                "shots": status.shots,
+                "notes": status.notes,
+                "conflicts": status.conflicts,
+                "suppressed": status.suppressed,
+            },
+            "queue": {
+                "pending": pending,
+                "failures": failures,
+            },
+            "duplicatePolicy": status.duplicate_policy,
+            "guidance": diagnostic_guidance(&status, pending, failures),
+        }))
     }
 
     pub async fn set_host(&self, host: &str) -> Result<(), EngineError> {
@@ -1199,10 +1231,88 @@ impl SyncEngine {
     }
 }
 
+fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> Vec<Value> {
+    let mut guidance = Vec::new();
+    if !status.connected {
+        guidance.push(json!({
+            "code": "ACCOUNT_NOT_CONNECTED",
+            "message": "Connect this installation in a browser before it can synchronize.",
+            "nextCommand": "auth begin",
+        }));
+    }
+    if status.connected && !status.machine_reachable {
+        guidance.push(json!({
+            "code": "GAGGIMATE_UNREACHABLE",
+            "message": format!("GaggiMate at {} is not currently reachable. Check the hostname, IP address, and Docker network.", status.machine_host),
+            "nextCommand": format!("host set {}", status.machine_host),
+        }));
+    }
+    if pending > 0 {
+        guidance.push(json!({
+            "code": "PENDING_UPLOADS",
+            "message": format!("{pending} local item(s) are waiting in the encrypted offline queue."),
+            "nextCommand": "sync-once",
+        }));
+    }
+    if failures > 0 {
+        guidance.push(json!({
+            "code": "SYNC_FAILURES",
+            "message": format!("{failures} item(s) need another synchronization attempt."),
+            "nextCommand": "retry",
+        }));
+    }
+    if status.suppressed > 0 && status.duplicate_policy == "reuse_matching" {
+        guidance.push(json!({
+            "code": "MATCHING_ITEMS_REUSED",
+            "message": format!("{} matching library item(s) were protected from duplicate import by the reuse_matching policy. Nothing was restored or imported automatically.", status.suppressed),
+            "nextCommand": "resync preview",
+        }));
+    }
+    if status.conflicts > 0 {
+        guidance.push(json!({
+            "code": "SYNC_CONFLICTS",
+            "message": format!("{} conflict(s) need review in MyBrewFolio Sync settings before making a change.", status.conflicts),
+        }));
+    }
+    if guidance.is_empty() {
+        guidance.push(json!({
+            "code": "SYNC_HEALTHY",
+            "message": "The local queue is empty and no synchronization problems are currently reported.",
+        }));
+    }
+    guidance
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{api_timestamp, hash_value};
+    use super::{api_timestamp, diagnostic_guidance, hash_value};
+    use crate::model::AppStatus;
     use chrono::{TimeZone, Utc};
+
+    fn status() -> AppStatus {
+        AppStatus {
+            connected: true,
+            machine_host: "gaggimate.local".into(),
+            machine_reachable: true,
+            syncing: false,
+            last_sync_at: None,
+            last_error: None,
+            profiles: 0,
+            shots: 10,
+            notes: 0,
+            conflicts: 0,
+            suppressed: 350,
+            initial_sync_configured: true,
+            duplicate_policy: "reuse_matching".into(),
+            notes_sync_status: "one_way".into(),
+            notes_sync_target_device_id: None,
+            notes_sync_writer_device_id: None,
+            this_device_id: None,
+            notes_sync_intro_seen: false,
+            note_backups: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
 
     #[test]
     fn hashes_json_like_the_sync_api() {
@@ -1236,5 +1346,16 @@ mod tests {
             .single()
             .expect("valid timestamp");
         assert_eq!(api_timestamp(timestamp), "2026-07-27T09:41:33.000Z");
+    }
+
+    #[test]
+    fn diagnostics_explain_safely_reused_matches() {
+        let guidance = diagnostic_guidance(&status(), 0, 0);
+        assert_eq!(guidance[0]["code"], "MATCHING_ITEMS_REUSED");
+        assert_eq!(guidance[0]["nextCommand"], "resync preview");
+        assert!(guidance[0]["message"]
+            .as_str()
+            .expect("diagnostic message")
+            .contains("Nothing was restored or imported automatically"));
     }
 }
