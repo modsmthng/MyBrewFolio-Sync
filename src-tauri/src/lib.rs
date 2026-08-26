@@ -726,68 +726,6 @@ mod desktop {
         has_autostart_argument(std::env::args().skip(1))
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::{
-            autostart_status_from_state, has_autostart_argument, is_store_managed_build,
-            StoreStartupTaskState,
-        };
-
-        #[test]
-        fn store_build_is_limited_to_windows_store_packages() {
-            assert!(is_store_managed_build(true, Some("true")));
-            assert!(!is_store_managed_build(false, Some("true")));
-            assert!(!is_store_managed_build(true, Some("false")));
-            assert!(!is_store_managed_build(true, None));
-        }
-
-        #[test]
-        fn legacy_registry_opt_in_is_offered_for_migration() {
-            let status = autostart_status_from_state(StoreStartupTaskState::Disabled, true);
-
-            assert!(!status.enabled);
-            assert!(status.migration_available);
-            assert!(!status.requires_windows_settings);
-        }
-
-        #[test]
-        fn enabled_startup_has_no_recovery_prompt() {
-            let status = autostart_status_from_state(StoreStartupTaskState::Enabled, true);
-
-            assert!(status.enabled);
-            assert!(!status.migration_available);
-            assert!(!status.requires_windows_settings);
-        }
-
-        #[test]
-        fn user_disabled_startup_requires_windows_settings() {
-            let status = autostart_status_from_state(StoreStartupTaskState::DisabledByUser, true);
-
-            assert!(!status.enabled);
-            assert!(status.requires_windows_settings);
-            assert!(!status.migration_available);
-        }
-
-        #[test]
-        fn policy_disabled_startup_is_not_presented_as_user_configurable() {
-            let status =
-                autostart_status_from_state(StoreStartupTaskState::DisabledByPolicy, false);
-
-            assert!(!status.enabled);
-            assert!(status.blocked_by_policy);
-            assert!(!status.requires_windows_settings);
-        }
-
-        #[test]
-        fn autostart_argument_is_detected_without_matching_other_arguments() {
-            assert!(has_autostart_argument(["--autostart".to_string()]));
-            assert!(!has_autostart_argument([
-                "--autostarted".to_string(),
-                "--other".to_string(),
-            ]));
-        }
-    }
-
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
         let mut builder = tauri::Builder::default();
@@ -1009,6 +947,68 @@ mod desktop {
                 _ => {}
             }
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{
+            autostart_status_from_state, has_autostart_argument, is_store_managed_build,
+            StoreStartupTaskState,
+        };
+
+        #[test]
+        fn store_build_is_limited_to_windows_store_packages() {
+            assert!(is_store_managed_build(true, Some("true")));
+            assert!(!is_store_managed_build(false, Some("true")));
+            assert!(!is_store_managed_build(true, Some("false")));
+            assert!(!is_store_managed_build(true, None));
+        }
+
+        #[test]
+        fn legacy_registry_opt_in_is_offered_for_migration() {
+            let status = autostart_status_from_state(StoreStartupTaskState::Disabled, true);
+
+            assert!(!status.enabled);
+            assert!(status.migration_available);
+            assert!(!status.requires_windows_settings);
+        }
+
+        #[test]
+        fn enabled_startup_has_no_recovery_prompt() {
+            let status = autostart_status_from_state(StoreStartupTaskState::Enabled, true);
+
+            assert!(status.enabled);
+            assert!(!status.migration_available);
+            assert!(!status.requires_windows_settings);
+        }
+
+        #[test]
+        fn user_disabled_startup_requires_windows_settings() {
+            let status = autostart_status_from_state(StoreStartupTaskState::DisabledByUser, true);
+
+            assert!(!status.enabled);
+            assert!(status.requires_windows_settings);
+            assert!(!status.migration_available);
+        }
+
+        #[test]
+        fn policy_disabled_startup_is_not_presented_as_user_configurable() {
+            let status =
+                autostart_status_from_state(StoreStartupTaskState::DisabledByPolicy, false);
+
+            assert!(!status.enabled);
+            assert!(status.blocked_by_policy);
+            assert!(!status.requires_windows_settings);
+        }
+
+        #[test]
+        fn autostart_argument_is_detected_without_matching_other_arguments() {
+            assert!(has_autostart_argument(["--autostart".to_string()]));
+            assert!(!has_autostart_argument([
+                "--autostarted".to_string(),
+                "--other".to_string(),
+            ]));
+        }
     }
 }
 

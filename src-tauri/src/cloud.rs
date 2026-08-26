@@ -703,3 +703,210 @@ impl CloudClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    use super::{CloudClient, CloudConfig, CredentialStore, OAuthTokens};
+    use crate::store::StoreError;
+
+    #[derive(Default)]
+    struct TestCredentials {
+        tokens: Mutex<Option<OAuthTokens>>,
+        pending: Mutex<Option<String>>,
+    }
+
+    impl CredentialStore for TestCredentials {
+        fn save_tokens(&self, tokens: &OAuthTokens) -> Result<(), StoreError> {
+            *self
+                .tokens
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)? = Some(tokens.clone());
+            Ok(())
+        }
+
+        fn tokens(&self) -> Result<Option<OAuthTokens>, StoreError> {
+            Ok(self
+                .tokens
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)?
+                .clone())
+        }
+
+        fn delete_tokens(&self) -> Result<(), StoreError> {
+            *self
+                .tokens
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)? = None;
+            Ok(())
+        }
+
+        fn save_pending_device_authorization(&self, value: &str) -> Result<(), StoreError> {
+            *self
+                .pending
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)? = Some(value.into());
+            Ok(())
+        }
+
+        fn pending_device_authorization(&self) -> Result<Option<String>, StoreError> {
+            Ok(self
+                .pending
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)?
+                .clone())
+        }
+
+        fn delete_pending_device_authorization(&self) -> Result<(), StoreError> {
+            *self
+                .pending
+                .lock()
+                .map_err(|_| StoreError::InvalidCredentials)? = None;
+            Ok(())
+        }
+    }
+
+    async fn response_server(responses: Vec<(&str, &str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("test address");
+        let responses = responses
+            .into_iter()
+            .map(|(status, body)| (status.to_string(), body.to_string()))
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.expect("request accepted");
+                let mut input = [0_u8; 8_192];
+                let _ = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut input)).await;
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response written");
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn client(credentials: Arc<TestCredentials>, url: &str) -> CloudClient {
+        let mut client = CloudClient::new(credentials).expect("cloud client");
+        client.config = CloudConfig {
+            api_url: url.into(),
+            client_id: "test-client".into(),
+            authorize_url: "https://login.example.test/authorize".into(),
+            token_url: url.into(),
+            redirect_uri: "mybrewfolio-sync://oauth/callback".into(),
+            device_redirect_uri: "https://mybrewfolio.example.test/v1/sync/device-auth/callback"
+                .into(),
+        };
+        client
+    }
+
+    #[test]
+    fn authorization_uses_pkce_and_a_random_state() {
+        let credentials = Arc::new(TestCredentials::default());
+        let client = client(credentials, "http://127.0.0.1:1");
+
+        let (url, pending) = client.authorization().expect("authorization URL");
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("login.example.test"));
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "code_challenge_method")
+                .map(|(_, value)| value),
+            Some("S256".into())
+        );
+        assert_eq!(
+            url.query_pairs()
+                .find(|(key, _)| key == "state")
+                .map(|(_, value)| value),
+            Some(pending.state.into())
+        );
+        assert!(!pending.verifier.is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_pairing_exchanges_the_one_time_code_without_server_token_storage() {
+        let url = response_server(vec![
+            ("201 Created", r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://mybrewfolio.example.test/pair","pollToken":"poll-secret","expiresIn":600}"#),
+            ("200 OK", r#"{"status":"authorized","authorizationCode":"one-time-code"}"#),
+            ("200 OK", r#"{"access_token":"access-token","refresh_token":"refresh-token","expires_in":3600}"#),
+        ]).await;
+        let credentials = Arc::new(TestCredentials::default());
+        let client = client(credentials.clone(), &url);
+
+        let (info, pending) = client
+            .begin_device_authorization()
+            .await
+            .expect("pairing begins");
+        assert_eq!(info.user_code, "ABCD-1234");
+        assert_eq!(info.expires_in, 600);
+        assert_eq!(
+            client
+                .poll_device_authorization(&pending)
+                .await
+                .expect("pairing polls"),
+            Some(())
+        );
+
+        assert_eq!(
+            credentials
+                .tokens()
+                .expect("tokens stored")
+                .expect("tokens present")
+                .access_token,
+            "access-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_tokens_refresh_before_an_authorized_state_request() {
+        let url = response_server(vec![
+            (
+                "200 OK",
+                r#"{"access_token":"new-access","expires_in":3600}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"items":[],"source":{"duplicatePolicy":"reuse_matching"}}"#,
+            ),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "expired-access".into(),
+                refresh_token: Some("refresh-token".into()),
+                expires_at: 0,
+            })
+            .expect("expired token stored");
+        let client = client(credentials.clone(), &url);
+
+        let state = client.state("device-1").await.expect("state loaded");
+
+        assert_eq!(state["source"]["duplicatePolicy"], "reuse_matching");
+        assert_eq!(
+            credentials
+                .tokens()
+                .expect("tokens read")
+                .expect("token present")
+                .access_token,
+            "new-access"
+        );
+    }
+}

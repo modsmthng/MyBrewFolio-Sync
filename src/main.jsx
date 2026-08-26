@@ -75,6 +75,91 @@ function SyncSpinner() {
   return <span className="sync-spinner" aria-hidden="true" />;
 }
 
+function ResyncPreview({
+  resync,
+  restoreIds,
+  setRestoreIds,
+  duplicateDecisions,
+  setDuplicateDecisions,
+  confirmingResync,
+  setConfirmingResync,
+  busy,
+  syncActivity,
+  applyResync,
+  onCancel,
+}) {
+  return (
+    <section className="card resync-preview" role="dialog" aria-labelledby="resync-title">
+      <h2 id="resync-title">Complete resync preview</h2>
+      <p>
+        {resync.restoreItems?.length || 0} deleted machine items can be restored.{' '}
+        {resync.duplicates?.length || 0} duplicate shots can be merged.{' '}
+        {resync.ambiguousDuplicates?.length || 0} ambiguous matches will remain unchanged.
+      </p>
+      {(resync.restoreItems || []).length ? <fieldset>
+        <legend>Restore from GaggiMate</legend>
+        {resync.restoreItems.map(item => <label className="toggle" key={item.id}>
+          <input type="checkbox" checked={restoreIds.includes(item.id)} onChange={event => setRestoreIds(current => event.currentTarget.checked ? [...current, item.id] : current.filter(id => id !== item.id))} />
+          <span>{item.kind}: {item.sourceKey}</span>
+        </label>)}
+      </fieldset> : null}
+      {(resync.duplicates || []).length ? <fieldset>
+        <legend>Duplicate shots</legend>
+        <div className="bulk-actions">
+          <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => ({ ...item, selected: true })))}>Select all</button>
+          <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'mybrewfolio' } : item))}>Keep MyBrewFolio notes for all</button>
+          <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'gaggimate' } : item))}>Use GaggiMate notes for all</button>
+        </div>
+        {resync.duplicates.map((item, index) => <div className="duplicate-row" key={item.mapping_id}>
+          <label className="toggle">
+            <input type="checkbox" checked={duplicateDecisions[index]?.selected} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, selected: event.currentTarget.checked } : decision))} />
+            <span>Keep “{item.keep_name}” and remove Sync copy “{item.remove_name}”</span>
+          </label>
+          {item.notes_conflict ? <select aria-label={`Notes resolution for ${item.mapped_name}`} value={duplicateDecisions[index]?.notesResolution || ''} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, notesResolution: event.currentTarget.value } : decision))}>
+            <option value="">Choose notes…</option>
+            <option value="mybrewfolio">Keep MyBrewFolio notes</option>
+            <option value="gaggimate">Use GaggiMate notes</option>
+          </select> : null}
+        </div>)}
+      </fieldset> : null}
+      {(resync.ambiguousDuplicates || []).length ? <fieldset>
+        <legend>Unresolved matches</legend>
+        <p className="muted">These shots have more than one possible match. No copy will be merged or deleted.</p>
+        {resync.ambiguousDuplicates.map(item => (
+          <div className="duplicate-row" key={item.mapping_id}>
+            <strong>{item.mapped_name}</strong>
+            <p className="muted">{item.candidate_count} possible MyBrewFolio matches</p>
+          </div>
+        ))}
+      </fieldset> : null}
+      <div className="dialog-actions">
+        {confirmingResync ? (
+          <p className="message" role="alert">
+            Confirm restoring {restoreIds.length} selected machine items
+            {duplicateDecisions.filter(item => item.selected).length
+              ? ` and merging ${duplicateDecisions.filter(item => item.selected).length} selected duplicate shots`
+              : ''}.
+          </p>
+        ) : null}
+        <button type="button" className="secondary inline-action" disabled={busy} onClick={() => {
+          if (confirmingResync) {
+            setConfirmingResync(false);
+          } else {
+            // The parent owns the preview lifecycle; a cancelled preview is
+            // represented by the same null state as a completed apply.
+            onCancel();
+          }
+        }}>{confirmingResync ? 'Back' : 'Cancel'}</button>
+        <button type="button" className="primary compact-button" disabled={busy} onClick={applyResync}>
+          <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">
+            {confirmingResync ? 'Confirm complete resync' : 'Apply complete resync'}
+          </ActionLabel>
+        </button>
+      </div>
+    </section>
+  );
+}
+
 function ActionLabel({ active, activeText, children }) {
   return (
     <span className="action-label">
@@ -128,7 +213,7 @@ function StatusPill({ status }) {
   return <span className={`status status-${kind}`}>{status.connected ? 'Connected' : 'Not connected'}</span>;
 }
 
-function Setup({ status, refresh, externalNotice }) {
+export function Setup({ status, refresh, externalNotice }) {
   const [host, setHost] = useState(status.machineHost || 'gaggimate.local');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -183,7 +268,7 @@ function Setup({ status, refresh, externalNotice }) {
   );
 }
 
-function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
+export function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
   const [autostart, setAutostart] = useState(true);
   const [autostartStatus, setAutostartStatus] = useState({
     enabled: true,
@@ -889,72 +974,19 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
         </section>
       ) : null}
       {resync ? (
-        <section className="card resync-preview" role="dialog" aria-labelledby="resync-title">
-          <h2 id="resync-title">Complete resync preview</h2>
-          <p>
-            {resync.restoreItems?.length || 0} deleted machine items can be restored.{' '}
-            {resync.duplicates?.length || 0} duplicate shots can be merged.{' '}
-            {resync.ambiguousDuplicates?.length || 0} ambiguous matches will remain unchanged.
-          </p>
-          {(resync.restoreItems || []).length ? <fieldset>
-            <legend>Restore from GaggiMate</legend>
-            {resync.restoreItems.map(item => <label className="toggle" key={item.id}>
-              <input type="checkbox" checked={restoreIds.includes(item.id)} onChange={event => setRestoreIds(current => event.currentTarget.checked ? [...current, item.id] : current.filter(id => id !== item.id))} />
-              <span>{item.kind}: {item.sourceKey}</span>
-            </label>)}
-          </fieldset> : null}
-          {(resync.duplicates || []).length ? <fieldset>
-            <legend>Duplicate shots</legend>
-            <div className="bulk-actions">
-              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => ({ ...item, selected: true })))}>Select all</button>
-              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'mybrewfolio' } : item))}>Keep MyBrewFolio notes for all</button>
-              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'gaggimate' } : item))}>Use GaggiMate notes for all</button>
-            </div>
-            {resync.duplicates.map((item, index) => <div className="duplicate-row" key={item.mapping_id}>
-              <label className="toggle">
-                <input type="checkbox" checked={duplicateDecisions[index]?.selected} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, selected: event.currentTarget.checked } : decision))} />
-                <span>Keep “{item.keep_name}” and remove Sync copy “{item.remove_name}”</span>
-              </label>
-              {item.notes_conflict ? <select aria-label={`Notes resolution for ${item.mapped_name}`} value={duplicateDecisions[index]?.notesResolution || ''} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, notesResolution: event.currentTarget.value } : decision))}>
-                <option value="">Choose notes…</option>
-                <option value="mybrewfolio">Keep MyBrewFolio notes</option>
-                <option value="gaggimate">Use GaggiMate notes</option>
-              </select> : null}
-            </div>)}
-          </fieldset> : null}
-          {(resync.ambiguousDuplicates || []).length ? <fieldset>
-            <legend>Unresolved matches</legend>
-            <p className="muted">These shots have more than one possible match. No copy will be merged or deleted.</p>
-            {resync.ambiguousDuplicates.map(item => (
-              <div className="duplicate-row" key={item.mapping_id}>
-                <strong>{item.mapped_name}</strong>
-                <p className="muted">{item.candidate_count} possible MyBrewFolio matches</p>
-              </div>
-            ))}
-          </fieldset> : null}
-          <div className="dialog-actions">
-            {confirmingResync ? (
-              <p className="message" role="alert">
-                Confirm restoring {restoreIds.length} selected machine items
-                {duplicateDecisions.filter(item => item.selected).length
-                  ? ` and merging ${duplicateDecisions.filter(item => item.selected).length} selected duplicate shots`
-                  : ''}.
-              </p>
-            ) : null}
-            <button type="button" className="secondary inline-action" disabled={busy} onClick={() => {
-              if (confirmingResync) {
-                setConfirmingResync(false);
-              } else {
-                setResync(null);
-              }
-            }}>{confirmingResync ? 'Back' : 'Cancel'}</button>
-            <button type="button" className="primary compact-button" disabled={busy} onClick={applyResync}>
-              <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">
-                {confirmingResync ? 'Confirm complete resync' : 'Apply complete resync'}
-              </ActionLabel>
-            </button>
-          </div>
-        </section>
+        <ResyncPreview
+          resync={resync}
+          restoreIds={restoreIds}
+          setRestoreIds={setRestoreIds}
+          duplicateDecisions={duplicateDecisions}
+          setDuplicateDecisions={setDuplicateDecisions}
+          confirmingResync={confirmingResync}
+          setConfirmingResync={setConfirmingResync}
+          busy={busy}
+          syncActivity={syncActivity}
+          applyResync={applyResync}
+          onCancel={() => setResync(null)}
+        />
       ) : null}
       <section className="card account-action">
         <h3>Account</h3>
@@ -976,7 +1008,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   );
 }
 
-function App() {
+export function App() {
   const [status, setStatus] = useState(initialStatus);
   const [loading, setLoading] = useState(true);
   const [oauthError, setOauthError] = useState('');

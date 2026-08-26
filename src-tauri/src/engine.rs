@@ -15,7 +15,7 @@ use crate::{
     },
     credentials::CredentialStore,
     local::{normalize_host, GaggiMateClient, LocalError},
-    model::{AppStatus, NoteBackupSummary, SyncObject},
+    model::{AppStatus, IndexEntry, NoteBackupSummary, SyncObject},
     store::{AppStore, StoreError},
 };
 
@@ -45,6 +45,78 @@ fn select_sync_batch(pending: &[SyncObject]) -> (Vec<SyncObject>, Option<SyncObj
         }
     }
     (selected, None)
+}
+
+fn suppressed_items(cloud_state: &Value) -> HashSet<(String, String)> {
+    cloud_state
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if !item
+                .get("suppressed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            Some((
+                item.get("kind")?.as_str()?.to_string(),
+                item.get("source_key")
+                    .or_else(|| item.get("sourceKey"))?
+                    .as_str()?
+                    .to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn scan_due(now: DateTime<Utc>, last: Option<DateTime<Utc>>, interval: Duration) -> bool {
+    last.map_or(true, |last| now - last >= interval)
+}
+
+fn shot_source_key(entry: &IndexEntry) -> String {
+    format!("{}:{}", entry.id, entry.timestamp)
+}
+
+fn shot_fingerprint(entry: &IndexEntry) -> String {
+    format!(
+        "{}:{}:{}:{}",
+        entry.timestamp,
+        entry.duration,
+        entry.volume.unwrap_or_default(),
+        entry.rating.unwrap_or_default()
+    )
+}
+
+fn should_refresh_notes(
+    changed: bool,
+    full_scan: bool,
+    recent_scan: bool,
+    position: usize,
+) -> bool {
+    changed || full_scan || (recent_scan && position < 20)
+}
+
+fn batch_result_status(result: &Value) -> (usize, &str) {
+    (
+        result
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX) as usize,
+        result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid"),
+    )
+}
+
+fn is_terminal_batch_status(status: &str) -> bool {
+    matches!(
+        status,
+        "created" | "updated" | "linked" | "unchanged" | "suppressed" | "conflict" | "invalid"
+    )
 }
 
 #[derive(Debug, Error)]
@@ -759,34 +831,11 @@ impl SyncEngine {
         cloud_state: &Value,
     ) -> Result<Vec<String>, EngineError> {
         let mut skipped = Vec::new();
-        let items = cloud_state
-            .get("items")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let suppressed: HashSet<(String, String)> = items
-            .iter()
-            .filter_map(|item| {
-                if !item
-                    .get("suppressed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    return None;
-                }
-                Some((
-                    item.get("kind")?.as_str()?.to_string(),
-                    item.get("source_key")
-                        .or_else(|| item.get("sourceKey"))?
-                        .as_str()?
-                        .to_string(),
-                ))
-            })
-            .collect();
+        let suppressed = suppressed_items(cloud_state);
 
         let now = Utc::now();
         let last_profiles = parse_time(self.store.setting("last_profile_scan")?);
-        if last_profiles.map_or(true, |last| now - last >= Duration::minutes(5)) {
+        if scan_due(now, last_profiles, Duration::minutes(5)) {
             for (id, loaded) in local.profiles().await? {
                 if suppressed.contains(&("profile".into(), id.clone())) {
                     continue;
@@ -823,25 +872,25 @@ impl SyncEngine {
             self.store.set_setting("last_recent_notes_scan", "")?;
             self.store.set_setting("notes_reader_version", "2")?;
         }
-        let full_notes = parse_time(self.store.setting("last_full_notes_scan")?)
-            .map_or(true, |last| now - last >= Duration::days(1));
-        let recent_notes = parse_time(self.store.setting("last_recent_notes_scan")?)
-            .map_or(true, |last| now - last >= Duration::minutes(5));
+        let full_notes = scan_due(
+            now,
+            parse_time(self.store.setting("last_full_notes_scan")?),
+            Duration::days(1),
+        );
+        let recent_notes = scan_due(
+            now,
+            parse_time(self.store.setting("last_recent_notes_scan")?),
+            Duration::minutes(5),
+        );
         let index = local.shot_index().await?;
         for (position, entry) in index.into_iter().enumerate() {
             // IDs can be reused after history maintenance. The timestamp keeps a
             // later shot from silently replacing an older cloud copy.
-            let source_key = format!("{}:{}", entry.id, entry.timestamp);
+            let source_key = shot_source_key(&entry);
             if suppressed.contains(&("shot".into(), source_key.clone())) {
                 continue;
             }
-            let fingerprint = format!(
-                "{}:{}:{}:{}",
-                entry.timestamp,
-                entry.duration,
-                entry.volume.unwrap_or_default(),
-                entry.rating.unwrap_or_default()
-            );
+            let fingerprint = shot_fingerprint(&entry);
             // v2 deliberately requeues shots once after the original client
             // used non-canonical JSON hashes that the API could not accept.
             let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
@@ -879,8 +928,7 @@ impl SyncEngine {
                 })?;
                 self.store.set_setting(&fingerprint_key, &fingerprint)?;
             }
-            let refresh_recent_notes = recent_notes && position < 20;
-            if (changed || full_notes || refresh_recent_notes)
+            if should_refresh_notes(changed, full_notes, recent_notes, position)
                 && !suppressed.contains(&("notes".into(), source_key.clone()))
             {
                 match local.notes(entry.id).await {
@@ -947,14 +995,7 @@ impl SyncEngine {
                 break;
             }
             for result in results {
-                let index = result
-                    .get("index")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(u64::MAX) as usize;
-                let status = result
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or("invalid");
+                let (index, status) = batch_result_status(result);
                 if status == "invalid" {
                     invalid += 1;
                 }
@@ -974,16 +1015,7 @@ impl SyncEngine {
                     } else {
                         self.store.clear_failure(&object.kind, &object.source_key)?;
                     }
-                    if matches!(
-                        status,
-                        "created"
-                            | "updated"
-                            | "linked"
-                            | "unchanged"
-                            | "suppressed"
-                            | "conflict"
-                            | "invalid"
-                    ) {
+                    if is_terminal_batch_status(status) {
                         self.store
                             .remove_pending(&object.kind, &object.source_key)?;
                     }
@@ -1324,12 +1356,17 @@ fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> V
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::{
-        api_timestamp, diagnostic_guidance, hash_value, select_sync_batch, serialized_batch_bytes,
+        api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
+        is_terminal_batch_status, scan_due, select_sync_batch, serialized_batch_bytes,
+        shot_fingerprint, shot_source_key, should_refresh_notes, suppressed_items, SyncEngine,
         MAX_SYNC_BATCH_BYTES,
     };
-    use crate::model::{AppStatus, SyncObject};
-    use chrono::{TimeZone, Utc};
+    use crate::model::{AppStatus, IndexEntry, SyncObject};
+    use crate::{credentials::EncryptedFileCredentialStore, store::AppStore};
+    use chrono::{Duration, TimeZone, Utc};
     use serde_json::json;
 
     fn status() -> AppStatus {
@@ -1435,5 +1472,167 @@ mod tests {
 
         assert!(batch.is_empty());
         assert_eq!(oversized.expect("oversized object").source_key, "too-large");
+    }
+
+    #[test]
+    fn identifies_suppressed_items_in_both_json_naming_styles() {
+        let suppressed = suppressed_items(&json!({ "items": [
+            { "kind": "shot", "sourceKey": "1:100", "suppressed": true },
+            { "kind": "notes", "source_key": "1:100", "suppressed": true },
+            { "kind": "profile", "sourceKey": "p1", "suppressed": false },
+            { "kind": "shot", "sourceKey": "missing" }
+        ]}));
+
+        assert!(suppressed.contains(&("shot".into(), "1:100".into())));
+        assert!(suppressed.contains(&("notes".into(), "1:100".into())));
+        assert_eq!(suppressed.len(), 2);
+    }
+
+    #[test]
+    fn scan_and_note_refresh_decisions_respect_intervals_and_recent_window() {
+        let now = Utc::now();
+        assert!(scan_due(now, None, Duration::minutes(5)));
+        assert!(scan_due(
+            now,
+            Some(now - Duration::minutes(6)),
+            Duration::minutes(5)
+        ));
+        assert!(!scan_due(
+            now,
+            Some(now - Duration::minutes(4)),
+            Duration::minutes(5)
+        ));
+        assert!(should_refresh_notes(false, false, true, 19));
+        assert!(!should_refresh_notes(false, false, true, 20));
+        assert!(should_refresh_notes(true, false, false, 99));
+        assert!(should_refresh_notes(false, true, false, 99));
+    }
+
+    #[test]
+    fn shot_identity_and_batch_result_helpers_have_stable_defaults() {
+        let entry = IndexEntry {
+            id: 7,
+            timestamp: 123,
+            duration: 456,
+            volume: Some(18.5),
+            rating: Some(4),
+            profile_id: "profile".into(),
+            profile_name: "Espresso".into(),
+            incomplete: false,
+        };
+        assert_eq!(shot_source_key(&entry), "7:123");
+        assert_eq!(shot_fingerprint(&entry), "123:456:18.5:4");
+        assert_eq!(
+            batch_result_status(&json!({ "index": 2, "status": "created" })),
+            (2, "created")
+        );
+        assert_eq!(batch_result_status(&json!({})), (usize::MAX, "invalid"));
+        assert!(is_terminal_batch_status("suppressed"));
+        assert!(!is_terminal_batch_status("retry"));
+    }
+
+    fn test_engine() -> (SyncEngine, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let key_path = directory.path().join("key");
+        std::fs::write(&key_path, [3_u8; 32]).expect("key written");
+        let credentials = Arc::new(
+            EncryptedFileCredentialStore::from_key_file(
+                directory.path().join("credentials.enc"),
+                &key_path,
+            )
+            .expect("credentials store"),
+        );
+        let store = Arc::new(AppStore::open(&directory.path().join("sync.sqlite")).expect("store"));
+        (
+            SyncEngine::open(store, credentials).expect("engine"),
+            directory,
+        )
+    }
+
+    #[tokio::test]
+    async fn updates_status_counts_and_notes_metadata_from_cloud_state() {
+        let (engine, _directory) = test_engine();
+        engine
+            .update_from_cloud_state(&json!({
+                "source": {
+                    "initialSyncConfiguredAt": "2026-08-20T10:00:00Z",
+                    "duplicatePolicy": "import_all",
+                    "notesSyncStatus": "two_way",
+                    "notesSyncTargetDeviceId": "target",
+                    "notesSyncWriterDeviceId": "writer",
+                    "lastSyncAt": "2026-08-20T11:00:00Z"
+                },
+                "items": [
+                    { "kind": "profile", "present": true },
+                    { "kind": "shot", "present": true },
+                    { "kind": "notes", "present": true },
+                    { "kind": "shot", "present": false, "conflict": true },
+                    { "kind": "shot", "suppressed": true }
+                ],
+                "noteBackups": [
+                    { "id": "backup", "slot": "latest", "itemCount": 2, "createdAt": "2026-08-20T09:00:00Z", "finalizedAt": null },
+                    { "slot": "invalid" }
+                ]
+            }))
+            .await;
+
+        let status = engine.status().await;
+        assert_eq!(status.profiles, 1);
+        assert_eq!(status.shots, 1);
+        assert_eq!(status.notes, 1);
+        assert_eq!(status.conflicts, 1);
+        assert_eq!(status.suppressed, 1);
+        assert!(status.initial_sync_configured);
+        assert_eq!(status.duplicate_policy, "import_all");
+        assert_eq!(status.notes_sync_status, "two_way");
+        assert_eq!(status.note_backups.len(), 1);
+        assert_eq!(status.last_sync_at.as_deref(), Some("2026-08-20T11:00:00Z"));
+    }
+
+    #[tokio::test]
+    async fn diagnose_reports_queue_counts_and_actionable_guidance() {
+        let (engine, _directory) = test_engine();
+        engine
+            .store
+            .set_setting("device_id", "device")
+            .expect("device saved");
+        engine
+            .store
+            .queue(&sync_object("pending", 10))
+            .expect("pending queued");
+        engine
+            .store
+            .record_failure(None, "shot", "failed", "read", "not available")
+            .expect("failure recorded");
+
+        let report = engine.diagnose().await.expect("diagnostics");
+
+        assert_eq!(report["queue"]["pending"], 1);
+        assert_eq!(report["queue"]["failures"], 1);
+        let codes = report["guidance"]
+            .as_array()
+            .expect("guidance list")
+            .iter()
+            .filter_map(|item| item["code"].as_str())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"ACCOUNT_NOT_CONNECTED"));
+        assert!(codes.contains(&"PENDING_UPLOADS"));
+        assert!(codes.contains(&"SYNC_FAILURES"));
+    }
+
+    #[tokio::test]
+    async fn host_and_local_preferences_round_trip_without_network_access() {
+        let (engine, _directory) = test_engine();
+        engine.set_host("127.0.0.1:8088").await.expect("host saved");
+        assert_eq!(engine.status().await.machine_host, "127.0.0.1:8088");
+        assert!(engine.set_host("https://public.example").await.is_err());
+        assert!(!engine.hide_app_icon().expect("default icon setting"));
+        engine.set_hide_app_icon(true).expect("icon hidden");
+        assert!(engine.hide_app_icon().expect("icon setting"));
+        engine
+            .dismiss_notes_sync_intro()
+            .await
+            .expect("intro dismissed");
+        assert!(engine.status().await.notes_sync_intro_seen);
     }
 }

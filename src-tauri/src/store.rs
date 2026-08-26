@@ -297,6 +297,18 @@ impl AppStore {
 #[cfg(test)]
 mod tests {
     use super::AppStore;
+    use crate::model::SyncObject;
+    use serde_json::json;
+
+    fn object(kind: &str, source_key: &str) -> SyncObject {
+        SyncObject {
+            kind: kind.into(),
+            source_key: source_key.into(),
+            source_hash: format!("hash-{source_key}"),
+            shot_source_key: (kind == "notes").then(|| "shot:1".into()),
+            data: json!({ "name": source_key, "notes": "private" }),
+        }
+    }
 
     #[test]
     fn clearing_account_data_keeps_machine_and_installation_settings() {
@@ -338,5 +350,75 @@ mod tests {
         );
         assert_eq!(store.setting("device_id").expect("device ID read"), None);
         assert_eq!(store.setting("source_id").expect("source ID read"), None);
+    }
+
+    #[test]
+    fn queue_and_failure_retry_preserve_sync_data_but_never_note_contents() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AppStore::open(&directory.path().join("sync.sqlite")).expect("store opens");
+        let profile = object("profile", "profile-1");
+        let notes = object("notes", "shot:1");
+        store.queue(&notes).expect("notes queued");
+        store.queue(&profile).expect("profile queued");
+        assert_eq!(store.pending_count().expect("pending count"), 2);
+        assert_eq!(store.pending(10).expect("pending items")[0].kind, "profile");
+
+        store
+            .record_failure(Some(&profile), "profile", "profile-1", "upload", "rejected")
+            .expect("profile failure recorded");
+        store
+            .record_failure(Some(&notes), "notes", "shot:1", "read", "unavailable")
+            .expect("notes failure recorded");
+        assert_eq!(store.failure_count().expect("failure count"), 2);
+        store
+            .remove_pending("profile", "profile-1")
+            .expect("profile removed");
+        store
+            .remove_pending("notes", "shot:1")
+            .expect("notes removed");
+
+        store.retry_failures().expect("failures retried");
+        let pending = store.pending(10).expect("retried pending items");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].kind, "profile");
+        assert_eq!(store.failure_count().expect("failures cleared"), 0);
+    }
+
+    #[test]
+    fn reset_scan_state_removes_sync_cache_without_erasing_machine_settings() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AppStore::open(&directory.path().join("sync.sqlite")).expect("store opens");
+        store
+            .set_setting("machine_host", "gaggimate.local")
+            .expect("host saved");
+        store
+            .set_setting("shot_fingerprint_v2:1:2", "fingerprint")
+            .expect("fingerprint saved");
+        store
+            .set_setting("last_full_notes_scan", "2026-08-01T00:00:00Z")
+            .expect("scan saved");
+        store.queue(&object("shot", "1:2")).expect("queued");
+        store
+            .record_failure(None, "shot", "1:2", "read", "failed")
+            .expect("failed");
+
+        store.reset_scan_state().expect("scan state reset");
+
+        assert_eq!(
+            store.setting("machine_host").expect("host read"),
+            Some("gaggimate.local".into())
+        );
+        assert_eq!(
+            store
+                .setting("shot_fingerprint_v2:1:2")
+                .expect("fingerprint cleared"),
+            None
+        );
+        assert_eq!(
+            store.setting("last_full_notes_scan").expect("scan cleared"),
+            None
+        );
+        assert_eq!(store.pending_count().expect("pending cleared"), 0);
+        assert_eq!(store.failure_count().expect("failures cleared"), 0);
     }
 }

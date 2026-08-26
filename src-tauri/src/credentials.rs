@@ -232,4 +232,56 @@ mod tests {
             "secret-access-token"
         );
     }
+
+    #[test]
+    fn encrypted_store_keeps_tokens_and_pairing_state_independent() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let key = directory.path().join("key");
+        std::fs::write(&key, [9_u8; 32]).expect("key written");
+        let path = directory.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::from_key_file(&path, &key).expect("store opens");
+        let tokens = OAuthTokens {
+            access_token: "access".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: 42,
+        };
+
+        assert!(store.tokens().expect("empty tokens").is_none());
+        store.save_tokens(&tokens).expect("tokens saved");
+        store
+            .save_pending_device_authorization("pairing-state")
+            .expect("pairing state saved");
+        assert_eq!(
+            store
+                .tokens()
+                .expect("tokens read")
+                .as_ref()
+                .map(|value| &value.access_token),
+            Some(&"access".into())
+        );
+        assert_eq!(
+            store
+                .pending_device_authorization()
+                .expect("pairing state read"),
+            Some("pairing-state".into())
+        );
+
+        store.delete_tokens().expect("tokens deleted");
+        assert!(store.tokens().expect("empty tokens").is_none());
+        assert_eq!(
+            store
+                .pending_device_authorization()
+                .expect("pairing state retained"),
+            Some("pairing-state".into())
+        );
+        store
+            .delete_pending_device_authorization()
+            .expect("pairing state deleted");
+        assert_eq!(
+            store
+                .pending_device_authorization()
+                .expect("empty pairing state"),
+            None
+        );
+    }
 }
