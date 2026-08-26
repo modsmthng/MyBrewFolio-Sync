@@ -131,7 +131,11 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy,llvm-tools-preview
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - uses: swatinem/rust-cache@v2
         with:
@@ -145,6 +149,17 @@ jobs:
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      - name: Generate JavaScript coverage
+        run: npm run test:coverage
+
+      - name: Generate Rust coverage
+        working-directory: src-tauri
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --locked --lib --no-report
+          cargo llvm-cov --locked --no-default-features --features headless --bins --no-report
+          cargo llvm-cov report --lcov --output-path ../coverage/rust.lcov
 
       - name: SonarQube Scan
         uses: SonarSource/sonarqube-scan-action@v8

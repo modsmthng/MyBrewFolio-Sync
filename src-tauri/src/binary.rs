@@ -185,6 +185,107 @@ fn system_info(raw: u16) -> Value {
     })
 }
 
+type PhaseTransition = (usize, u8, String);
+
+fn parse_phase_transitions(
+    bytes: &[u8],
+    version: u8,
+) -> Result<(Vec<PhaseTransition>, Vec<Value>), BinaryError> {
+    if version < 5 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let count = bytes.get(458).copied().unwrap_or(0).min(12);
+    let mut transitions = Vec::with_capacity(count as usize);
+    let mut details = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let offset = 110 + index * 29;
+        let sample_index = u16_le(bytes, offset)? as usize;
+        let phase_number = bytes[offset + 2];
+        let transition_reason = bytes[offset + 3];
+        let phase_name = c_string(&bytes[offset + 4..offset + 29]);
+        transitions.push((sample_index, phase_number, phase_name.clone()));
+        details.push(json!({
+            "sampleIndex": sample_index,
+            "phaseNumber": phase_number,
+            "transitionReason": transition_reason,
+            "phaseName": phase_name
+        }));
+    }
+    Ok((transitions, details))
+}
+
+fn field_value(
+    bytes: &[u8],
+    bit: u32,
+    offset: usize,
+    sample_interval: u32,
+) -> Result<(String, Value), BinaryError> {
+    let known = field(bit);
+    let (name, raw, scale) = match known {
+        Some(value) => {
+            let raw = match value.kind {
+                FieldKind::Signed => i16_le(bytes, offset)? as f64,
+                FieldKind::Unsigned => u16_le(bytes, offset)? as f64,
+            };
+            (value.name.to_string(), raw, value.scale)
+        }
+        None => (format!("unknown_{bit}"), u16_le(bytes, offset)? as f64, 0.0),
+    };
+    let number = if name == "t" {
+        raw * sample_interval as f64
+    } else if scale > 0.0 {
+        raw / scale
+    } else {
+        raw
+    };
+    let value = if name == "systemInfo" {
+        system_info(number as u16)
+    } else {
+        json!(number)
+    };
+    Ok((name, value))
+}
+
+fn phase_at(sample_index: usize, transitions: &[PhaseTransition]) -> (u8, String) {
+    let mut phase = (0_u8, "Phase 1".to_string());
+    for (transition_sample, number, name) in transitions {
+        if sample_index < *transition_sample {
+            break;
+        }
+        phase = (*number, name.clone());
+    }
+    phase
+}
+
+fn parse_samples(
+    bytes: &[u8],
+    header_size: usize,
+    sample_size: usize,
+    sample_count: usize,
+    active_bits: &[u32],
+    sample_interval: u32,
+    version: u8,
+    transitions: &[PhaseTransition],
+) -> Result<Vec<Value>, BinaryError> {
+    let mut samples = Vec::with_capacity(sample_count);
+    for sample_index in 0..sample_count {
+        let base = header_size + sample_index * sample_size;
+        let mut sample = Map::new();
+        for (field_index, bit) in active_bits.iter().enumerate() {
+            let (name, value) = field_value(bytes, *bit, base + field_index * 2, sample_interval)?;
+            sample.insert(name, value);
+        }
+        if version >= 5 {
+            let (number, name) = phase_at(sample_index, transitions);
+            sample.insert("phaseNumber".into(), json!(number));
+            sample.insert("phaseDisplayNumber".into(), json!(number + 1));
+            sample.insert("phaseName".into(), json!(name));
+        }
+        samples.push(Value::Object(sample));
+    }
+    Ok(samples)
+}
+
 pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
     if bytes.len() < 28 || u32_le(bytes, 0)? != SHOT_MAGIC {
         return Err(BinaryError::Unsupported);
@@ -220,72 +321,17 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
         return Err(BinaryError::TooManySamples);
     }
 
-    let mut transitions = Vec::new();
-    let mut phase_transitions = Vec::new();
-    if version >= 5 {
-        let count = bytes.get(458).copied().unwrap_or(0).min(12);
-        for index in 0..count as usize {
-            let offset = 110 + index * 29;
-            let sample_index = u16_le(bytes, offset)? as usize;
-            let phase_number = bytes[offset + 2];
-            let transition_reason = bytes[offset + 3];
-            let phase_name = c_string(&bytes[offset + 4..offset + 29]);
-            transitions.push((sample_index, phase_number, phase_name.clone()));
-            phase_transitions.push(json!({
-                "sampleIndex": sample_index,
-                "phaseNumber": phase_number,
-                "transitionReason": transition_reason,
-                "phaseName": phase_name
-            }));
-        }
-    }
-
-    let mut samples = Vec::with_capacity(sample_count);
-    for sample_index in 0..sample_count {
-        let base = header_size + sample_index * sample_size;
-        let mut sample = Map::new();
-        for (field_index, bit) in active_bits.iter().enumerate() {
-            let offset = base + field_index * 2;
-            let known = field(*bit);
-            let (name, raw, scale) = match known {
-                Some(value) => {
-                    let raw = match value.kind {
-                        FieldKind::Signed => i16_le(bytes, offset)? as f64,
-                        FieldKind::Unsigned => u16_le(bytes, offset)? as f64,
-                    };
-                    (value.name.to_string(), raw, value.scale)
-                }
-                None => (format!("unknown_{bit}"), u16_le(bytes, offset)? as f64, 0.0),
-            };
-            let number = if name == "t" {
-                raw * sample_interval as f64
-            } else if scale > 0.0 {
-                raw / scale
-            } else {
-                raw
-            };
-            if name == "systemInfo" {
-                sample.insert(name, system_info(number as u16));
-            } else {
-                sample.insert(name, json!(number));
-            }
-        }
-        if version >= 5 {
-            let mut phase_number = 0_u8;
-            let mut phase_name = "Phase 1".to_string();
-            for (transition_sample, transition_phase, transition_name) in &transitions {
-                if sample_index < *transition_sample {
-                    break;
-                }
-                phase_number = *transition_phase;
-                phase_name = transition_name.clone();
-            }
-            sample.insert("phaseNumber".into(), json!(phase_number));
-            sample.insert("phaseDisplayNumber".into(), json!(phase_number + 1));
-            sample.insert("phaseName".into(), json!(phase_name));
-        }
-        samples.push(Value::Object(sample));
-    }
+    let (transitions, phase_transitions) = parse_phase_transitions(bytes, version)?;
+    let samples = parse_samples(
+        bytes,
+        header_size,
+        sample_size,
+        sample_count,
+        &active_bits,
+        sample_interval,
+        version,
+        &transitions,
+    )?;
     let last_t = samples
         .last()
         .and_then(|sample| sample.get("t"))

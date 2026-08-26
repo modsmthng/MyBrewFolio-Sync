@@ -1,5 +1,6 @@
 node_modules/
 dist/
+coverage/
 target/
 src-tauri/gen/
 .env
@@ -7,4 +8,3 @@ src-tauri/gen/
 !.env.example
 *.log
 .DS_Store
-

@@ -46,7 +46,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .status-ok { color: #1f684d; background: #dcebe4; }
 .status-error { color: #9d3038; background: #f4dfe0; }
 .status-working { color: #275e80; background: #dce9f0; }
-.status-idle { color: #65768a; background: #dde3e8; }
+.status-idle { color: #536476; background: #dde3e8; }
 .central-status { position: fixed; z-index: 60; top: 14px; left: 50%; width: min(680px, calc(100% - 28px)); transform: translateX(-50%); padding: 11px 16px; border: 1px solid rgba(50,107,142,.32); border-radius: 16px; color: #275e80; background: rgba(236,244,248,.96); box-shadow: 0 12px 32px rgba(26,45,62,.18); font-size: 13px; text-align: center; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
 .central-status-error { color: #8d343a; border-color: rgba(157,48,56,.35); background: rgba(249,231,232,.97); }
 .central-status-success { color: #1f684d; border-color: rgba(49,115,90,.35); background: rgba(229,242,235,.97); }
@@ -137,7 +137,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .text-link:hover { color: #c4e3f3; }
   .info-button { color: #9fc8df; border-color: #52677a; background: rgba(34,46,58,.72); }
   .info-button:hover { background: rgba(115,171,204,.16); }
-  .update-available { color: #a9dbc6; border-color: rgba(91,167,137,.45); background: rgba(49,115,90,.2); }
+  .update-available { color: #b9ead5; border-color: rgba(91,167,137,.45); background: rgba(49,115,90,.2); }
   .resync-preview, .modal-card { background: #202d39; }
   .activation-choice select { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
   .issue-details li { background: rgba(211,91,97,.12); }

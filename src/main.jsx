@@ -37,10 +37,38 @@ const REUSE_MATCHING_SHOTS_EXPLANATION =
 const COMPLETE_RESYNC_EXPLANATION =
   'Reads the complete GaggiMate library again. Shots and profiles deleted from MyBrewFolio can be restored if they are still on the machine. You review the changes before anything is applied. Complete resync itself does not write to your GaggiMate.';
 
-function formatDate(value) {
+export function formatDate(value) {
   if (!value) return 'Not synced yet';
   const date = new Date(value);
   return Number.isFinite(date.getTime()) ? date.toLocaleString() : 'Not synced yet';
+}
+
+export function statusTone(activeSyncActivity, message, messageTone, engineError) {
+  if (activeSyncActivity) return 'working';
+  if (message) return messageTone;
+  if (engineError) return 'error';
+  return 'info';
+}
+
+export function activationDecisions(preview) {
+  return Object.fromEntries(
+    (preview.items || [])
+      .filter(item => item.differs)
+      .map(item => [item.sourceKey, 'mybrewfolio']),
+  );
+}
+
+export function resyncDecisions(preview) {
+  return {
+    restoreIds: (preview.restoreItems || []).map(item => item.id),
+    duplicateDecisions: (preview.duplicates || []).map(item => ({
+      mappingId: item.mapping_id,
+      keepShotId: item.keep_shot_id,
+      removeShotId: item.remove_shot_id,
+      selected: true,
+      notesResolution: item.notes_conflict ? '' : undefined,
+    })),
+  };
 }
 
 function SyncSpinner() {
@@ -141,7 +169,7 @@ function Setup({ status, refresh, externalNotice }) {
         <span>GaggiMate hostname or local IP</span>
         <input value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" />
       </label>
-      <button className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : 'Connect MyBrewFolio'}</button>
+      <button type="button" className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : 'Connect MyBrewFolio'}</button>
       {message ? <p className="message" aria-live="polite">{message}</p> : null}
       {!message && externalNotice ? (
         <div className="message disconnect-notice" aria-live="polite">
@@ -392,12 +420,8 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     setMessage('');
     try {
       const preview = await invoke('begin_two_way_notes_activation');
-      const decisions = {};
-      for (const item of preview.items || []) {
-        if (item.differs) decisions[item.sourceKey] = 'mybrewfolio';
-      }
       setNotesActivation(preview);
-      setNotesDecisions(decisions);
+      setNotesDecisions(activationDecisions(preview));
       setNotesIntroOpen(false);
       setMessage('');
     } catch (error) {
@@ -503,14 +527,9 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
     try {
       const preview = await invoke('preview_complete_resync');
       setResync(preview);
-      setRestoreIds((preview.restoreItems || []).map(item => item.id));
-      setDuplicateDecisions((preview.duplicates || []).map(item => ({
-        mappingId: item.mapping_id,
-        keepShotId: item.keep_shot_id,
-        removeShotId: item.remove_shot_id,
-        selected: true,
-        notesResolution: item.notes_conflict ? '' : undefined,
-      })));
+      const decisions = resyncDecisions(preview);
+      setRestoreIds(decisions.restoreIds);
+      setDuplicateDecisions(decisions.duplicateDecisions);
       setConfirmingResync(false);
       setMessage('');
     } catch (error) {
@@ -574,13 +593,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
   const visibleStatusMessage = activeSyncActivity
     ? syncActivityLabels[activeSyncActivity]
     : message || engineError;
-  const visibleStatusTone = activeSyncActivity
-    ? 'working'
-    : message
-      ? messageTone
-      : engineError
-      ? 'error'
-      : 'info';
+  const visibleStatusTone = statusTone(activeSyncActivity, message, messageTone, engineError);
   const differingActivationItems = (notesActivation?.items || []).filter(item => item.differs);
   const scrollToNotesConfirmation = () => {
     const target = notesConfirmationRef.current;
@@ -597,13 +610,13 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
         <StatusPill status={status} />
       </header>
       {visibleStatusMessage ? (
-        <section className={`central-status central-status-${visibleStatusTone}`} role={visibleStatusTone === 'error' ? 'alert' : 'status'} aria-live="polite">
+        <output className={`central-status central-status-${visibleStatusTone}`} aria-live="polite">
           <strong>{visibleStatusMessage}</strong>
-        </section>
+        </output>
       ) : null}
       <section className="overview card">
         <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
-        <button className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
+        <button type="button" className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
           <ActionLabel active={activeSyncActivity === 'sync'} activeText="Syncing…">Sync now</ActionLabel>
         </button>
       </section>
@@ -624,7 +637,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             <span>Reuse matching shots already in MyBrewFolio</span>
           </label>
           <p className="muted">{REUSE_MATCHING_SHOTS_EXPLANATION}</p>
-          <button className="primary compact-button" disabled={busy} onClick={configure}>
+          <button type="button" className="primary compact-button" disabled={busy} onClick={configure}>
             <ActionLabel active={syncActivity === 'first-sync'} activeText="Starting first sync…">Save and start first sync</ActionLabel>
           </button>
         </section>
@@ -647,7 +660,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
               </span>
             </li>
           ))}</ul>
-          <button className="secondary inline-action" disabled={busy} onClick={retryFailures}>
+          <button type="button" className="secondary inline-action" disabled={busy} onClick={retryFailures}>
             <ActionLabel active={syncActivity === 'retry'} activeText="Retrying…">Retry failed items</ActionLabel>
           </button>
         </details>
@@ -655,7 +668,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
       <h2 className="section-title">Settings</h2>
       <section className="card settings">
         <h3>GaggiMate settings</h3>
-        <div className="inline-field"><input value={host} onInput={event => setHost(event.currentTarget.value)} /><button onClick={saveHost} disabled={busy}>Save</button></div>
+        <div className="inline-field"><input aria-label="GaggiMate hostname or local IP" value={host} onInput={event => setHost(event.currentTarget.value)} /><button type="button" onClick={saveHost} disabled={busy}>Save</button></div>
         <div className="setting-with-info">
           <label className="toggle">
             <input type="checkbox" checked={reuseMatching} onChange={event => {
@@ -681,11 +694,11 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           </p>
         ) : null}
         {status.initialSyncConfigured && policyDirty ? (
-          <button className="secondary inline-action" disabled={busy} onClick={configure}>Save matching preference</button>
+          <button type="button" className="secondary inline-action" disabled={busy} onClick={configure}>Save matching preference</button>
         ) : null}
         <p className="muted">Shots and profiles sync one way to MyBrewFolio. Two-way Notes Sync is optional.</p>
         <div className="action-with-info">
-          <button className="secondary inline-action" disabled={busy} onClick={previewResync}>
+          <button type="button" className="secondary inline-action" disabled={busy} onClick={previewResync}>
             <ActionLabel active={syncActivity === 'resync-preview'} activeText="Reading library…">Complete resync</ActionLabel>
           </button>
           <button
@@ -728,26 +741,26 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           <>
             <p><strong>Two-way Notes Sync is active on this computer.</strong></p>
             <div className="button-row">
-              <button className="secondary inline-action" disabled={busy} onClick={createNotesBackup}>
+              <button type="button" className="secondary inline-action" disabled={busy} onClick={createNotesBackup}>
                 <ActionLabel active={syncActivity === 'notes-backup'} activeText="Creating backup…">Create Latest Backup</ActionLabel>
               </button>
-              <button className="secondary inline-action danger-action" disabled={busy} onClick={disableNotesSync}>Turn off two-way Notes Sync</button>
+              <button type="button" className="secondary inline-action danger-action" disabled={busy} onClick={disableNotesSync}>Turn off two-way Notes Sync</button>
             </div>
           </>
         ) : status.notesSyncStatus === 'activation_pending' ? (
           <>
             <p><strong>Two-way Notes Sync is waiting for activation.</strong></p>
             {status.notesSyncTargetDeviceId === status.thisDeviceId ? (
-              <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+              <button type="button" className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
                 <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Create backup and review Notes</ActionLabel>
               </button>
             ) : <p className="muted">The selected Sync computer must finish the backup and review.</p>}
-            <button className="secondary inline-action" disabled={busy} onClick={disableNotesSync}>Cancel activation</button>
+            <button type="button" className="secondary inline-action" disabled={busy} onClick={disableNotesSync}>Cancel activation</button>
           </>
         ) : (
           <>
             <p><strong>Two-way Notes Sync is off.</strong></p>
-            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
               <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Set up two-way Notes Sync</ActionLabel>
             </button>
           </>
@@ -757,7 +770,7 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             {status.noteBackups.map(backup => (
               <article className="backup-row" key={backup.id}>
                 <div><strong>{backup.slot === 'activation' ? 'First Backup' : 'Latest Backup'}</strong><small>{backup.itemCount} shots · {formatDate(backup.finalizedAt || backup.createdAt)}</small></div>
-                <button className="secondary compact-button" disabled={busy} onClick={() => previewRestore(backup)}>Restore</button>
+                <button type="button" className="secondary compact-button" disabled={busy} onClick={() => previewRestore(backup)}>Restore</button>
               </article>
             ))}
           </div>
@@ -767,11 +780,11 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
       <section className="card settings">
         <h3>Updates</h3>
         {availableUpdate ? (
-          <p className="update-available" role="status">
+          <output className="update-available" aria-live="polite">
             Update {availableUpdate} is available.
-          </p>
+          </output>
         ) : null}
-        <button className="secondary inline-action" disabled={busy} onClick={update}>
+        <button type="button" className="secondary inline-action" disabled={busy} onClick={update}>
           {availableUpdate ? `Install update ${availableUpdate}` : 'Check for updates'}
         </button>
         <p className="muted app-version">Installed version {appVersion || '…'}</p>
@@ -812,8 +825,8 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             <p className="muted" id="two-way-notes-intro-info">Sync first creates a complete GaggiMate Notes backup. If copies differ, MyBrewFolio is preselected and every choice can be reviewed before a Note is written.</p>
           ) : null}
           <div className="dialog-actions">
-            <button className="secondary compact-button" disabled={busy} onClick={dismissNotesIntro}>Not now</button>
-            <button className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
+            <button type="button" className="secondary compact-button" disabled={busy} onClick={dismissNotesIntro}>Not now</button>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={beginNotesActivation}>
               <ActionLabel active={syncActivity === 'notes-activation'} activeText="Creating backup…">Create backup and review</ActionLabel>
             </button>
           </div>
@@ -834,13 +847,13 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             <fieldset>
               <legend>Different Notes</legend>
               <div className="bulk-actions">
-                <button className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries(differingActivationItems.map(item => [item.sourceKey, 'mybrewfolio'])))}>Use MyBrewFolio for all</button>
-                <button className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries(differingActivationItems.map(item => [item.sourceKey, 'gaggimate'])))}>Use GaggiMate for all</button>
+                <button type="button" className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries(differingActivationItems.map(item => [item.sourceKey, 'mybrewfolio'])))}>Use MyBrewFolio for all</button>
+                <button type="button" className="secondary inline-action" onClick={() => setNotesDecisions(Object.fromEntries(differingActivationItems.map(item => [item.sourceKey, 'gaggimate'])))}>Use GaggiMate for all</button>
               </div>
               {differingActivationItems.map(item => (
                 <label className="activation-choice" key={item.sourceKey}>
                   <span><strong>{item.displayName}</strong><small>Shot {item.sourceKey}</small></span>
-                  <select value={notesDecisions[item.sourceKey] || 'mybrewfolio'} onChange={event => setNotesDecisions(current => ({ ...current, [item.sourceKey]: event.currentTarget.value }))}>
+                  <select aria-label={`Notes source for ${item.displayName}`} value={notesDecisions[item.sourceKey] || 'mybrewfolio'} onChange={event => setNotesDecisions(current => ({ ...current, [item.sourceKey]: event.currentTarget.value }))}>
                     <option value="mybrewfolio">Use MyBrewFolio Notes</option>
                     <option value="gaggimate">Use GaggiMate Notes</option>
                   </select>
@@ -849,8 +862,8 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             </fieldset>
           ) : <p className="muted">All matching Notes already agree. No initial overwrite is needed.</p>}
           <div className="dialog-actions" ref={notesConfirmationRef}>
-            <button className="secondary compact-button" disabled={busy} onClick={() => setNotesActivation(null)}>Cancel</button>
-            <button className="primary compact-button" disabled={busy} onClick={confirmNotesActivation}>
+            <button type="button" className="secondary compact-button" disabled={busy} onClick={() => setNotesActivation(null)}>Cancel</button>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={confirmNotesActivation}>
               <ActionLabel active={syncActivity === 'notes-write'} activeText="Enabling…">Enable two-way Notes Sync</ActionLabel>
             </button>
           </div>
@@ -870,8 +883,8 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
             })}
           </fieldset>
           <div className="dialog-actions">
-            <button className="secondary compact-button" disabled={busy} onClick={() => setRestorePreview(null)}>Cancel</button>
-            <button className="primary compact-button" disabled={busy || !restoreKeys.length} onClick={restoreNotes}>Restore selected Notes</button>
+            <button type="button" className="secondary compact-button" disabled={busy} onClick={() => setRestorePreview(null)}>Cancel</button>
+            <button type="button" className="primary compact-button" disabled={busy || !restoreKeys.length} onClick={restoreNotes}>Restore selected Notes</button>
           </div>
         </section>
       ) : null}
@@ -893,16 +906,16 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           {(resync.duplicates || []).length ? <fieldset>
             <legend>Duplicate shots</legend>
             <div className="bulk-actions">
-              <button className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => ({ ...item, selected: true })))}>Select all</button>
-              <button className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'mybrewfolio' } : item))}>Keep MyBrewFolio notes for all</button>
-              <button className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'gaggimate' } : item))}>Use GaggiMate notes for all</button>
+              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => ({ ...item, selected: true })))}>Select all</button>
+              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'mybrewfolio' } : item))}>Keep MyBrewFolio notes for all</button>
+              <button type="button" className="secondary inline-action" onClick={() => setDuplicateDecisions(current => current.map(item => item.notesResolution === '' ? { ...item, notesResolution: 'gaggimate' } : item))}>Use GaggiMate notes for all</button>
             </div>
             {resync.duplicates.map((item, index) => <div className="duplicate-row" key={item.mapping_id}>
               <label className="toggle">
                 <input type="checkbox" checked={duplicateDecisions[index]?.selected} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, selected: event.currentTarget.checked } : decision))} />
                 <span>Keep “{item.keep_name}” and remove Sync copy “{item.remove_name}”</span>
               </label>
-              {item.notes_conflict ? <select value={duplicateDecisions[index]?.notesResolution || ''} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, notesResolution: event.currentTarget.value } : decision))}>
+              {item.notes_conflict ? <select aria-label={`Notes resolution for ${item.mapped_name}`} value={duplicateDecisions[index]?.notesResolution || ''} onChange={event => setDuplicateDecisions(current => current.map((decision, position) => position === index ? { ...decision, notesResolution: event.currentTarget.value } : decision))}>
                 <option value="">Choose notes…</option>
                 <option value="mybrewfolio">Keep MyBrewFolio notes</option>
                 <option value="gaggimate">Use GaggiMate notes</option>
@@ -928,14 +941,14 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
                   : ''}.
               </p>
             ) : null}
-            <button className="secondary inline-action" disabled={busy} onClick={() => {
+            <button type="button" className="secondary inline-action" disabled={busy} onClick={() => {
               if (confirmingResync) {
                 setConfirmingResync(false);
               } else {
                 setResync(null);
               }
             }}>{confirmingResync ? 'Back' : 'Cancel'}</button>
-            <button className="primary compact-button" disabled={busy} onClick={applyResync}>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={applyResync}>
               <ActionLabel active={syncActivity === 'resync-apply'} activeText="Applying resync…">
                 {confirmingResync ? 'Confirm complete resync' : 'Apply complete resync'}
               </ActionLabel>
@@ -950,12 +963,12 @@ function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) 
           <div className="disconnect-confirm" role="alertdialog" aria-labelledby="disconnect-title">
             <strong id="disconnect-title">Disconnect this computer?</strong>
             <div>
-              <button className="secondary compact-button" disabled={busy} onClick={() => setConfirmDisconnect(false)}>Cancel</button>
-              <button className="primary compact-button" disabled={busy} onClick={disconnect}>Disconnect</button>
+              <button type="button" className="secondary compact-button" disabled={busy} onClick={() => setConfirmDisconnect(false)}>Cancel</button>
+              <button type="button" className="primary compact-button" disabled={busy} onClick={disconnect}>Disconnect</button>
             </div>
           </div>
         ) : (
-          <button className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
+          <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
         )}
       </section>
       <AppFooter />
@@ -1031,4 +1044,5 @@ function App() {
     : <Setup status={status} refresh={refresh} externalNotice={oauthError ? { message: oauthError } : disconnectNotice} />;
 }
 
-render(<App />, document.getElementById('app'));
+const appRoot = document.getElementById('app');
+if (appRoot) render(<App />, appRoot);
