@@ -41,7 +41,8 @@ creates the protected **First Backup** first. If existing MyBrewFolio and GaggiM
 MyBrewFolio is preselected and every choice remains editable before any machine write. The app
 rechecks the machine copy immediately before writing, verifies it afterwards, and creates a
 **Latest Backup** before later outgoing write batches. Both backup slots can be downloaded on the
-MyBrewFolio Account page and restored from the desktop app.
+MyBrewFolio Account page. Restore is preview-first and applies only the explicitly confirmed
+selection from the desktop app or headless CLI.
 
 ## Code quality
 https://sonarcloud.io/project/overview?id=modsmthng_MyBrewFolio-Sync
@@ -90,9 +91,12 @@ credentials, or the machine address.
 
 `mybrewfolio-syncd` is a Tauri-free Linux binary that shares the desktop application's SyncEngine.
 It provides daemon, one-shot, authentication, status, configuration, Notes, and resync commands
-as JSON-producing CLI operations. Docker state is stored under `/data`; tokens are encrypted with
-an explicitly mounted Docker secret instead of an OS keychain. See [docs/headless.md](docs/headless.md)
-for Compose setup, browser pairing, and LAN networking guidance.
+as JSON-producing CLI operations. The Docker installer asks for the local GaggiMate host, starts
+pairing in the browser, and creates a local `sync` helper, so users do not need to manage Compose
+paths. Docker state is stored under `/data`; tokens are encrypted locally with an installer-created
+32-byte key mounted as a Docker secret instead of an OS keychain. See
+[docs/headless.md](docs/headless.md) for installation, everyday commands, browser pairing, and LAN
+networking guidance.
 
 ## Verification
 
@@ -123,7 +127,8 @@ visible in both Light and Dark appearances. Windows and Linux use the generated,
 
 ## Security and privacy
 
-- OAuth tokens are stored in the operating-system keychain.
+- Desktop OAuth tokens are stored in the operating-system keychain. The headless runtime stores
+  them in an encrypted local file whose 32-byte key is mounted as a Docker secret.
 - The GaggiMate hostname or local IP remains on the computer.
 - Support and privacy links use a fixed allowlist and open in the operating system's browser.
 - Only explicitly synchronized library content is sent to the MyBrewFolio Sync API.
