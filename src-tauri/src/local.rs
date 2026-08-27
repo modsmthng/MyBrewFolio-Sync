@@ -36,6 +36,16 @@ fn private_address(address: IpAddr) -> bool {
     }
 }
 
+fn saved_profile_id(response: &Value, requested_id: &str) -> String {
+    response
+        .get("profile")
+        .and_then(|saved| saved.get("id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .unwrap_or(requested_id)
+        .to_string()
+}
+
 struct LocalTarget {
     authority: String,
     host: String,
@@ -389,7 +399,7 @@ impl GaggiMateClient {
         Ok(profile)
     }
 
-    pub async fn save_profile(&self, profile: &Value) -> Result<(), LocalError> {
+    pub async fn save_profile(&self, profile: &Value) -> Result<String, LocalError> {
         let mut safe = profile
             .as_object()
             .cloned()
@@ -403,13 +413,19 @@ impl GaggiMateClient {
         }
         safe.remove("favorite");
         safe.remove("selected");
-        safe.get("id")
+        let requested_id = safe
+            .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 128)
-            .ok_or(LocalError::InvalidData)?;
-        self.websocket_request("req:profiles:save", json!({ "profile": safe }))
+            .ok_or(LocalError::InvalidData)?
+            .to_string();
+        let response = self
+            .websocket_request("req:profiles:save", json!({ "profile": safe }))
             .await?;
-        Ok(())
+        // IDs are firmware-managed: when the machine assigns a fresh ID, all
+        // following load/favorite/select operations must use that ID rather
+        // than the Store draft's requested one.
+        Ok(saved_profile_id(&response, &requested_id))
     }
 
     pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {
@@ -486,5 +502,20 @@ mod tests {
             GaggiMateClient::new("public.example.test"),
             Err(LocalError::InvalidHost)
         ));
+    }
+
+    #[test]
+    fn save_response_uses_the_firmware_assigned_profile_id() {
+        assert_eq!(
+            saved_profile_id(
+                &json!({ "profile": { "id": "machine-profile" } }),
+                "store-profile"
+            ),
+            "machine-profile"
+        );
+        assert_eq!(
+            saved_profile_id(&json!({}), "store-profile"),
+            "store-profile"
+        );
     }
 }

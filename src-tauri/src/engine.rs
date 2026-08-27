@@ -1289,44 +1289,45 @@ impl SyncEngine {
                             .into(),
                     ));
                 }
-                let confirmed_profile = if !actions_only && !already_installed {
-                    local
+                let installed_profile_id = if !actions_only && !already_installed {
+                    let saved_id = local
                         .save_profile(profile)
                         .await
                         .map_err(|error| ("PROFILE_SAVE_FAILED", error.to_string()))?;
-                    match local.load_profile(profile_id).await {
-                        Ok(confirmed) => confirmed,
+                    match local.load_profile(&saved_id).await {
+                        Ok(confirmed)
+                            if confirmed.get("id").and_then(Value::as_str)
+                                == Some(saved_id.as_str()) =>
+                        {
+                            saved_id
+                        }
+                        Ok(_) => {
+                            return Err((
+                                "SAVE_NOT_CONFIRMED",
+                                "The machine did not confirm the installed profile".into(),
+                            ));
+                        }
                         // A save acknowledgement has already changed the machine. Keep the
                         // operation leased and re-check it from the durable Bridge outbox instead
                         // of reporting a false install failure when that immediate reload fails.
                         Err(_) => {
-                            return Err((
-                                "SAVE_CONFIRMATION_PENDING",
-                                "The profile was saved and is waiting for machine confirmation"
-                                    .into(),
-                            ));
+                            return Err(("SAVE_CONFIRMATION_PENDING", saved_id));
                         }
                     }
                 } else {
-                    current.unwrap_or_else(|| profile.clone())
+                    profile_id.to_string()
                 };
-                if !profiles_equal(&confirmed_profile, profile) {
-                    return Err((
-                        "SAVE_NOT_CONFIRMED",
-                        "The machine did not confirm the installed profile".into(),
-                    ));
-                }
                 let mut action_failures = Vec::new();
                 let mut favorite_applied = false;
                 let mut selected_applied = false;
                 if favorite {
-                    match local.favorite_profile(profile_id).await {
+                    match local.favorite_profile(&installed_profile_id).await {
                         Ok(()) => favorite_applied = true,
                         Err(_) => action_failures.push("favorite"),
                     }
                 }
                 if selected {
-                    match local.select_profile(profile_id).await {
+                    match local.select_profile(&installed_profile_id).await {
                         Ok(()) => selected_applied = true,
                         Err(_) => action_failures.push("select"),
                     }
@@ -1343,7 +1344,7 @@ impl SyncEngine {
                 Ok(json!({
                     "installed": true,
                     "alreadyInstalled": already_installed,
-                    "profileId": profile_id,
+                    "profileId": installed_profile_id,
                     "favoriteApplied": favorite_applied,
                     "selectedApplied": selected_applied,
                     "favoriteCount": favorite_count,
@@ -1369,12 +1370,12 @@ impl SyncEngine {
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                let Some(profile) = completion.payload.get("profile") else {
-                    self.store
-                        .remove_bridge_completion(&completion.operation_id)?;
-                    continue;
-                };
-                let Some(profile_id) = profile.get("id").and_then(Value::as_str) else {
+                let Some(profile_id) = completion
+                    .payload
+                    .get("profileId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                else {
                     self.store
                         .remove_bridge_completion(&completion.operation_id)?;
                     continue;
@@ -1385,7 +1386,7 @@ impl SyncEngine {
                     // a slow or briefly unreachable machine must remain "confirming".
                     Err(_) => continue,
                 };
-                let completed = if profiles_equal(&confirmed, profile) {
+                let completed = if confirmed.get("id").and_then(Value::as_str) == Some(profile_id) {
                     let favorite = completion
                         .payload
                         .get("favorite")
@@ -1528,7 +1529,7 @@ impl SyncEngine {
             {
                 json!({
                     "profileStoreConfirmationPending": true,
-                    "profile": payload.get("profile").cloned().unwrap_or(Value::Null),
+                    "profileId": completion.get("errorMessage").and_then(Value::as_str).unwrap_or_default(),
                     "favorite": payload.get("favorite").and_then(Value::as_bool).unwrap_or(false),
                     "selected": payload.get("selected").and_then(Value::as_bool).unwrap_or(false),
                 })
