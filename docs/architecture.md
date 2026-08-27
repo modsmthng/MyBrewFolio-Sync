@@ -23,9 +23,10 @@ interfaces and credential storage; this prevents the headless variant from becom
 implementation.
 
 Neither runtime sends the local hostname, IP address, or a GaggiMate hardware identifier to
-MyBrewFolio. Neither writes shots or profiles, selects profiles, favorites profiles, or deletes
-anything on the machine. Only explicitly enabled two-way Notes synchronization can write a Notes
-object for an exact mapped shot.
+MyBrewFolio. Automatic synchronization never writes shots or profiles and never deletes anything on
+the machine. Two explicit user actions may write: two-way Notes synchronization for an exact mapped
+shot, and the Profile Store bridge for one confirmed profile. The latter may save, favorite and
+select that profile but never deletes or reorders profiles.
 
 The app can locally hide its normal application icon while retaining the tray entry point. macOS
 uses Tauri's accessory activation policy and Dock visibility API; Windows and Linux use the main
@@ -49,6 +50,9 @@ open a network port.
 - The shot index is checked every 30 seconds.
 - New or changed shots are parsed from `.slog` files and queued with their notes.
 - Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
+- Profile Store operations are checked every 30 seconds and accepted only when addressed to this
+  installation's authenticated device ID. Inventory, fetch, preview and install results use
+  short-lived leases; installation reloads the profile before reporting success.
 - Notes for recent shots are refreshed every five minutes.
 - A throttled full notes pass runs once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty

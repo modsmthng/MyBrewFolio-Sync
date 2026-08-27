@@ -353,9 +353,19 @@ impl CloudClient {
         platform: &str,
         app_version: &str,
     ) -> Result<DeviceRegistration, CloudError> {
-        let response = self.authorized(reqwest::Method::POST, "/v1/sync/devices").await?
-            .json(&json!({ "installationId": installation_id, "name": name, "platform": platform, "appVersion": app_version }))
-            .send().await.map_err(|_| CloudError::Unreachable)?;
+        let response = self
+            .authorized(reqwest::Method::POST, "/v1/sync/devices")
+            .await?
+            .json(&json!({
+                "installationId": installation_id,
+                "name": name,
+                "platform": platform,
+                "appVersion": app_version,
+                "capabilities": { "profileStoreBridge": 1 }
+            }))
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
         if response.status() == StatusCode::UNAUTHORIZED {
             return Err(CloudError::Revoked);
         }
@@ -672,7 +682,8 @@ impl CloudClient {
             .header("X-MyBrewFolio-Sync-Device", device_id)
             .json(&json!({
                 "appVersion": env!("CARGO_PKG_VERSION"), "machineReachable": machine_reachable,
-                "lastSyncAt": last_sync_at, "lastErrorCode": error
+                "lastSyncAt": last_sync_at, "lastErrorCode": error,
+                "capabilities": { "profileStoreBridge": 1 }
             }))
             .send()
             .await
@@ -684,6 +695,34 @@ impl CloudClient {
             return Err(CloudError::Rejected);
         }
         Ok(())
+    }
+
+    pub async fn claim_profile_store_operations(
+        &self,
+        device_id: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/profile-store/operations/claim",
+            device_id,
+            json!({}),
+        )
+        .await
+    }
+
+    pub async fn complete_profile_store_operation(
+        &self,
+        device_id: &str,
+        operation_id: &str,
+        result: Value,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            &format!("/v1/sync/profile-store/operations/{operation_id}/complete"),
+            device_id,
+            result,
+        )
+        .await
     }
 
     pub async fn revoke(&self, device_id: &str) -> Result<(), CloudError> {

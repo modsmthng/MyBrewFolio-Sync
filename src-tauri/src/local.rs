@@ -335,6 +335,100 @@ impl GaggiMateClient {
         }
         Ok(result)
     }
+
+    pub async fn profile_inventory(&self) -> Result<Vec<Value>, LocalError> {
+        let listing = self
+            .websocket_request("req:profiles:list", json!({ "minimal": true }))
+            .await?;
+        let profiles = listing
+            .get("profiles")
+            .and_then(Value::as_array)
+            .ok_or(LocalError::InvalidData)?;
+        profiles
+            .iter()
+            .map(|profile| {
+                let id = profile
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                    .ok_or(LocalError::InvalidData)?;
+                let label = profile
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .filter(|label| !label.is_empty() && label.len() <= 240)
+                    .ok_or(LocalError::InvalidData)?;
+                Ok(json!({
+                    "id": id,
+                    "label": label,
+                    "favorite": profile.get("favorite").and_then(Value::as_bool).unwrap_or(false),
+                    "selected": profile.get("selected").and_then(Value::as_bool).unwrap_or(false),
+                }))
+            })
+            .collect()
+    }
+
+    pub async fn load_profile(&self, id: &str) -> Result<Value, LocalError> {
+        if id.is_empty() || id.len() > 128 {
+            return Err(LocalError::InvalidData);
+        }
+        let response = self
+            .websocket_request("req:profiles:load", json!({ "id": id }))
+            .await?;
+        let profile = response
+            .get("profile")
+            .cloned()
+            .ok_or(LocalError::InvalidData)?;
+        if !profile.is_object()
+            || serde_json::to_vec(&profile)
+                .map_err(|_| LocalError::InvalidData)?
+                .len()
+                > 1024 * 1024
+        {
+            return Err(LocalError::InvalidData);
+        }
+        Ok(profile)
+    }
+
+    pub async fn save_profile(&self, profile: &Value) -> Result<Value, LocalError> {
+        let mut safe = profile
+            .as_object()
+            .cloned()
+            .ok_or(LocalError::InvalidData)?;
+        if serde_json::to_vec(&safe)
+            .map_err(|_| LocalError::InvalidData)?
+            .len()
+            > 1024 * 1024
+        {
+            return Err(LocalError::InvalidData);
+        }
+        safe.remove("favorite");
+        safe.remove("selected");
+        let id = safe
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .ok_or(LocalError::InvalidData)?
+            .to_string();
+        self.websocket_request("req:profiles:save", json!({ "profile": safe }))
+            .await?;
+        let stored = self.load_profile(&id).await?;
+        if stored.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+            return Err(LocalError::InvalidData);
+        }
+        Ok(stored)
+    }
+
+    pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {
+        self.websocket_request("req:profiles:favorite", json!({ "id": id }))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn select_profile(&self, id: &str) -> Result<(), LocalError> {
+        self.websocket_request("req:profiles:select", json!({ "id": id }))
+            .await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

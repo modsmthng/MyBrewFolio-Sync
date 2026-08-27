@@ -89,6 +89,9 @@ const server = http.createServer((request, response) => {
 
 const websocket = new WebSocketServer({ server, path: '/ws' });
 const savedNotes = new Map([['1', fixture.notes], ['2', null]]);
+const savedProfiles = new Map([[fixture.profile.id, { ...fixture.profile, favorite: false, selected: true }]]);
+const favoriteProfiles = new Set();
+let selectedProfileId = fixture.profile.id;
 websocket.on('connection', socket => {
   socket.on('message', bytes => {
     let request;
@@ -101,16 +104,40 @@ websocket.on('connection', socket => {
       socket.send(JSON.stringify({
         tp: 'res:profiles:list',
         rid: request.rid,
-        profiles: [{ id: fixture.profile.id, label: fixture.profile.label }]
+        profiles: [...savedProfiles.values()].map(profile => ({
+          id: profile.id,
+          label: profile.label,
+          favorite: favoriteProfiles.has(profile.id),
+          selected: selectedProfileId === profile.id
+        }))
       }));
       return;
     }
-    if (request.tp === 'req:profiles:load' && request.id === fixture.profile.id) {
+    if (request.tp === 'req:profiles:load' && savedProfiles.has(request.id)) {
       socket.send(JSON.stringify({
         tp: 'res:profiles:load',
         rid: request.rid,
-        profile: fixture.profile
+        profile: {
+          ...savedProfiles.get(request.id),
+          favorite: favoriteProfiles.has(request.id),
+          selected: selectedProfileId === request.id
+        }
       }));
+      return;
+    }
+    if (request.tp === 'req:profiles:save' && request.profile?.id) {
+      savedProfiles.set(request.profile.id, { ...request.profile });
+      socket.send(JSON.stringify({ tp: 'res:profiles:save', rid: request.rid, profile: request.profile }));
+      return;
+    }
+    if (request.tp === 'req:profiles:favorite' && savedProfiles.has(request.id)) {
+      favoriteProfiles.add(request.id);
+      socket.send(JSON.stringify({ tp: 'res:profiles:favorite', rid: request.rid }));
+      return;
+    }
+    if (request.tp === 'req:profiles:select' && savedProfiles.has(request.id)) {
+      selectedProfileId = request.id;
+      socket.send(JSON.stringify({ tp: 'res:profiles:select', rid: request.rid }));
       return;
     }
     if (request.tp === 'req:history:notes:get') {

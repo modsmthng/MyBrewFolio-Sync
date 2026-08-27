@@ -1,9 +1,10 @@
 # MyBrewFolio Sync
 
 MyBrewFolio Sync is the open-source desktop companion for copying shots, profiles, and notes from
-one local GaggiMate to a private MyBrewFolio library. Shots and profiles are always one-way. Users
-may separately enable two-way Notes synchronization after a full machine-Notes backup and review;
-the companion never selects profiles or edits/deletes shots on the machine.
+one local GaggiMate to a private MyBrewFolio library. Automatic shot and profile synchronization is
+one-way. Users may separately enable two-way Notes synchronization after a full machine-Notes backup
+and review. A separately confirmed Profile Store installation may save, favorite and select only the
+chosen Store profile; the companion never edits/deletes shots on the machine.
 
 MyBrewFolio is a platform for smart espresso machines.
 Track and share brews, quickly complete brew notes with smart suggestions from your beans and grinder library, discover community profiles, and move from simple overviews to advanced phase analysis and statistics. Built for GaggiMate brews and profiles today. More coffee machine integrations are planned for the future. 

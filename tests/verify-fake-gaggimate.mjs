@@ -34,6 +34,16 @@ try {
     });
     socket.addEventListener('error', reject);
   });
+  const profileRequest = payload => new Promise((resolve, reject) => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    const rid = `profile-${Math.random().toString(16).slice(2)}`;
+    socket.addEventListener('open', () => socket.send(JSON.stringify({ ...payload, rid })));
+    socket.addEventListener('message', event => {
+      const value = JSON.parse(String(event.data));
+      if (value.rid === rid) { socket.close(); resolve(value); }
+    });
+    socket.addEventListener('error', reject);
+  });
   const notes = await readNotes('1');
   if (notes.rating !== 4) throw new Error('Notes fixture is invalid');
   const nullNotes = await readNotes('2');
@@ -71,6 +81,18 @@ try {
     socket.on('error', reject);
   });
   if (profile?.id !== 'sync-fixture-profile') throw new Error('Profile fixture is invalid');
+  const installed = { ...profile, id: 'store-profile', label: 'Store profile' };
+  await profileRequest({ tp: 'req:profiles:save', profile: installed });
+  await profileRequest({ tp: 'req:profiles:favorite', id: installed.id });
+  await profileRequest({ tp: 'req:profiles:select', id: installed.id });
+  const installedReload = await profileRequest({ tp: 'req:profiles:load', id: installed.id });
+  if (!installedReload.profile?.favorite || !installedReload.profile?.selected) {
+    throw new Error('Profile install actions were not persisted by the fixture');
+  }
+  const inventory = await profileRequest({ tp: 'req:profiles:list', minimal: true });
+  if (!inventory.profiles.some(item => item.id === installed.id && item.favorite && item.selected)) {
+    throw new Error('Profile inventory fixture is invalid');
+  }
   console.log('Fake GaggiMate fixtures verified');
 } finally {
   child.kill();

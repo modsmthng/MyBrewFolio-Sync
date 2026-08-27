@@ -1,8 +1,10 @@
 name: Release
+run-name: ${{ github.event_name == 'workflow_dispatch' && 'Release build dry run' || format('Release {0}', github.ref_name) }}
 
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,6 +26,7 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
+        if: github.event_name == 'push'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -31,7 +34,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.event_name == 'push' }}
           platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/modsmthng/mybrewfolio-sync:${{ github.ref_name }}
@@ -93,14 +96,18 @@ jobs:
             echo 'The repository updater key does not match src-tauri/tauri.conf.json'
             exit 1
           }
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           TAURI_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           CARGO_VERSION="$(awk -F'\"' '/^version = / { print $2; exit }' src-tauri/Cargo.toml)"
-          test "$TAG_VERSION" = "$PACKAGE_VERSION" || { echo 'The release tag does not match package.json'; exit 1; }
-          test "$TAG_VERSION" = "$TAURI_VERSION" || { echo 'The release tag does not match tauri.conf.json'; exit 1; }
-          test "$TAG_VERSION" = "$CARGO_VERSION" || { echo 'The release tag does not match Cargo.toml'; exit 1; }
+          EXPECTED_VERSION="$PACKAGE_VERSION"
+          if [[ "$GITHUB_EVENT_NAME" == 'push' ]]; then
+            EXPECTED_VERSION="${GITHUB_REF_NAME#v}"
+            test "$EXPECTED_VERSION" = "$PACKAGE_VERSION" || { echo 'The release tag does not match package.json'; exit 1; }
+          fi
+          test "$EXPECTED_VERSION" = "$TAURI_VERSION" || { echo 'The release version does not match tauri.conf.json'; exit 1; }
+          test "$EXPECTED_VERSION" = "$CARGO_VERSION" || { echo 'The release version does not match Cargo.toml'; exit 1; }
       - uses: tauri-apps/tauri-action@v1
+        if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
@@ -118,9 +125,18 @@ jobs:
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: ${{ matrix.args }}
+      - name: Build release artifacts without creating a release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+          MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY: ${{ vars.MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- ${{ matrix.args }}
       - name: Verify packaged desktop entrypoint
         shell: bash
         run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           case "${{ matrix.os }}" in
             macos-latest)
               APP="src-tauri/target/universal-apple-darwin/release/bundle/macos/MyBrewFolio Sync.app"
@@ -128,7 +144,7 @@ jobs:
               test -x "$APP/Contents/MacOS/mybrewfolio-sync"
               ;;
             ubuntu-22.04)
-              DEB="src-tauri/target/release/bundle/deb/MyBrewFolio Sync_${GITHUB_REF_NAME#v}_amd64.deb"
+              DEB="src-tauri/target/release/bundle/deb/MyBrewFolio Sync_${PACKAGE_VERSION}_amd64.deb"
               CHECK_DIR="$(mktemp -d)"
               dpkg-deb -x "$DEB" "$CHECK_DIR"
               test -x "$CHECK_DIR/usr/bin/mybrewfolio-sync"
@@ -141,6 +157,7 @@ jobs:
               ;;
           esac
       - name: Upload stable user-facing download aliases
+        if: github.event_name == 'push'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -167,3 +184,26 @@ jobs:
                 --clobber
               ;;
           esac
+      - name: Upload Linux dry-run artifacts
+        if: github.event_name == 'workflow_dispatch' && matrix.os == 'ubuntu-22.04'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-linux
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
+      - name: Upload Windows dry-run artifacts
+        if: github.event_name == 'workflow_dispatch' && matrix.os == 'windows-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-windows
+          path: src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+      - name: Upload macOS dry-run artifacts
+        if: github.event_name == 'workflow_dispatch' && matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run-macos
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error

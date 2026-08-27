@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
@@ -117,6 +120,25 @@ fn is_terminal_batch_status(status: &str) -> bool {
         status,
         "created" | "updated" | "linked" | "unchanged" | "suppressed" | "conflict" | "invalid"
     )
+}
+
+fn normalized_profile(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(normalized_profile).collect()),
+        Value::Object(object) => {
+            let sorted = object
+                .iter()
+                .filter(|(key, _)| *key != "favorite" && *key != "selected")
+                .map(|(key, value)| (key.clone(), normalized_profile(value)))
+                .collect::<BTreeMap<_, _>>();
+            serde_json::to_value(sorted).unwrap_or(Value::Null)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn profiles_equal(left: &Value, right: &Value) -> bool {
+    normalized_profile(left) == normalized_profile(right)
 }
 
 #[derive(Debug, Error)]
@@ -1122,6 +1144,250 @@ impl SyncEngine {
         Ok(())
     }
 
+    async fn execute_profile_store_operation(
+        &self,
+        local: &GaggiMateClient,
+        operation_type: &str,
+        payload: &Value,
+    ) -> Result<Value, (&'static str, String)> {
+        match operation_type {
+            "profile_inventory" => {
+                let profiles = local
+                    .profile_inventory()
+                    .await
+                    .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+                Ok(json!({ "profiles": profiles }))
+            }
+            "profile_fetch" => {
+                let ids = payload.get("profileIds").and_then(Value::as_array).ok_or((
+                    "INVALID_OPERATION",
+                    "The requested profile selection is invalid".into(),
+                ))?;
+                if ids.is_empty() || ids.len() > 24 {
+                    return Err((
+                        "INVALID_OPERATION",
+                        "Choose between one and 24 profiles".into(),
+                    ));
+                }
+                let mut profiles = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let id = id.as_str().ok_or((
+                        "INVALID_OPERATION",
+                        "A requested profile ID is invalid".into(),
+                    ))?;
+                    profiles.push(
+                        local
+                            .load_profile(id)
+                            .await
+                            .map_err(|error| ("PROFILE_LOAD_FAILED", error.to_string()))?,
+                    );
+                }
+                Ok(json!({ "profiles": profiles }))
+            }
+            "profile_install_preview" => {
+                let profile = payload
+                    .get("profile")
+                    .ok_or(("INVALID_OPERATION", "The Store profile is missing".into()))?;
+                let profile_id = profile.get("id").and_then(Value::as_str).ok_or((
+                    "INVALID_OPERATION",
+                    "The Store profile ID is missing".into(),
+                ))?;
+                let inventory = local
+                    .profile_inventory()
+                    .await
+                    .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+                let favorite_count = inventory
+                    .iter()
+                    .filter(|item| {
+                        item.get("favorite")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                let collision = if inventory
+                    .iter()
+                    .any(|item| item.get("id").and_then(Value::as_str) == Some(profile_id))
+                {
+                    let existing = local
+                        .load_profile(profile_id)
+                        .await
+                        .map_err(|error| ("PROFILE_LOAD_FAILED", error.to_string()))?;
+                    if profiles_equal(&existing, profile) {
+                        "identical"
+                    } else {
+                        "different"
+                    }
+                } else {
+                    "none"
+                };
+                Ok(json!({
+                    "collision": collision,
+                    "favoriteCount": favorite_count,
+                    "profileId": profile_id,
+                }))
+            }
+            "profile_install" => {
+                let profile = payload
+                    .get("profile")
+                    .ok_or(("INVALID_OPERATION", "The Store profile is missing".into()))?;
+                let profile_id = profile.get("id").and_then(Value::as_str).ok_or((
+                    "INVALID_OPERATION",
+                    "The Store profile ID is missing".into(),
+                ))?;
+                let actions_only = payload
+                    .get("actionsOnly")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let favorite = payload
+                    .get("favorite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || payload
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                let selected = payload
+                    .get("selected")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let expected_collision = payload
+                    .get("expectedCollision")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none");
+                let inventory = local
+                    .profile_inventory()
+                    .await
+                    .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+                let current = if inventory
+                    .iter()
+                    .any(|item| item.get("id").and_then(Value::as_str) == Some(profile_id))
+                {
+                    Some(
+                        local
+                            .load_profile(profile_id)
+                            .await
+                            .map_err(|error| ("PROFILE_LOAD_FAILED", error.to_string()))?,
+                    )
+                } else {
+                    None
+                };
+                let actual_collision = match current.as_ref() {
+                    None => "none",
+                    Some(existing) if profiles_equal(existing, profile) => "identical",
+                    Some(_) => "different",
+                };
+                if !actions_only && actual_collision != expected_collision {
+                    return Err(("PROFILE_CHANGED", "The local profile changed after confirmation; review the installation again".into()));
+                }
+                let already_installed = actual_collision == "identical";
+                if !actions_only && !already_installed {
+                    local
+                        .save_profile(profile)
+                        .await
+                        .map_err(|error| ("PROFILE_SAVE_FAILED", error.to_string()))?;
+                }
+                let mut action_failures = Vec::new();
+                let mut favorite_applied = false;
+                let mut selected_applied = false;
+                if favorite {
+                    match local.favorite_profile(profile_id).await {
+                        Ok(()) => favorite_applied = true,
+                        Err(_) => action_failures.push("favorite"),
+                    }
+                }
+                if selected {
+                    match local.select_profile(profile_id).await {
+                        Ok(()) => selected_applied = true,
+                        Err(_) => action_failures.push("select"),
+                    }
+                }
+                let final_profile = local
+                    .load_profile(profile_id)
+                    .await
+                    .map_err(|error| ("SAVE_NOT_CONFIRMED", error.to_string()))?;
+                if !profiles_equal(&final_profile, profile) {
+                    return Err((
+                        "SAVE_NOT_CONFIRMED",
+                        "The machine did not confirm the installed profile".into(),
+                    ));
+                }
+                let final_inventory = local
+                    .profile_inventory()
+                    .await
+                    .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+                let favorite_count = final_inventory
+                    .iter()
+                    .filter(|item| {
+                        item.get("favorite")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .count();
+                Ok(json!({
+                    "installed": true,
+                    "alreadyInstalled": already_installed,
+                    "profileId": profile_id,
+                    "favoriteApplied": favorite_applied,
+                    "selectedApplied": selected_applied,
+                    "favoriteCount": favorite_count,
+                    "actionFailures": action_failures,
+                }))
+            }
+            _ => Err((
+                "UNSUPPORTED_OPERATION",
+                "This Profile Store operation is not supported".into(),
+            )),
+        }
+    }
+
+    async fn process_profile_store_operations(
+        &self,
+        local: &GaggiMateClient,
+        device_id: &str,
+    ) -> Result<(), EngineError> {
+        let claim = self.cloud.claim_profile_store_operations(device_id).await?;
+        for operation in claim
+            .get("operations")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(operation_id) = operation.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(operation_type) = operation.get("type").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(lease_token) = operation.get("leaseToken").and_then(Value::as_str) else {
+                continue;
+            };
+            let payload = operation
+                .get("payload")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let completion = match self
+                .execute_profile_store_operation(local, operation_type, &payload)
+                .await
+            {
+                Ok(result) => json!({
+                    "leaseToken": lease_token,
+                    "status": "completed",
+                    "result": result,
+                }),
+                Err((code, message)) => json!({
+                    "leaseToken": lease_token,
+                    "status": "failed",
+                    "errorCode": code,
+                    "errorMessage": message,
+                }),
+            };
+            self.cloud
+                .complete_profile_store_operation(device_id, operation_id, completion)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn sync_once(&self) -> Result<(), EngineError> {
         let guard = self.sync_lock.try_lock().map_err(|_| EngineError::Busy)?;
         let device_id = self
@@ -1162,10 +1428,15 @@ impl SyncEngine {
                         .or_else(|| source.get("initialSyncConfiguredAt"))
                 })
                 .is_some_and(|value| !value.is_null());
+            let local = GaggiMateClient::new(&host)?;
+            self.process_profile_store_operations(&local, &device_id)
+                .await?;
             if !configured {
+                self.cloud.heartbeat(&device_id, true, None, None).await?;
+                let mut status = self.status.write().await;
+                status.machine_reachable = true;
                 return Ok(());
             }
-            let local = GaggiMateClient::new(&host)?;
             let skipped = self.queue_local_changes(&local, &state).await?;
             if cloud_unreachable {
                 // Local changes are safely queued before reporting the missing
@@ -1360,9 +1631,9 @@ mod tests {
 
     use super::{
         api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
-        is_terminal_batch_status, scan_due, select_sync_batch, serialized_batch_bytes,
-        shot_fingerprint, shot_source_key, should_refresh_notes, suppressed_items, SyncEngine,
-        MAX_SYNC_BATCH_BYTES,
+        is_terminal_batch_status, profiles_equal, scan_due, select_sync_batch,
+        serialized_batch_bytes, shot_fingerprint, shot_source_key, should_refresh_notes,
+        suppressed_items, SyncEngine, MAX_SYNC_BATCH_BYTES,
     };
     use crate::model::{AppStatus, IndexEntry, OAuthTokens, SyncObject};
     use crate::{
@@ -1414,6 +1685,32 @@ mod tests {
             hash_value(&value),
             "383410d6c75c6bd29378b3b9da39e37fde1ab284f8f1cb0230ecc2c196f5d346"
         );
+    }
+
+    #[test]
+    fn profile_comparison_ignores_only_machine_runtime_selection_state() {
+        let installed = json!({
+            "id": "profile-1",
+            "label": "Flat white",
+            "favorite": true,
+            "selected": false,
+            "phases": [{ "name": "Preinfusion", "temperature": 93 }]
+        });
+        let store = json!({
+            "id": "profile-1",
+            "label": "Flat white",
+            "favorite": false,
+            "selected": true,
+            "phases": [{ "name": "Preinfusion", "temperature": 93 }]
+        });
+        let changed = json!({
+            "id": "profile-1",
+            "label": "Flat white",
+            "phases": [{ "name": "Preinfusion", "temperature": 94 }]
+        });
+
+        assert!(profiles_equal(&installed, &store));
+        assert!(!profiles_equal(&installed, &changed));
     }
 
     #[test]
@@ -1810,6 +2107,7 @@ mod tests {
         let (mut engine, _directory) = test_engine();
         let api_url = cloud_server(vec![
             r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
+            r#"{"operations":[]}"#,
             r#"{"results":[{"index":0,"status":"created"},{"index":1,"status":"created"},{"index":2,"status":"created"}]}"#,
             r#"{"operations":[]}"#,
             "{}",
