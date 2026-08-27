@@ -19,7 +19,8 @@ Track and share brews, quickly complete brew notes with smart suggestions from y
 
 The application then starts with the computer in the background, checks for new shots every 30
 seconds, compares profiles every five minutes, and catches up after either the computer, machine,
-or internet was offline. Open Sync from its menu bar or tray icon; manually launched and first-run
+or internet was offline. Profile Store requests use their own outgoing wake-up channel, so they do
+not wait for that normal 30-second cycle. Open Sync from its menu bar or tray icon; manually launched and first-run
 windows still open normally. One fixed status line reports the current operation and retains
 actionable failures without replacing the separate connection indicator.
 

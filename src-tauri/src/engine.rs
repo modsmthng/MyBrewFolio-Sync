@@ -182,6 +182,7 @@ pub struct SyncEngine {
     pending_oauth: Mutex<Option<PendingOAuth>>,
     status: RwLock<AppStatus>,
     sync_lock: Mutex<()>,
+    profile_store_lock: Mutex<()>,
 }
 
 fn canonical_json(value: &Value) -> String {
@@ -329,6 +330,7 @@ impl SyncEngine {
                 issues,
             }),
             sync_lock: Mutex::new(()),
+            profile_store_lock: Mutex::new(()),
         })
     }
 
@@ -1280,11 +1282,39 @@ impl SyncEngine {
                     return Err(("PROFILE_CHANGED", "The local profile changed after confirmation; review the installation again".into()));
                 }
                 let already_installed = actual_collision == "identical";
-                if !actions_only && !already_installed {
+                if actions_only && !already_installed {
+                    return Err((
+                        "PROFILE_CHANGED",
+                        "The installed profile changed before its machine actions could be applied"
+                            .into(),
+                    ));
+                }
+                let confirmed_profile = if !actions_only && !already_installed {
                     local
                         .save_profile(profile)
                         .await
                         .map_err(|error| ("PROFILE_SAVE_FAILED", error.to_string()))?;
+                    match local.load_profile(profile_id).await {
+                        Ok(confirmed) => confirmed,
+                        // A save acknowledgement has already changed the machine. Keep the
+                        // operation leased and re-check it from the durable Bridge outbox instead
+                        // of reporting a false install failure when that immediate reload fails.
+                        Err(_) => {
+                            return Err((
+                                "SAVE_CONFIRMATION_PENDING",
+                                "The profile was saved and is waiting for machine confirmation"
+                                    .into(),
+                            ));
+                        }
+                    }
+                } else {
+                    current.unwrap_or_else(|| profile.clone())
+                };
+                if !profiles_equal(&confirmed_profile, profile) {
+                    return Err((
+                        "SAVE_NOT_CONFIRMED",
+                        "The machine did not confirm the installed profile".into(),
+                    ));
                 }
                 let mut action_failures = Vec::new();
                 let mut favorite_applied = false;
@@ -1301,20 +1331,7 @@ impl SyncEngine {
                         Err(_) => action_failures.push("select"),
                     }
                 }
-                let final_profile = local
-                    .load_profile(profile_id)
-                    .await
-                    .map_err(|error| ("SAVE_NOT_CONFIRMED", error.to_string()))?;
-                if !profiles_equal(&final_profile, profile) {
-                    return Err((
-                        "SAVE_NOT_CONFIRMED",
-                        "The machine did not confirm the installed profile".into(),
-                    ));
-                }
-                let final_inventory = local
-                    .profile_inventory()
-                    .await
-                    .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+                let final_inventory = local.profile_inventory().await.unwrap_or(inventory);
                 let favorite_count = final_inventory
                     .iter()
                     .filter(|item| {
@@ -1340,18 +1357,143 @@ impl SyncEngine {
         }
     }
 
-    async fn process_profile_store_operations(
+    async fn flush_profile_store_completions(
         &self,
         local: &GaggiMateClient,
         device_id: &str,
     ) -> Result<(), EngineError> {
-        let claim = self.cloud.claim_profile_store_operations(device_id).await?;
-        for operation in claim
+        for completion in self.store.bridge_completions(8)? {
+            let payload = if completion
+                .payload
+                .get("profileStoreConfirmationPending")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                let Some(profile) = completion.payload.get("profile") else {
+                    self.store
+                        .remove_bridge_completion(&completion.operation_id)?;
+                    continue;
+                };
+                let Some(profile_id) = profile.get("id").and_then(Value::as_str) else {
+                    self.store
+                        .remove_bridge_completion(&completion.operation_id)?;
+                    continue;
+                };
+                let confirmed = match local.load_profile(profile_id).await {
+                    Ok(value) => value,
+                    // This is deliberately not terminal. The save was acknowledged already, so
+                    // a slow or briefly unreachable machine must remain "confirming".
+                    Err(_) => continue,
+                };
+                let completed = if profiles_equal(&confirmed, profile) {
+                    let favorite = completion
+                        .payload
+                        .get("favorite")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let selected = completion
+                        .payload
+                        .get("selected")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    let mut action_failures = Vec::new();
+                    let mut favorite_applied = false;
+                    let mut selected_applied = false;
+                    if favorite {
+                        match local.favorite_profile(profile_id).await {
+                            Ok(()) => favorite_applied = true,
+                            Err(_) => action_failures.push("favorite"),
+                        }
+                    }
+                    if selected {
+                        match local.select_profile(profile_id).await {
+                            Ok(()) => selected_applied = true,
+                            Err(_) => action_failures.push("select"),
+                        }
+                    }
+                    let favorite_count = local
+                        .profile_inventory()
+                        .await
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|item| {
+                            item.get("favorite")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false)
+                        })
+                        .count();
+                    json!({
+                        "leaseToken": completion.lease_token,
+                        "status": "completed",
+                        "result": {
+                            "installed": true,
+                            "alreadyInstalled": false,
+                            "profileId": profile_id,
+                            "favoriteApplied": favorite_applied,
+                            "selectedApplied": selected_applied,
+                            "favoriteCount": favorite_count,
+                            "actionFailures": action_failures,
+                        },
+                    })
+                } else {
+                    json!({
+                        "leaseToken": completion.lease_token,
+                        "status": "failed",
+                        "errorCode": "SAVE_NOT_CONFIRMED",
+                        "errorMessage": "The machine did not confirm the installed profile",
+                    })
+                };
+                self.store.queue_bridge_completion(
+                    &completion.operation_id,
+                    &completion.lease_token,
+                    &completed,
+                )?;
+                completed
+            } else {
+                completion.payload.clone()
+            };
+            match self
+                .cloud
+                .complete_profile_store_operation(device_id, &completion.operation_id, payload)
+                .await
+            {
+                Ok(_) => self
+                    .store
+                    .remove_bridge_completion(&completion.operation_id)?,
+                Err(CloudError::Unreachable) => return Ok(()),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    async fn process_profile_store_operations(
+        &self,
+        local: &GaggiMateClient,
+        device_id: &str,
+        wait_seconds: u8,
+    ) -> Result<(), EngineError> {
+        {
+            let _guard = self.profile_store_lock.lock().await;
+            self.flush_profile_store_completions(local, device_id)
+                .await?;
+        }
+        let claim = self
+            .cloud
+            .claim_profile_store_operations(device_id, wait_seconds)
+            .await?;
+        let operations = claim
             .get("operations")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
+            .cloned()
+            .unwrap_or_default();
+        if operations.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.profile_store_lock.lock().await;
+        self.flush_profile_store_completions(local, device_id)
+            .await?;
+        for operation in &operations {
             let Some(operation_id) = operation.get("id").and_then(Value::as_str) else {
                 continue;
             };
@@ -1381,11 +1523,38 @@ impl SyncEngine {
                     "errorMessage": message,
                 }),
             };
-            self.cloud
-                .complete_profile_store_operation(device_id, operation_id, completion)
+            let completion = if completion.get("errorCode").and_then(Value::as_str)
+                == Some("SAVE_CONFIRMATION_PENDING")
+            {
+                json!({
+                    "profileStoreConfirmationPending": true,
+                    "profile": payload.get("profile").cloned().unwrap_or(Value::Null),
+                    "favorite": payload.get("favorite").and_then(Value::as_bool).unwrap_or(false),
+                    "selected": payload.get("selected").and_then(Value::as_bool).unwrap_or(false),
+                })
+            } else {
+                completion
+            };
+            self.store
+                .queue_bridge_completion(operation_id, lease_token, &completion)?;
+            self.flush_profile_store_completions(local, device_id)
                 .await?;
         }
         Ok(())
+    }
+
+    pub async fn wait_for_profile_store_operations(&self) -> Result<(), EngineError> {
+        let device_id = self
+            .store
+            .setting("device_id")?
+            .ok_or(CloudError::Revoked)?;
+        let host = self
+            .store
+            .setting("machine_host")?
+            .unwrap_or_else(|| "gaggimate.local".into());
+        let local = GaggiMateClient::new(&host)?;
+        self.process_profile_store_operations(&local, &device_id, 25)
+            .await
     }
 
     pub async fn sync_once(&self) -> Result<(), EngineError> {
@@ -1429,7 +1598,7 @@ impl SyncEngine {
                 })
                 .is_some_and(|value| !value.is_null());
             let local = GaggiMateClient::new(&host)?;
-            self.process_profile_store_operations(&local, &device_id)
+            self.process_profile_store_operations(&local, &device_id, 0)
                 .await?;
             if !configured {
                 self.cloud.heartbeat(&device_id, true, None, None).await?;
@@ -1437,14 +1606,23 @@ impl SyncEngine {
                 status.machine_reachable = true;
                 return Ok(());
             }
-            let skipped = self.queue_local_changes(&local, &state).await?;
+            // The Store bridge and the regular synchronizer both speak the
+            // GaggiMate WebSocket protocol. Keep their machine requests
+            // serialized even though their cloud work is independent.
+            let skipped = {
+                let _machine_guard = self.profile_store_lock.lock().await;
+                self.queue_local_changes(&local, &state).await?
+            };
             if cloud_unreachable {
                 // Local changes are safely queued before reporting the missing
                 // internet connection. They are uploaded on the next cycle.
                 return Err(CloudError::Unreachable.into());
             }
             let invalid = self.flush_queue(&device_id).await?;
-            self.process_outbound_notes(&local, &device_id).await?;
+            {
+                let _machine_guard = self.profile_store_lock.lock().await;
+                self.process_outbound_notes(&local, &device_id).await?;
+            }
             let synchronized_at = api_timestamp(Utc::now());
             let warning_code =
                 (!skipped.is_empty() || invalid > 0).then_some("LOCAL_ITEMS_SKIPPED");

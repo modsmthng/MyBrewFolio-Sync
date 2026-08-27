@@ -389,7 +389,7 @@ impl GaggiMateClient {
         Ok(profile)
     }
 
-    pub async fn save_profile(&self, profile: &Value) -> Result<Value, LocalError> {
+    pub async fn save_profile(&self, profile: &Value) -> Result<(), LocalError> {
         let mut safe = profile
             .as_object()
             .cloned()
@@ -403,19 +403,13 @@ impl GaggiMateClient {
         }
         safe.remove("favorite");
         safe.remove("selected");
-        let id = safe
-            .get("id")
+        safe.get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 128)
-            .ok_or(LocalError::InvalidData)?
-            .to_string();
+            .ok_or(LocalError::InvalidData)?;
         self.websocket_request("req:profiles:save", json!({ "profile": safe }))
             .await?;
-        let stored = self.load_profile(&id).await?;
-        if stored.get("id").and_then(Value::as_str) != Some(id.as_str()) {
-            return Err(LocalError::InvalidData);
-        }
-        Ok(stored)
+        Ok(())
     }
 
     pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {

@@ -50,9 +50,12 @@ open a network port.
 - The shot index is checked every 30 seconds.
 - New or changed shots are parsed from `.slog` files and queued with their notes.
 - Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
-- Profile Store operations are checked every 30 seconds and accepted only when addressed to this
-  installation's authenticated device ID. Inventory, fetch, preview and install results use
-  short-lived leases; installation reloads the profile before reporting success.
+- Profile Store operations are accepted only when addressed to this installation's authenticated
+  device ID. Capability `profileStoreBridge: 2` keeps a separate outgoing long poll for this
+  Store-only work and is woken immediately by the API; it never starts the normal shot, profile or
+  Notes synchronization. Capability 1 remains compatible through the regular 30-second cycle.
+  Inventory, fetch, preview and install results use short-lived leases; installation reloads the
+  profile before reporting success and persists its completion until the API acknowledges it.
 - Notes for recent shots are refreshed every five minutes.
 - A throttled full notes pass runs once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty

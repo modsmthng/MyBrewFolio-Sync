@@ -886,6 +886,26 @@ mod desktop {
                     }
                 });
 
+                let bridge_engine = engine.clone();
+                let bridge_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        if bridge_engine.status().await.connected {
+                            if bridge_engine
+                                .wait_for_profile_store_operations()
+                                .await
+                                .is_ok()
+                            {
+                                emit_status(&bridge_handle, &bridge_engine).await;
+                            } else {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        } else {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                });
+
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(15)).await;
                     if !startup_diagnostics.frontend_ready.load(Ordering::SeqCst) {

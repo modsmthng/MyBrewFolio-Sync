@@ -22,6 +22,13 @@ pub struct AppStore {
     connection: Mutex<Connection>,
 }
 
+#[derive(Clone, Debug)]
+pub struct BridgeCompletion {
+    pub operation_id: String,
+    pub lease_token: String,
+    pub payload: Value,
+}
+
 impl AppStore {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         if let Some(parent) = path.parent() {
@@ -54,6 +61,12 @@ impl AppStore {
                attempts integer not null default 1,
                updated_at integer not null,
                primary key (kind, source_key, stage)
+             );
+             create table if not exists bridge_completions (
+               operation_id text primary key,
+               lease_token text not null,
+               payload text not null,
+               updated_at integer not null
              );",
         )?;
         Ok(Self {
@@ -206,6 +219,53 @@ impl AppStore {
         Ok(())
     }
 
+    pub fn queue_bridge_completion(
+        &self,
+        operation_id: &str,
+        lease_token: &str,
+        payload: &Value,
+    ) -> Result<(), StoreError> {
+        let payload = serde_json::to_string(payload).map_err(|_| StoreError::InvalidCredentials)?;
+        self.connection.lock().map_err(|_| StoreError::InvalidCredentials)?.execute(
+            "insert into bridge_completions (operation_id, lease_token, payload, updated_at)
+             values (?1, ?2, ?3, unixepoch())
+             on conflict (operation_id) do update
+               set lease_token = excluded.lease_token, payload = excluded.payload, updated_at = unixepoch()",
+            params![operation_id, lease_token, payload],
+        )?;
+        Ok(())
+    }
+
+    pub fn bridge_completions(&self, limit: usize) -> Result<Vec<BridgeCompletion>, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let mut statement = connection.prepare(
+            "select operation_id, lease_token, payload from bridge_completions order by updated_at limit ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            let payload: String = row.get(2)?;
+            Ok(BridgeCompletion {
+                operation_id: row.get(0)?,
+                lease_token: row.get(1)?,
+                payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn remove_bridge_completion(&self, operation_id: &str) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute(
+                "delete from bridge_completions where operation_id = ?1",
+                [operation_id],
+            )?;
+        Ok(())
+    }
+
     pub fn failures(&self) -> Result<Vec<crate::model::SyncIssue>, StoreError> {
         let connection = self
             .connection
@@ -271,6 +331,7 @@ impl AppStore {
             .map_err(|_| StoreError::InvalidCredentials)?;
         connection.execute("delete from pending_objects", [])?;
         connection.execute("delete from sync_failures", [])?;
+        connection.execute("delete from bridge_completions", [])?;
         connection.execute(
             "delete from settings
              where key like 'shot_fingerprint_%'
@@ -288,6 +349,7 @@ impl AppStore {
             .execute_batch(
                 "delete from pending_objects;
                  delete from sync_failures;
+                 delete from bridge_completions;
                  delete from settings where key not in ('machine_host', 'installation_id', 'hide_app_icon');",
             )?;
         Ok(())
@@ -420,6 +482,36 @@ mod tests {
         );
         assert_eq!(store.pending_count().expect("pending cleared"), 0);
         assert_eq!(store.failure_count().expect("failures cleared"), 0);
+    }
+
+    #[test]
+    fn bridge_completions_survive_restart_until_the_api_acknowledges_them() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("sync.sqlite");
+        let store = AppStore::open(&path).expect("store opens");
+        store
+            .queue_bridge_completion(
+                "operation-1",
+                "lease-1",
+                &json!({ "leaseToken": "lease-1", "status": "completed" }),
+            )
+            .expect("completion saved");
+        drop(store);
+
+        let reopened = AppStore::open(&path).expect("store reopens");
+        let pending = reopened.bridge_completions(10).expect("completions read");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].operation_id, "operation-1");
+        assert_eq!(pending[0].lease_token, "lease-1");
+        assert_eq!(pending[0].payload["status"], "completed");
+
+        reopened
+            .remove_bridge_completion("operation-1")
+            .expect("API acknowledgement removes completion");
+        assert!(reopened
+            .bridge_completions(10)
+            .expect("completions read")
+            .is_empty());
     }
 
     #[test]

@@ -361,7 +361,7 @@ impl CloudClient {
                 "name": name,
                 "platform": platform,
                 "appVersion": app_version,
-                "capabilities": { "profileStoreBridge": 1 }
+                "capabilities": { "profileStoreBridge": 2 }
             }))
             .send()
             .await
@@ -683,7 +683,7 @@ impl CloudClient {
             .json(&json!({
                 "appVersion": env!("CARGO_PKG_VERSION"), "machineReachable": machine_reachable,
                 "lastSyncAt": last_sync_at, "lastErrorCode": error,
-                "capabilities": { "profileStoreBridge": 1 }
+                "capabilities": { "profileStoreBridge": 2 }
             }))
             .send()
             .await
@@ -700,12 +700,13 @@ impl CloudClient {
     pub async fn claim_profile_store_operations(
         &self,
         device_id: &str,
+        wait_seconds: u8,
     ) -> Result<Value, CloudError> {
         self.device_json(
             reqwest::Method::POST,
             "/v1/sync/profile-store/operations/claim",
             device_id,
-            json!({}),
+            json!({ "waitSeconds": wait_seconds.min(25) }),
         )
         .await
     }

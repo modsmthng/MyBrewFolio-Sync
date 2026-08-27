@@ -453,6 +453,22 @@ async fn main() -> ExitCode {
                 }
             });
         }
+        let bridge_engine = engine.clone();
+        tokio::spawn(async move {
+            loop {
+                if bridge_engine.status().await.connected {
+                    if bridge_engine
+                        .wait_for_profile_store_operations()
+                        .await
+                        .is_err()
+                    {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        });
         loop {
             if engine.status().await.connected {
                 if let Err(error) = engine.sync_once().await {
