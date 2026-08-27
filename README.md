@@ -45,7 +45,7 @@ MyBrewFolio Account page. Restore is preview-first and applies only the explicit
 selection from the desktop app or headless CLI.
 
 ## Code quality
-https://sonarcloud.io/project/overview?id=modsmthng_MyBrewFolio-Sync
+https://sonarcloud.io/summary/new_code?id=modsmthng_MyBrewFolio-Sync&branch=main 
 
 ## Local development
 
