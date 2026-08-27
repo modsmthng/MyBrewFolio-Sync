@@ -476,7 +476,32 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmed, help_text, is_help_request, json_file};
+    use std::sync::Arc;
+
+    use super::{
+        confirmed, execute, help_text, is_help_request, json_file, ControlRequest, SyncEngine,
+    };
+    #[cfg(unix)]
+    use super::{proxy_control, serve_control, ControlResponse};
+    use mybrewfolio_sync_lib::{credentials::EncryptedFileCredentialStore, store::AppStore};
+
+    fn test_engine() -> (Arc<SyncEngine>, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let key = directory.path().join("key");
+        std::fs::write(&key, [7_u8; 32]).expect("key written");
+        let store = Arc::new(AppStore::open(&directory.path().join("sync.sqlite")).expect("store"));
+        let credentials = Arc::new(
+            EncryptedFileCredentialStore::from_key_file(
+                directory.path().join("credentials.enc"),
+                &key,
+            )
+            .expect("credentials store"),
+        );
+        (
+            Arc::new(SyncEngine::open(store, credentials).expect("engine")),
+            directory,
+        )
+    }
 
     #[test]
     fn help_is_available_without_a_running_daemon() {
@@ -524,5 +549,108 @@ mod tests {
         let invalid = directory.path().join("invalid.json");
         std::fs::write(&invalid, "not json").expect("invalid file written");
         assert!(json_file(Some(invalid.to_string_lossy().into_owned())).is_err());
+    }
+
+    #[tokio::test]
+    async fn command_dispatch_keeps_read_only_and_validation_contracts_stable() {
+        let (engine, _directory) = test_engine();
+
+        assert_eq!(
+            execute(&engine, "health", vec![])
+                .await
+                .expect("health response")["ok"],
+            true
+        );
+        assert_eq!(
+            execute(&engine, "host", vec!["set".into(), "127.0.0.1:8088".into()])
+                .await
+                .expect("host response")["host"],
+            "127.0.0.1:8088"
+        );
+        assert_eq!(
+            execute(&engine, "status", vec![])
+                .await
+                .expect("status response")["machineHost"],
+            "127.0.0.1:8088"
+        );
+        assert!(execute(&engine, "configure", vec!["unexpected".into()])
+            .await
+            .expect_err("invalid policy")
+            .contains("Usage:"));
+        assert!(execute(&engine, "notes", vec!["disable".into()])
+            .await
+            .expect_err("confirmation required")
+            .contains("--confirm"));
+        assert!(execute(&engine, "resync", vec!["apply".into()])
+            .await
+            .expect_err("decision file required")
+            .contains("JSON file"));
+        assert!(execute(&engine, "unknown", vec![])
+            .await
+            .expect_err("unknown command")
+            .contains("Usage:"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_control_socket_proxies_requests_and_rejects_invalid_input() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixStream,
+        };
+
+        let (engine, directory) = test_engine();
+        let socket = directory.path().join("control.sock");
+        assert!(proxy_control(
+            &socket,
+            &ControlRequest {
+                command: "health".into(),
+                args: vec![],
+            }
+        )
+        .await
+        .expect("missing daemon is not an error")
+        .is_none());
+
+        let task = tokio::spawn(serve_control(engine, socket.clone()));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !socket.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("control socket starts");
+
+        let health = proxy_control(
+            &socket,
+            &ControlRequest {
+                command: "health".into(),
+                args: vec![],
+            },
+        )
+        .await
+        .expect("proxy succeeds")
+        .expect("daemon responded");
+        assert_eq!(health["ok"], true);
+
+        let mut stream = UnixStream::connect(&socket).await.expect("socket connects");
+        stream
+            .write_all(b"not JSON")
+            .await
+            .expect("invalid request written");
+        stream.shutdown().await.expect("request complete");
+        let mut output = Vec::new();
+        stream
+            .read_to_end(&mut output)
+            .await
+            .expect("response read");
+        let response: ControlResponse = serde_json::from_slice(&output).expect("JSON response");
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("invalid local control request")
+        );
+
+        task.abort();
     }
 }

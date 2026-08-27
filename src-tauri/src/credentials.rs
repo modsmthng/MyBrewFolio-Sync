@@ -208,6 +208,7 @@ impl CredentialStore for EncryptedFileCredentialStore {
 mod tests {
     use super::{CredentialStore, EncryptedFileCredentialStore};
     use crate::model::OAuthTokens;
+    use base64::{engine::general_purpose::STANDARD, Engine};
 
     #[test]
     fn encrypted_file_never_contains_token_text() {
@@ -282,6 +283,55 @@ mod tests {
                 .pending_device_authorization()
                 .expect("empty pairing state"),
             None
+        );
+    }
+
+    #[test]
+    fn accepts_base64_key_files_but_rejects_invalid_or_tampered_credentials() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let key = directory.path().join("key.b64");
+        std::fs::write(&key, STANDARD.encode([3_u8; 32])).expect("base64 key written");
+        let path = directory.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::from_key_file(&path, &key).expect("store opens");
+        store
+            .save_pending_device_authorization("pending")
+            .expect("pending authorization saved");
+        assert_eq!(
+            store
+                .pending_device_authorization()
+                .expect("pending authorization read"),
+            Some("pending".into())
+        );
+
+        std::fs::write(&path, [0_u8; 24]).expect("tampered file written");
+        assert!(store.pending_device_authorization().is_err());
+
+        let invalid_key = directory.path().join("invalid-key");
+        std::fs::write(&invalid_key, "not a credential key").expect("invalid key written");
+        assert!(EncryptedFileCredentialStore::from_key_file(path, &invalid_key).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_file_is_written_for_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let key = directory.path().join("key");
+        std::fs::write(&key, [4_u8; 32]).expect("key written");
+        let path = directory.path().join("credentials.enc");
+        let store = EncryptedFileCredentialStore::from_key_file(&path, &key).expect("store opens");
+        store
+            .save_pending_device_authorization("pending")
+            .expect("pending authorization saved");
+
+        assert_eq!(
+            std::fs::metadata(path)
+                .expect("credential file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 }

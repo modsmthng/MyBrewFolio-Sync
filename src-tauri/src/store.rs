@@ -421,4 +421,58 @@ mod tests {
         assert_eq!(store.pending_count().expect("pending cleared"), 0);
         assert_eq!(store.failure_count().expect("failures cleared"), 0);
     }
+
+    #[test]
+    fn settings_and_pending_objects_are_updated_without_duplicate_rows() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AppStore::open(&directory.path().join("sync.sqlite")).expect("store opens");
+        store
+            .set_setting("machine_host", "first.local")
+            .expect("setting saved");
+        store
+            .set_setting("machine_host", "second.local")
+            .expect("setting updated");
+        assert_eq!(
+            store.setting("machine_host").expect("setting read"),
+            Some("second.local".into())
+        );
+        store
+            .remove_setting("machine_host")
+            .expect("setting removed");
+        assert!(store
+            .setting("machine_host")
+            .expect("setting absent")
+            .is_none());
+
+        let mut shot = object("shot", "1:2");
+        store.queue(&shot).expect("shot queued");
+        shot.source_hash = "new-hash".into();
+        shot.data = json!({ "name": "new value" });
+        store.queue(&shot).expect("shot updated");
+        let pending = store.pending(10).expect("pending read");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].source_hash, "new-hash");
+        assert_eq!(pending[0].data["name"], "new value");
+    }
+
+    #[test]
+    fn failures_keep_retry_metadata_and_can_be_cleared_individually() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = AppStore::open(&directory.path().join("sync.sqlite")).expect("store opens");
+        let shot = object("shot", "1:2");
+        store
+            .record_failure(Some(&shot), "shot", "1:2", "upload", "first failure")
+            .expect("first failure recorded");
+        store
+            .record_failure(Some(&shot), "shot", "1:2", "upload", "second failure")
+            .expect("second failure recorded");
+
+        let failures = store.failures().expect("failures read");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].attempts, 2);
+        assert_eq!(failures[0].reason, "second failure");
+
+        store.clear_failure("shot", "1:2").expect("failure cleared");
+        assert!(store.failures().expect("empty failures").is_empty());
+    }
 }

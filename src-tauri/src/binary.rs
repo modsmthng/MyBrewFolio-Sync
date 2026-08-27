@@ -389,6 +389,66 @@ mod tests {
     }
 
     #[test]
+    fn index_ignores_deleted_entries_and_sorts_latest_first() {
+        let mut bytes = vec![0_u8; INDEX_HEADER_SIZE + INDEX_ENTRY_SIZE * 3];
+        bytes[0..4].copy_from_slice(&INDEX_MAGIC.to_le_bytes());
+        bytes[6..8].copy_from_slice(&(INDEX_ENTRY_SIZE as u16).to_le_bytes());
+        bytes[8..12].copy_from_slice(&3_u32.to_le_bytes());
+        for (offset, id, timestamp, flags) in [
+            (INDEX_HEADER_SIZE, 1_u32, 100_u32, 0_u8),
+            (
+                INDEX_HEADER_SIZE + INDEX_ENTRY_SIZE,
+                2_u32,
+                300_u32,
+                0x02_u8,
+            ),
+            (
+                INDEX_HEADER_SIZE + INDEX_ENTRY_SIZE * 2,
+                3_u32,
+                200_u32,
+                0x01_u8,
+            ),
+        ] {
+            bytes[offset..offset + 4].copy_from_slice(&id.to_le_bytes());
+            bytes[offset + 4..offset + 8].copy_from_slice(&timestamp.to_le_bytes());
+            bytes[offset + 8..offset + 12].copy_from_slice(&30_u32.to_le_bytes());
+            bytes[offset + 12..offset + 14].copy_from_slice(&185_u16.to_le_bytes());
+            bytes[offset + 14] = 4;
+            bytes[offset + 15] = flags;
+            bytes[offset + 16..offset + 24].copy_from_slice(b"profile\0");
+            bytes[offset + 48..offset + 53].copy_from_slice(b"Test\0");
+        }
+
+        let entries = parse_index(&bytes).expect("index is valid");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 3);
+        assert_eq!(entries[0].volume, Some(18.5));
+        assert_eq!(entries[0].rating, Some(4));
+        assert!(!entries[0].incomplete);
+        assert_eq!(entries[1].id, 1);
+        assert!(entries[1].incomplete);
+    }
+
+    #[test]
+    fn index_rejects_truncated_entries_and_unsupported_entry_sizes() {
+        let mut truncated = vec![0_u8; INDEX_HEADER_SIZE];
+        truncated[0..4].copy_from_slice(&INDEX_MAGIC.to_le_bytes());
+        truncated[6..8].copy_from_slice(&(INDEX_ENTRY_SIZE as u16).to_le_bytes());
+        truncated[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        assert!(matches!(
+            parse_index(&truncated),
+            Err(BinaryError::Truncated)
+        ));
+
+        truncated[6..8].copy_from_slice(&64_u16.to_le_bytes());
+        assert!(matches!(
+            parse_index(&truncated),
+            Err(BinaryError::Unsupported)
+        ));
+    }
+
+    #[test]
     fn parses_version_five_shot_samples_and_system_flags() {
         let mut bytes = vec![0_u8; 512 + 26];
         bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
@@ -434,5 +494,59 @@ mod tests {
         assert_eq!(parsed["phaseTransitions"][0]["phaseName"], "Bloom");
         assert_eq!(parsed["finalExitReason"], 5);
         assert_eq!(parsed["brewDelayMs"], 750);
+    }
+
+    #[test]
+    fn old_shots_use_the_last_sample_for_incomplete_duration_and_volume() {
+        let mut bytes = vec![0_u8; 128 + 8];
+        bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+        bytes[4] = 4;
+        bytes[5] = 4;
+        bytes[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&100_u16.to_le_bytes());
+        bytes[12..16].copy_from_slice(&(1_u32 | (1 << 9)).to_le_bytes());
+        // A zero header count means the machine was still recording.
+        bytes[20..24].copy_from_slice(&999_u32.to_le_bytes());
+        bytes[28..40].copy_from_slice(b"profile-one\0");
+        bytes[60..73].copy_from_slice(b"Test profile\0");
+        bytes[128..130].copy_from_slice(&5_u16.to_le_bytes());
+        bytes[130..132].copy_from_slice(&230_u16.to_le_bytes());
+        bytes[132..134].copy_from_slice(&6_u16.to_le_bytes());
+        bytes[134..136].copy_from_slice(&250_u16.to_le_bytes());
+
+        let parsed = parse_shot(&bytes, 7).expect("old shot parses");
+
+        assert_eq!(parsed["duration"], 600.0);
+        assert_eq!(parsed["volume"], 25.0);
+        assert_eq!(parsed["incomplete"], true);
+        assert_eq!(parsed["phaseTransitions"], serde_json::json!([]));
+        assert_eq!(parsed["finalExitReason"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn shot_rejects_inconsistent_or_excessive_sample_data() {
+        let mut inconsistent = vec![0_u8; 128];
+        inconsistent[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+        inconsistent[4] = 4;
+        inconsistent[5] = 2;
+        inconsistent[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        inconsistent[12..16].copy_from_slice(&3_u32.to_le_bytes());
+        assert!(matches!(
+            parse_shot(&inconsistent, 1),
+            Err(BinaryError::Unsupported)
+        ));
+
+        let sample_count = MAX_SHOT_SAMPLES as u32 + 1;
+        let mut excessive = vec![0_u8; 128 + sample_count as usize * 2];
+        excessive[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+        excessive[4] = 4;
+        excessive[5] = 2;
+        excessive[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        excessive[12..16].copy_from_slice(&1_u32.to_le_bytes());
+        excessive[16..20].copy_from_slice(&sample_count.to_le_bytes());
+        assert!(matches!(
+            parse_shot(&excessive, 1),
+            Err(BinaryError::TooManySamples)
+        ));
     }
 }

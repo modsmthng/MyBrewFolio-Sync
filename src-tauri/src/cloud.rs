@@ -711,6 +711,7 @@ mod tests {
         time::Duration,
     };
 
+    use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -800,6 +801,51 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    async fn contract_server(routes: Vec<(&str, &str, &str)>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener");
+        let address = listener.local_addr().expect("test address");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_requests = observed.clone();
+        let routes = routes
+            .into_iter()
+            .map(|(request, status, body)| {
+                (request.to_string(), status.to_string(), body.to_string())
+            })
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for (expected, status, body) in routes {
+                let (mut stream, _) = listener.accept().await.expect("request accepted");
+                let mut input = [0_u8; 8_192];
+                let length = tokio::time::timeout(Duration::from_secs(1), stream.read(&mut input))
+                    .await
+                    .expect("request arrives")
+                    .expect("request read");
+                let request = String::from_utf8_lossy(&input[..length]).into_owned();
+                let request_line = request.lines().next().unwrap_or_default().to_string();
+                observed_requests
+                    .lock()
+                    .expect("observed requests")
+                    .push(request);
+                let (status, body) = if request_line == expected {
+                    (status, body)
+                } else {
+                    ("500 Internal Server Error".to_string(), "{}".to_string())
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response written");
+            }
+        });
+        (format!("http://{address}"), observed)
     }
 
     fn client(credentials: Arc<TestCredentials>, url: &str) -> CloudClient {
@@ -908,5 +954,189 @@ mod tests {
                 .access_token,
             "new-access"
         );
+    }
+
+    #[tokio::test]
+    async fn cloud_operations_use_the_documented_authenticated_endpoints() {
+        let (url, observed) = contract_server(vec![
+            (
+                "POST /v1/sync/devices HTTP/1.1",
+                "200 OK",
+                r#"{"device":{"id":"device-1","sourceId":"source-1"}}"#,
+            ),
+            (
+                "GET /v1/sync/state HTTP/1.1",
+                "200 OK",
+                r#"{"items":[],"source":{}}"#,
+            ),
+            (
+                "POST /v1/sync/batches HTTP/1.1",
+                "200 OK",
+                r#"{"results":[{"index":0,"status":"created"}]}"#,
+            ),
+            (
+                "POST /v1/sync/notes/two-way/request HTTP/1.1",
+                "200 OK",
+                "{}",
+            ),
+            ("DELETE /v1/sync/notes/two-way HTTP/1.1", "200 OK", "{}"),
+            (
+                "POST /v1/sync/notes/backups HTTP/1.1",
+                "200 OK",
+                r#"{"backup":{"id":"backup-1"}}"#,
+            ),
+            (
+                "POST /v1/sync/notes/backups/backup-1/items HTTP/1.1",
+                "200 OK",
+                "{}",
+            ),
+            (
+                "POST /v1/sync/notes/backups/backup-1/finalize HTTP/1.1",
+                "200 OK",
+                "{}",
+            ),
+            (
+                "GET /v1/sync/notes/activation-preview/backup-1 HTTP/1.1",
+                "200 OK",
+                r#"{"items":[]}"#,
+            ),
+            (
+                "POST /v1/sync/notes/two-way/activate HTTP/1.1",
+                "200 OK",
+                "{}",
+            ),
+            (
+                "POST /v1/sync/notes/outbound/claim HTTP/1.1",
+                "200 OK",
+                r#"{"operations":[]}"#,
+            ),
+            (
+                "POST /v1/sync/notes/outbound/op-1/result HTTP/1.1",
+                "200 OK",
+                "{}",
+            ),
+            (
+                "GET /v1/sync/notes/backups/backup-1/items HTTP/1.1",
+                "200 OK",
+                r#"{"items":[]}"#,
+            ),
+            (
+                "POST /v1/sync/notes/backups/backup-1/restore-results HTTP/1.1",
+                "200 OK",
+                r#"{"applied":1}"#,
+            ),
+            ("PUT /v1/sync/settings HTTP/1.1", "200 OK", "{}"),
+            (
+                "POST /v1/sync/resync/preview HTTP/1.1",
+                "200 OK",
+                r#"{"restoreItems":[]}"#,
+            ),
+            (
+                "POST /v1/sync/resync/apply HTTP/1.1",
+                "200 OK",
+                r#"{"restored":0}"#,
+            ),
+            ("POST /v1/sync/heartbeat HTTP/1.1", "200 OK", "{}"),
+            ("DELETE /v1/sync/devices/device-1 HTTP/1.1", "200 OK", "{}"),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "valid-access".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .expect("token stored");
+        let client = client(credentials, &url);
+        let item = crate::model::SyncObject {
+            kind: "shot".into(),
+            source_key: "1:2".into(),
+            source_hash: "hash".into(),
+            shot_source_key: None,
+            data: json!({ "id": "1" }),
+        };
+
+        let registered = client
+            .register_device("installation-1", "Test machine", "linux", "0.3.12")
+            .await
+            .expect("device registered");
+        assert_eq!(registered.id, "device-1");
+        client.state("device-1").await.expect("state loaded");
+        client
+            .batch("device-1", &[item])
+            .await
+            .expect("batch accepted");
+        client
+            .request_two_way_notes("device-1")
+            .await
+            .expect("two-way Notes requested");
+        client
+            .disable_two_way_notes("device-1")
+            .await
+            .expect("two-way Notes disabled");
+        client
+            .begin_notes_backup("device-1", "latest")
+            .await
+            .expect("backup started");
+        client
+            .add_notes_backup_items("device-1", "backup-1", &[json!({ "sourceKey": "1:2" })])
+            .await
+            .expect("backup items added");
+        client
+            .finalize_notes_backup("device-1", "backup-1", "inventory-hash")
+            .await
+            .expect("backup finalized");
+        client
+            .notes_activation_preview("device-1", "backup-1")
+            .await
+            .expect("activation preview loaded");
+        client
+            .activate_two_way_notes("device-1", "backup-1", json!({ "items": [] }))
+            .await
+            .expect("two-way Notes activated");
+        client
+            .claim_outbound_notes("device-1")
+            .await
+            .expect("outbound Notes claimed");
+        client
+            .complete_outbound_note("device-1", "op-1", json!({ "status": "applied" }))
+            .await
+            .expect("outbound Notes completed");
+        client
+            .notes_backup_items("device-1", "backup-1")
+            .await
+            .expect("backup items loaded");
+        client
+            .apply_notes_restore_results("device-1", "backup-1", json!([]))
+            .await
+            .expect("restore result applied");
+        client
+            .save_settings("device-1", "reuse_matching")
+            .await
+            .expect("settings saved");
+        client
+            .resync_preview("device-1", json!([]))
+            .await
+            .expect("resync preview loaded");
+        client
+            .resync_apply("device-1", json!({ "restoreItemIds": [] }))
+            .await
+            .expect("resync applied");
+        client
+            .heartbeat("device-1", true, Some("2026-08-27T10:00:00.000Z"), None)
+            .await
+            .expect("heartbeat sent");
+        client.revoke("device-1").await.expect("device revoked");
+
+        let requests = observed.lock().expect("observed requests");
+        assert_eq!(requests.len(), 19);
+        assert!(requests.iter().all(|request| request
+            .contains("authorization: Bearer valid-access")
+            || request.contains("Authorization: Bearer valid-access")));
+        assert!(requests[0].contains("installationId"));
+        assert!(requests[2].contains("sourceKey"));
+        assert!(requests[13].contains("items"));
+        assert!(requests[14].contains("duplicatePolicy"));
     }
 }

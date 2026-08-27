@@ -1364,10 +1364,19 @@ mod tests {
         shot_fingerprint, shot_source_key, should_refresh_notes, suppressed_items, SyncEngine,
         MAX_SYNC_BATCH_BYTES,
     };
-    use crate::model::{AppStatus, IndexEntry, SyncObject};
-    use crate::{credentials::EncryptedFileCredentialStore, store::AppStore};
+    use crate::model::{AppStatus, IndexEntry, OAuthTokens, SyncObject};
+    use crate::{
+        cloud::CloudConfig, credentials::EncryptedFileCredentialStore, local::GaggiMateClient,
+        store::AppStore,
+    };
     use chrono::{Duration, TimeZone, Utc};
+    use futures_util::{SinkExt, StreamExt};
     use serde_json::json;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
 
     fn status() -> AppStatus {
         AppStatus {
@@ -1549,6 +1558,166 @@ mod tests {
         )
     }
 
+    async fn cloud_server(responses: Vec<&str>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("cloud listener");
+        let address = listener.local_addr().expect("cloud address");
+        let responses = responses
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        tokio::spawn(async move {
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.expect("cloud request");
+                let mut request = [0_u8; 8_192];
+                let _ = stream.read(&mut request).await.expect("cloud request read");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("cloud response");
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn history_index() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 32 + 128];
+        bytes[0..4].copy_from_slice(&0x5844_4953_u32.to_le_bytes());
+        bytes[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        let entry = 32;
+        bytes[entry..entry + 4].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[entry + 4..entry + 8].copy_from_slice(&1_735_689_600_u32.to_le_bytes());
+        bytes[entry + 8..entry + 12].copy_from_slice(&300_u32.to_le_bytes());
+        bytes[entry + 12..entry + 14].copy_from_slice(&180_u16.to_le_bytes());
+        bytes[entry + 14] = 4;
+        bytes[entry + 15] = 1;
+        bytes[entry + 16..entry + 25].copy_from_slice(b"profile-1");
+        bytes[entry + 48..entry + 60].copy_from_slice(b"Test profile");
+        bytes
+    }
+
+    fn history_shot() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 130];
+        bytes[0..4].copy_from_slice(&0x544f_4853_u32.to_le_bytes());
+        bytes[4] = 4;
+        bytes[5] = 2;
+        bytes[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&100_u16.to_le_bytes());
+        bytes[12..16].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&300_u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&1_735_689_600_u32.to_le_bytes());
+        bytes[28..37].copy_from_slice(b"profile-1");
+        bytes[60..72].copy_from_slice(b"Test profile");
+        bytes[128..130].copy_from_slice(&3_u16.to_le_bytes());
+        bytes
+    }
+
+    async fn gaggimate_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("GaggiMate listener");
+        let address = listener.local_addr().expect("GaggiMate address");
+        tokio::spawn(async move {
+            for _ in 0..8 {
+                let (mut stream, _) = listener.accept().await.expect("GaggiMate request");
+                let mut prefix = [0_u8; 64];
+                let length = stream.peek(&mut prefix).await.expect("request preview");
+                if String::from_utf8_lossy(&prefix[..length]).starts_with("GET /ws") {
+                    let mut socket = accept_async(stream).await.expect("WebSocket accepted");
+                    let request = socket
+                        .next()
+                        .await
+                        .expect("WebSocket request")
+                        .expect("valid WebSocket message")
+                        .into_text()
+                        .expect("text WebSocket message");
+                    let request: serde_json::Value =
+                        serde_json::from_str(&request).expect("JSON WebSocket request");
+                    let rid = request["rid"].as_str().expect("request ID");
+                    let response = match request["tp"].as_str() {
+                        Some("req:profiles:list") => json!({
+                            "tp": "res:profiles:list", "rid": rid,
+                            "profiles": [{ "id": "profile-1" }]
+                        }),
+                        Some("req:profiles:load") => json!({
+                            "tp": "res:profiles:load", "rid": rid,
+                            "profile": { "id": "profile-1", "name": "Test profile" }
+                        }),
+                        Some("req:history:notes:get") => json!({
+                            "tp": "res:history:notes:get", "rid": rid,
+                            "notes": { "text": "dial in finer" }
+                        }),
+                        Some("req:history:notes:save") => json!({
+                            "tp": "res:history:notes:save", "rid": rid
+                        }),
+                        _ => {
+                            json!({ "tp": "res:error", "rid": rid, "error": "unexpected request" })
+                        }
+                    };
+                    socket
+                        .send(Message::Text(response.to_string().into()))
+                        .await
+                        .expect("WebSocket response");
+                } else {
+                    let mut request = [0_u8; 1_024];
+                    let length = stream.read(&mut request).await.expect("HTTP request read");
+                    let request = String::from_utf8_lossy(&request[..length]);
+                    let (content_type, body) = if request.starts_with("GET /api/history/index.bin")
+                    {
+                        ("application/octet-stream", history_index())
+                    } else if request.starts_with("GET /api/history/000001.slog") {
+                        ("application/octet-stream", history_shot())
+                    } else {
+                        ("application/json", b"{}".to_vec())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("HTTP headers");
+                    stream.write_all(&body).await.expect("HTTP body");
+                }
+            }
+        });
+        format!("127.0.0.1:{}", address.port())
+    }
+
+    fn configure_test_cloud(engine: &mut SyncEngine, api_url: &str) {
+        engine.cloud.config = CloudConfig {
+            api_url: api_url.into(),
+            client_id: "test-client".into(),
+            authorize_url: format!("{api_url}/authorize"),
+            token_url: format!("{api_url}/token"),
+            redirect_uri: "mybrewfolio-sync://oauth/callback".into(),
+            device_redirect_uri: format!("{api_url}/callback"),
+        };
+    }
+
+    fn connect_test_engine(engine: &SyncEngine) {
+        engine
+            .credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "valid-access".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .expect("token saved");
+        engine
+            .store
+            .set_setting("device_id", "device-1")
+            .expect("device saved");
+    }
+
     #[tokio::test]
     async fn updates_status_counts_and_notes_metadata_from_cloud_state() {
         let (engine, _directory) = test_engine();
@@ -1634,5 +1803,263 @@ mod tests {
             .await
             .expect("intro dismissed");
         assert!(engine.status().await.notes_sync_intro_seen);
+    }
+
+    #[tokio::test]
+    async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch() {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![
+            r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
+            r#"{"results":[{"index":0,"status":"created"},{"index":1,"status":"created"},{"index":2,"status":"created"}]}"#,
+            r#"{"operations":[]}"#,
+            "{}",
+            r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z","duplicatePolicy":"reuse_matching"},"items":[{"kind":"profile"},{"kind":"shot"},{"kind":"notes"}]}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        engine
+            .store
+            .set_setting("machine_host", &gaggimate_server().await)
+            .expect("host saved");
+
+        engine.sync_once().await.expect("sync succeeds");
+
+        let status = engine.status().await;
+        assert!(status.machine_reachable);
+        assert!(status.last_sync_at.is_some());
+        assert_eq!((status.profiles, status.shots, status.notes), (1, 1, 1));
+        assert_eq!(engine.store.pending_count().expect("empty queue"), 0);
+        assert_eq!(engine.store.failure_count().expect("no failures"), 0);
+    }
+
+    #[tokio::test]
+    async fn browser_and_device_pairing_register_the_same_connected_installation() {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![
+            r#"{"access_token":"browser-access","refresh_token":"browser-refresh","expires_in":3600}"#,
+            r#"{"device":{"id":"desktop-device","sourceId":"desktop-source"}}"#,
+            r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://example.test/pair","pollToken":"poll-token","expiresIn":600}"#,
+            r#"{"status":"authorized","authorizationCode":"device-code"}"#,
+            r#"{"access_token":"device-access","refresh_token":"device-refresh","expires_in":3600}"#,
+            r#"{"device":{"id":"headless-device","sourceId":"headless-source"}}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+
+        let browser_url = engine.begin_oauth().await.expect("browser OAuth starts");
+        let state = browser_url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("OAuth state");
+        engine
+            .complete_oauth(&format!(
+                "mybrewfolio-sync://oauth/callback?code=browser-code&state={state}"
+            ))
+            .await
+            .expect("browser OAuth completes");
+        assert_eq!(
+            engine.status().await.this_device_id.as_deref(),
+            Some("desktop-device")
+        );
+
+        let pairing = engine.begin_device_oauth().await.expect("pairing starts");
+        assert_eq!(pairing.user_code, "ABCD-1234");
+        assert!(engine.poll_device_oauth().await.expect("pairing completes"));
+        assert_eq!(
+            engine.status().await.this_device_id.as_deref(),
+            Some("headless-device")
+        );
+        assert!(engine
+            .credentials
+            .pending_device_authorization()
+            .expect("pairing state read")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn settings_and_resync_refresh_cloud_state_and_reset_stale_queue_data() {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![
+            "{}",
+            r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z","duplicatePolicy":"import_all"},"items":[]}"#,
+            r#"{"restored":1,"merged":0}"#,
+            r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        engine
+            .store
+            .set_setting("shot_fingerprint_v2:1:2", "old")
+            .expect("fingerprint saved");
+        engine
+            .store
+            .queue(&sync_object("pending", 10))
+            .expect("pending queued");
+
+        engine.configure_sync(false).await.expect("settings saved");
+        assert_eq!(engine.status().await.duplicate_policy, "import_all");
+        let applied = engine
+            .apply_resync(json!({ "restoreItemIds": ["restore-1"] }))
+            .await
+            .expect("resync applied");
+
+        assert_eq!(applied["restored"], 1);
+        assert_eq!(engine.store.pending_count().expect("queue reset"), 0);
+        assert!(engine
+            .store
+            .setting("shot_fingerprint_v2:1:2")
+            .expect("fingerprint read")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn notes_backup_and_resync_preview_use_the_current_local_inventory() {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![
+            r#"{"backup":{"id":"backup-1"}}"#,
+            "{}",
+            "{}",
+            r#"{"source":{},"items":[]}"#,
+            r#"{"restoreItems":[{"kind":"shot","sourceKey":"1:1735689600"}],"duplicates":[]}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        engine
+            .store
+            .set_setting("machine_host", &gaggimate_server().await)
+            .expect("host saved");
+
+        let backup_id = engine
+            .create_latest_notes_backup()
+            .await
+            .expect("backup created");
+        let preview = engine.resync_preview().await.expect("resync preview");
+
+        assert_eq!(backup_id, "backup-1");
+        assert_eq!(preview["restoreItems"][0]["sourceKey"], "1:1735689600");
+    }
+
+    #[tokio::test]
+    async fn notes_activation_and_restore_preserve_the_verified_machine_content() {
+        let (mut engine, _directory) = test_engine();
+        let source_key = "1:1735689600";
+        let notes = json!({ "text": "dial in finer" });
+        let notes_hash = hash_value(&notes);
+        let api_url = cloud_server(vec![
+            "{}",
+            r#"{"backup":{"id":"activation-backup"}}"#,
+            "{}",
+            "{}",
+            r#"{"items":[{"sourceKey":"1:1735689600","differs":true}]}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        engine
+            .store
+            .set_setting("machine_host", &gaggimate_server().await)
+            .expect("host saved");
+
+        let activation = engine
+            .begin_two_way_notes_activation()
+            .await
+            .expect("activation preview");
+
+        assert_eq!(activation["backupId"], "activation-backup");
+        assert!(engine.status().await.notes_sync_intro_seen);
+
+        let (mut restore_engine, _directory) = test_engine();
+        let restore_api = cloud_server(vec![
+            r#"{"backup":{"id":"latest-backup"}}"#,
+            "{}",
+            "{}",
+            &format!(
+                r#"{{"items":[{{"sourceKey":"{source_key}","notes":{notes},"notesHash":"{notes_hash}"}}]}}"#
+            ),
+            r#"{"applied":1}"#,
+        ])
+        .await;
+        configure_test_cloud(&mut restore_engine, &restore_api);
+        connect_test_engine(&restore_engine);
+        restore_engine
+            .store
+            .set_setting("machine_host", &gaggimate_server().await)
+            .expect("host saved");
+
+        let restored = restore_engine
+            .restore_notes_backup("selected-backup", &[source_key.into()])
+            .await
+            .expect("notes restored");
+
+        assert_eq!(restored, json!({ "applied": 1, "skipped": 0 }));
+    }
+
+    #[tokio::test]
+    async fn outbound_notes_report_conflicts_and_successful_machine_writes() {
+        let (mut engine, _directory) = test_engine();
+        let current_notes = json!({ "text": "dial in finer" });
+        let api_url = cloud_server(vec![
+            &format!(
+                r#"{{"operations":[
+                    {{"id":"conflict","leaseToken":"lease-1","sourceKey":"1:1735689600","baseSourceHash":"not-current","desiredNotes":{{}}}},
+                    {{"id":"apply","leaseToken":"lease-2","sourceKey":"1:1735689600","baseSourceHash":"{}","desiredNotes":{{"text":"new note"}}}}
+                ]}}"#,
+                hash_value(&current_notes)
+            ),
+            "{}",
+            "{}",
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        let local = GaggiMateClient::new(&gaggimate_server().await).expect("local client");
+
+        engine
+            .process_outbound_notes(&local, "device-1")
+            .await
+            .expect("outbound operations processed");
+    }
+
+    #[tokio::test]
+    async fn disconnect_always_clears_local_account_data_when_the_server_is_unavailable() {
+        let (mut engine, _directory) = test_engine();
+        engine.cloud.config.api_url = "http://127.0.0.1:1".into();
+        engine
+            .store
+            .set_setting("device_id", "device-1")
+            .expect("device saved");
+        engine
+            .store
+            .set_setting("source_id", "source-1")
+            .expect("source saved");
+        engine
+            .store
+            .queue(&sync_object("pending", 10))
+            .expect("pending queued");
+        engine
+            .credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "valid-access".into(),
+                refresh_token: None,
+                expires_at: i64::MAX,
+            })
+            .expect("token saved");
+
+        let result = engine.disconnect().await.expect("disconnect succeeds");
+
+        assert_eq!(result["serverRevoked"], false);
+        assert_eq!(result["credentialsRemoved"], true);
+        assert!(!engine.status().await.connected);
+        assert!(engine
+            .store
+            .setting("device_id")
+            .expect("device read")
+            .is_none());
+        assert_eq!(engine.store.pending_count().expect("queue read"), 0);
+        assert!(engine.credentials.tokens().expect("tokens read").is_none());
     }
 }

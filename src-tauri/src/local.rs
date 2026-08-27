@@ -355,4 +355,48 @@ mod tests {
         assert!(normalize_host("example.com").is_err());
         assert!(normalize_host("https://gaggimate.local").is_err());
     }
+
+    #[test]
+    fn host_normalization_preserves_only_a_safe_local_authority() {
+        assert_eq!(
+            normalize_host("  GaggiMate.Local. ").expect("local hostname"),
+            "gaggimate.local"
+        );
+        assert_eq!(
+            normalize_host("192.168.178.140:8080").expect("private address"),
+            "192.168.178.140:8080"
+        );
+        assert_eq!(
+            normalize_host("[fd00::42]").expect("private IPv6"),
+            "[fd00::42]:80"
+        );
+        for invalid in [
+            "",
+            "gaggimate.local/path",
+            "gaggimate.local?next=example",
+            "user@gaggimate.local",
+            "gaggimate.local#fragment",
+            "gaggimate.local//other",
+            "[2001:4860:4860::8888]",
+        ] {
+            assert!(
+                normalize_host(invalid).is_err(),
+                "{invalid} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn local_client_only_resolves_an_already_validated_private_target() {
+        let client = GaggiMateClient::new("127.0.0.1:1").expect("loopback target");
+        assert_eq!(
+            client.http_url("/api/history/index.bin"),
+            "http://127.0.0.1:1/api/history/index.bin"
+        );
+        assert_eq!(client.ws_url(), "ws://127.0.0.1:1/ws");
+        assert!(matches!(
+            GaggiMateClient::new("public.example.test"),
+            Err(LocalError::InvalidHost)
+        ));
+    }
 }
