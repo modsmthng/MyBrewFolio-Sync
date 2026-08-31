@@ -15,7 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
-    binary::{parse_index, parse_shot},
+    binary::{parse_index, parse_shot, BinaryError},
     model::IndexEntry,
 };
 
@@ -27,6 +27,15 @@ pub enum LocalError {
     Unreachable,
     #[error("The GaggiMate returned invalid data")]
     InvalidData,
+    #[error("GaggiMate shot format version {0} is not supported by this MyBrewFolio Sync version")]
+    UnsupportedShotFormat(u8),
+}
+
+fn shot_parse_error(error: BinaryError) -> LocalError {
+    match error {
+        BinaryError::UnsupportedVersion(version) => LocalError::UnsupportedShotFormat(version),
+        _ => LocalError::InvalidData,
+    }
 }
 
 fn private_address(address: IpAddr) -> bool {
@@ -198,7 +207,7 @@ impl GaggiMateClient {
 
     pub async fn shot(&self, id: u32) -> Result<Value, LocalError> {
         let path = format!("/api/history/{id:06}.slog");
-        parse_shot(&self.bytes(&path).await?, id).map_err(|_| LocalError::InvalidData)
+        parse_shot(&self.bytes(&path).await?, id).map_err(shot_parse_error)
     }
 
     pub async fn notes(&self, id: u32) -> Result<Option<Value>, LocalError> {
@@ -444,6 +453,18 @@ impl GaggiMateClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_shot_format_is_reported_separately() {
+        assert!(matches!(
+            shot_parse_error(BinaryError::UnsupportedVersion(7)),
+            LocalError::UnsupportedShotFormat(7)
+        ));
+        assert!(matches!(
+            shot_parse_error(BinaryError::Truncated),
+            LocalError::InvalidData
+        ));
+    }
 
     #[test]
     fn only_local_machine_targets_are_allowed() {

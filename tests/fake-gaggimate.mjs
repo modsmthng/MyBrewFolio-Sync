@@ -33,15 +33,15 @@ function shotIndex() {
 
 function shotLog() {
   const sampleCount = 3;
-  const buffer = Buffer.alloc(512 + sampleCount * 26);
+  const buffer = Buffer.alloc(512 + sampleCount * 28);
   buffer.writeUInt32LE(0x544f4853, 0);
-  buffer.writeUInt8(5, 4);
-  buffer.writeUInt8(26, 5);
+  buffer.writeUInt8(6, 4);
+  buffer.writeUInt8(28, 5);
   buffer.writeUInt16LE(512, 6);
   buffer.writeUInt16LE(250, 8);
   buffer.writeUInt32LE(0x1fff, 12);
   buffer.writeUInt32LE(sampleCount, 16);
-  buffer.writeUInt32LE(500, 20);
+  buffer.writeUInt32LE(527, 20);
   buffer.writeUInt32LE(1_735_689_600, 24);
   fixedString(buffer, 28, 32, fixture.profile.id);
   fixedString(buffer, 60, 48, fixture.profile.label);
@@ -55,15 +55,16 @@ function shotLog() {
 
   const samples = [
     [0, 930, 925, 20, 18, 180, 200, 170, 0, 0, 0, 0, 0x000d],
-    [1, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f],
-    [2, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f]
+    [263, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f],
+    [527, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f]
   ];
   samples.forEach((values, sampleIndex) => {
-    const base = 512 + sampleIndex * 26;
-    values.forEach((value, fieldIndex) => {
-      const signed = fieldIndex >= 5 && fieldIndex <= 8;
-      if (signed) buffer.writeInt16LE(value, base + fieldIndex * 2);
-      else buffer.writeUInt16LE(value, base + fieldIndex * 2);
+    const base = 512 + sampleIndex * 28;
+    buffer.writeUInt32LE(values[0], base);
+    values.slice(1).forEach((value, fieldIndex) => {
+      const signed = fieldIndex >= 4 && fieldIndex <= 7;
+      if (signed) buffer.writeInt16LE(value, base + 4 + fieldIndex * 2);
+      else buffer.writeUInt16LE(value, base + 4 + fieldIndex * 2);
     });
   });
   return buffer;

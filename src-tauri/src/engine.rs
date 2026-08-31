@@ -102,6 +102,15 @@ fn should_refresh_notes(
     changed || full_scan || (recent_scan && position < 20)
 }
 
+fn shot_read_failure(error: &LocalError) -> String {
+    match error {
+        LocalError::UnsupportedShotFormat(version) => {
+            format!("GaggiMate shot format v{version} is not supported by this MyBrewFolio Sync version")
+        }
+        _ => "Shot could not be read from the GaggiMate".into(),
+    }
+}
+
 fn batch_result_status(result: &Value) -> (usize, &str) {
     (
         result
@@ -166,6 +175,9 @@ impl EngineError {
             Self::Local(LocalError::InvalidHost) => "GAGGIMATE_HOST_INVALID",
             Self::Local(LocalError::Unreachable) => "GAGGIMATE_UNREACHABLE",
             Self::Local(LocalError::InvalidData) => "GAGGIMATE_DATA_INVALID",
+            Self::Local(LocalError::UnsupportedShotFormat(_)) => {
+                "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"
+            }
             Self::Store(StoreError::Database(_)) => "LOCAL_DATABASE_ERROR",
             Self::Store(StoreError::Keychain) => "SYSTEM_KEYCHAIN_UNAVAILABLE",
             Self::Store(StoreError::InvalidCredentials) => "LOCAL_CREDENTIALS_INVALID",
@@ -922,15 +934,11 @@ impl SyncEngine {
             if changed {
                 let mut shot = match local.shot(entry.id).await {
                     Ok(shot) => shot,
-                    Err(_) => {
-                        self.store.record_failure(
-                            None,
-                            "shot",
-                            &source_key,
-                            "read",
-                            "Shot could not be read from the GaggiMate",
-                        )?;
-                        skipped.push(format!("Shot {} could not be read", entry.id));
+                    Err(error) => {
+                        let reason = shot_read_failure(&error);
+                        self.store
+                            .record_failure(None, "shot", &source_key, "read", &reason)?;
+                        skipped.push(format!("Shot {} could not be read: {reason}", entry.id));
                         continue;
                     }
                 };
@@ -1811,12 +1819,14 @@ mod tests {
     use super::{
         api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
         is_terminal_batch_status, profiles_equal, scan_due, select_sync_batch,
-        serialized_batch_bytes, shot_fingerprint, shot_source_key, should_refresh_notes,
-        suppressed_items, SyncEngine, MAX_SYNC_BATCH_BYTES,
+        serialized_batch_bytes, shot_fingerprint, shot_read_failure, shot_source_key,
+        should_refresh_notes, suppressed_items, SyncEngine, MAX_SYNC_BATCH_BYTES,
     };
     use crate::model::{AppStatus, IndexEntry, OAuthTokens, SyncObject};
     use crate::{
-        cloud::CloudConfig, credentials::EncryptedFileCredentialStore, local::GaggiMateClient,
+        cloud::CloudConfig,
+        credentials::EncryptedFileCredentialStore,
+        local::{GaggiMateClient, LocalError},
         store::AppStore,
     };
     use chrono::{Duration, TimeZone, Utc};
@@ -1901,6 +1911,18 @@ mod tests {
         assert_eq!(
             hash_value(&value),
             "8022fd9de6812be583b599abbf16921a856d33314b7c0db32dba8b9d515b0f3f"
+        );
+    }
+
+    #[test]
+    fn unsupported_shot_format_has_an_actionable_failure_message() {
+        assert_eq!(
+            shot_read_failure(&LocalError::UnsupportedShotFormat(7)),
+            "GaggiMate shot format v7 is not supported by this MyBrewFolio Sync version"
+        );
+        assert_eq!(
+            shot_read_failure(&LocalError::InvalidData),
+            "Shot could not be read from the GaggiMate"
         );
     }
 
@@ -2079,19 +2101,25 @@ mod tests {
     }
 
     fn history_shot() -> Vec<u8> {
-        let mut bytes = vec![0_u8; 130];
+        let mut bytes = vec![0_u8; 512 + 28];
         bytes[0..4].copy_from_slice(&0x544f_4853_u32.to_le_bytes());
-        bytes[4] = 4;
-        bytes[5] = 2;
-        bytes[6..8].copy_from_slice(&128_u16.to_le_bytes());
-        bytes[8..10].copy_from_slice(&100_u16.to_le_bytes());
-        bytes[12..16].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[4] = 6;
+        bytes[5] = 28;
+        bytes[6..8].copy_from_slice(&512_u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&250_u16.to_le_bytes());
+        bytes[12..16].copy_from_slice(&0x1fff_u32.to_le_bytes());
         bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
         bytes[20..24].copy_from_slice(&300_u32.to_le_bytes());
         bytes[24..28].copy_from_slice(&1_735_689_600_u32.to_le_bytes());
         bytes[28..37].copy_from_slice(b"profile-1");
         bytes[60..72].copy_from_slice(b"Test profile");
-        bytes[128..130].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[108..110].copy_from_slice(&180_u16.to_le_bytes());
+        bytes[512..516].copy_from_slice(&300_u32.to_le_bytes());
+        let values = [930_u16, 925, 20, 18, 180, 200, 170, 0, 180, 180, 0, 0x000d];
+        for (index, value) in values.iter().enumerate() {
+            let offset = 516 + index * 2;
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
         bytes
     }
 
@@ -2295,9 +2323,15 @@ mod tests {
         .await;
         configure_test_cloud(&mut engine, &api_url);
         connect_test_engine(&engine);
+        let host = gaggimate_server().await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+        let v6_shot = local.shot(1).await.expect("v6 shot reads");
+        assert_eq!(v6_shot["samples"][0]["t"], 300.0);
+        assert_eq!(v6_shot["samples"][0]["ct"], 92.5);
+
         engine
             .store
-            .set_setting("machine_host", &gaggimate_server().await)
+            .set_setting("machine_host", &host)
             .expect("host saved");
 
         engine.sync_once().await.expect("sync succeeds");

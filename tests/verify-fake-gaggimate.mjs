@@ -20,6 +20,12 @@ try {
   if (!index.ok || (await index.arrayBuffer()).byteLength !== 160) {
     throw new Error('Shot index fixture is invalid');
   }
+  const shot = await fetch(`http://127.0.0.1:${port}/api/history/000001.slog`);
+  const shotBytes = await shot.arrayBuffer();
+  const shotView = new DataView(shotBytes);
+  if (!shot.ok || shotView.getUint8(4) !== 6 || shotView.getUint8(5) !== 28 || shotView.getUint32(540, true) !== 263) {
+    throw new Error('Version-six shot fixture is invalid');
+  }
   const readNotes = id => new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     socket.addEventListener('open', () => socket.send(JSON.stringify({
