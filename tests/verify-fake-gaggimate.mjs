@@ -23,8 +23,14 @@ try {
   const shot = await fetch(`http://127.0.0.1:${port}/api/history/000001.slog`);
   const shotBytes = await shot.arrayBuffer();
   const shotView = new DataView(shotBytes);
-  if (!shot.ok || shotView.getUint8(4) !== 6 || shotView.getUint8(5) !== 28 || shotView.getUint32(540, true) !== 263) {
-    throw new Error('Version-six shot fixture is invalid');
+  if (
+    !shot.ok ||
+    shotView.getUint8(4) !== 7 ||
+    shotView.getUint8(5) !== 30 ||
+    shotView.getUint32(542, true) !== 263 ||
+    shotView.getUint16(570, true) !== 151
+  ) {
+    throw new Error('Version-seven shot fixture is invalid');
   }
   const readNotes = id => new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);

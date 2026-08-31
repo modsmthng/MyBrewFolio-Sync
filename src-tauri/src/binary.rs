@@ -106,7 +106,7 @@ struct Field {
     scale: f64,
 }
 
-fn field(bit: u32) -> Option<Field> {
+fn field(version: u8, bit: u32) -> Option<Field> {
     Some(match bit {
         0 => Field {
             name: "t",
@@ -173,6 +173,11 @@ fn field(bit: u32) -> Option<Field> {
             kind: FieldKind::Unsigned,
             scale: 0.0,
         },
+        13 if version >= 7 => Field {
+            name: "wp",
+            kind: FieldKind::Unsigned,
+            scale: 10.0,
+        },
         _ => return None,
     })
 }
@@ -188,7 +193,7 @@ fn system_info(raw: u16) -> Value {
 }
 
 fn field_width(version: u8, bit: u32) -> usize {
-    if version == 6 && bit == 0 {
+    if version >= 6 && bit == 0 {
         4
     } else {
         2
@@ -231,10 +236,10 @@ fn field_value(
     offset: usize,
     sample_interval: u32,
 ) -> Result<(String, Value), BinaryError> {
-    let known = field(bit);
+    let known = field(version, bit);
     let (name, raw, scale) = match known {
         Some(value) => {
-            let raw = if version == 6 && bit == 0 {
+            let raw = if version >= 6 && bit == 0 {
                 u32_le(bytes, offset)? as f64
             } else {
                 match value.kind {
@@ -309,7 +314,7 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
         return Err(BinaryError::Unsupported);
     }
     let version = bytes[4];
-    if !(1..=6).contains(&version) {
+    if !(1..=7).contains(&version) {
         return Err(BinaryError::UnsupportedVersion(version));
     }
     let sample_size = bytes[5] as usize;
@@ -604,6 +609,90 @@ mod tests {
     }
 
     #[test]
+    fn parses_version_seven_shot_samples_with_pumped_water() {
+        let mut bytes = vec![0_u8; 512 + 2 * 30];
+        bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+        bytes[4] = 7;
+        bytes[5] = 30;
+        bytes[6..8].copy_from_slice(&512_u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&250_u16.to_le_bytes());
+        bytes[12..16].copy_from_slice(&0x3fff_u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&2_u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(&587_u32.to_le_bytes());
+        bytes[24..28].copy_from_slice(&1_735_689_600_u32.to_le_bytes());
+        bytes[28..40].copy_from_slice(b"profile-one\0");
+        bytes[60..73].copy_from_slice(b"Test profile\0");
+        bytes[108..110].copy_from_slice(&185_u16.to_le_bytes());
+        bytes[110..112].copy_from_slice(&0_u16.to_le_bytes());
+        bytes[112] = 0;
+        bytes[114..120].copy_from_slice(b"Bloom\0");
+        bytes[458] = 1;
+        bytes[459] = 5;
+        bytes[460..462].copy_from_slice(&750_u16.to_le_bytes());
+
+        let samples = [
+            (
+                0_u32,
+                [
+                    930_i16, 925, 90, 88, 220, 200, -180, 175, 25, 24, 410, 0x001d, 0,
+                ],
+            ),
+            (
+                287_u32,
+                [
+                    930_i16, 931, 90, 88, 225, 200, -175, 180, 30, 28, 420, 0x001f, 123,
+                ],
+            ),
+        ];
+        for (sample_index, (elapsed_ms, values)) in samples.iter().enumerate() {
+            let base = 512 + sample_index * 30;
+            bytes[base..base + 4].copy_from_slice(&elapsed_ms.to_le_bytes());
+            for (field_index, value) in values.iter().enumerate() {
+                let offset = base + 4 + field_index * 2;
+                bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+
+        let parsed = parse_shot(&bytes, 42).expect("v7 shot parses");
+        assert_eq!(parsed["duration"], 587.0);
+        assert_eq!(parsed["samples"][1]["t"], 287.0);
+        assert_eq!(parsed["samples"][1]["ct"], 93.1);
+        assert_eq!(parsed["samples"][1]["pf"], -1.75);
+        assert_eq!(parsed["samples"][1]["wp"], 12.3);
+        assert_eq!(parsed["phaseTransitions"][0]["phaseName"], "Bloom");
+        assert_eq!(parsed["finalExitReason"], 5);
+        assert_eq!(parsed["brewDelayMs"], 750);
+
+        let mut incomplete = bytes.clone();
+        incomplete[16..20].copy_from_slice(&0_u32.to_le_bytes());
+        incomplete[20..24].copy_from_slice(&999_u32.to_le_bytes());
+        let incomplete = parse_shot(&incomplete, 42).expect("incomplete v7 shot parses");
+        assert_eq!(incomplete["duration"], 287.0);
+        assert_eq!(incomplete["samples"][1]["wp"], 12.3);
+        assert_eq!(incomplete["incomplete"], true);
+
+        let mut wrong_width = bytes.clone();
+        wrong_width[5] = 28;
+        assert!(matches!(
+            parse_shot(&wrong_width, 42),
+            Err(BinaryError::Unsupported)
+        ));
+
+        let mut unknown_field = vec![0_u8; 512 + 6];
+        unknown_field[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+        unknown_field[4] = 7;
+        unknown_field[5] = 6;
+        unknown_field[6..8].copy_from_slice(&512_u16.to_le_bytes());
+        unknown_field[12..16].copy_from_slice(&(1_u32 | (1 << 14)).to_le_bytes());
+        unknown_field[16..20].copy_from_slice(&1_u32.to_le_bytes());
+        unknown_field[512..516].copy_from_slice(&333_u32.to_le_bytes());
+        unknown_field[516..518].copy_from_slice(&456_u16.to_le_bytes());
+        let unknown_field = parse_shot(&unknown_field, 42).expect("v7 unknown field parses");
+        assert_eq!(unknown_field["samples"][0]["t"], 333.0);
+        assert_eq!(unknown_field["samples"][0]["unknown_14"], 456.0);
+    }
+
+    #[test]
     fn old_shots_use_the_last_sample_for_incomplete_duration_and_volume() {
         let mut bytes = vec![0_u8; 128 + 8];
         bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
@@ -646,7 +735,7 @@ mod tests {
         let sample_count = MAX_SHOT_SAMPLES as u32 + 1;
         let mut excessive = vec![0_u8; 512 + sample_count as usize * 4];
         excessive[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
-        excessive[4] = 6;
+        excessive[4] = 7;
         excessive[5] = 4;
         excessive[6..8].copy_from_slice(&512_u16.to_le_bytes());
         excessive[12..16].copy_from_slice(&1_u32.to_le_bytes());
@@ -658,10 +747,10 @@ mod tests {
 
         let mut future = vec![0_u8; 512];
         future[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
-        future[4] = 7;
+        future[4] = 8;
         assert!(matches!(
             parse_shot(&future, 1),
-            Err(BinaryError::UnsupportedVersion(7))
+            Err(BinaryError::UnsupportedVersion(8))
         ));
     }
 }

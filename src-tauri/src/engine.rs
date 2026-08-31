@@ -2101,13 +2101,13 @@ mod tests {
     }
 
     fn history_shot() -> Vec<u8> {
-        let mut bytes = vec![0_u8; 512 + 28];
+        let mut bytes = vec![0_u8; 512 + 30];
         bytes[0..4].copy_from_slice(&0x544f_4853_u32.to_le_bytes());
-        bytes[4] = 6;
-        bytes[5] = 28;
+        bytes[4] = 7;
+        bytes[5] = 30;
         bytes[6..8].copy_from_slice(&512_u16.to_le_bytes());
         bytes[8..10].copy_from_slice(&250_u16.to_le_bytes());
-        bytes[12..16].copy_from_slice(&0x1fff_u32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&0x3fff_u32.to_le_bytes());
         bytes[16..20].copy_from_slice(&1_u32.to_le_bytes());
         bytes[20..24].copy_from_slice(&300_u32.to_le_bytes());
         bytes[24..28].copy_from_slice(&1_735_689_600_u32.to_le_bytes());
@@ -2115,7 +2115,9 @@ mod tests {
         bytes[60..72].copy_from_slice(b"Test profile");
         bytes[108..110].copy_from_slice(&180_u16.to_le_bytes());
         bytes[512..516].copy_from_slice(&300_u32.to_le_bytes());
-        let values = [930_u16, 925, 20, 18, 180, 200, 170, 0, 180, 180, 0, 0x000d];
+        let values = [
+            930_u16, 925, 20, 18, 180, 200, 170, 0, 180, 180, 0, 0x000d, 123,
+        ];
         for (index, value) in values.iter().enumerate() {
             let offset = 516 + index * 2;
             bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
@@ -2325,14 +2327,27 @@ mod tests {
         connect_test_engine(&engine);
         let host = gaggimate_server().await;
         let local = GaggiMateClient::new(&host).expect("local client");
-        let v6_shot = local.shot(1).await.expect("v6 shot reads");
-        assert_eq!(v6_shot["samples"][0]["t"], 300.0);
-        assert_eq!(v6_shot["samples"][0]["ct"], 92.5);
+        let v7_shot = local.shot(1).await.expect("v7 shot reads");
+        assert_eq!(v7_shot["samples"][0]["t"], 300.0);
+        assert_eq!(v7_shot["samples"][0]["ct"], 92.5);
+        assert_eq!(v7_shot["samples"][0]["wp"], 12.3);
 
         engine
             .store
             .set_setting("machine_host", &host)
             .expect("host saved");
+
+        let skipped = engine
+            .queue_local_changes(&local, &json!({ "items": [] }))
+            .await
+            .expect("v7 shot queues");
+        assert!(skipped.is_empty());
+        let queued = engine.store.pending(25).expect("queue reads");
+        let queued_shot = queued
+            .iter()
+            .find(|object| object.kind == "shot")
+            .expect("shot is queued");
+        assert_eq!(queued_shot.data["samples"][0]["wp"], 12.3);
 
         engine.sync_once().await.expect("sync succeeds");
 

@@ -33,13 +33,13 @@ function shotIndex() {
 
 function shotLog() {
   const sampleCount = 3;
-  const buffer = Buffer.alloc(512 + sampleCount * 28);
+  const buffer = Buffer.alloc(512 + sampleCount * 30);
   buffer.writeUInt32LE(0x544f4853, 0);
-  buffer.writeUInt8(6, 4);
-  buffer.writeUInt8(28, 5);
+  buffer.writeUInt8(7, 4);
+  buffer.writeUInt8(30, 5);
   buffer.writeUInt16LE(512, 6);
   buffer.writeUInt16LE(250, 8);
-  buffer.writeUInt32LE(0x1fff, 12);
+  buffer.writeUInt32LE(0x3fff, 12);
   buffer.writeUInt32LE(sampleCount, 16);
   buffer.writeUInt32LE(527, 20);
   buffer.writeUInt32LE(1_735_689_600, 24);
@@ -54,12 +54,12 @@ function shotLog() {
   buffer.writeUInt16LE(750, 460);
 
   const samples = [
-    [0, 930, 925, 20, 18, 180, 200, 170, 0, 0, 0, 0, 0x000d],
-    [263, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f],
-    [527, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f]
+    [0, 930, 925, 20, 18, 180, 200, 170, 0, 0, 0, 0, 0x000d, 0],
+    [263, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f, 151],
+    [527, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f, 312]
   ];
   samples.forEach((values, sampleIndex) => {
-    const base = 512 + sampleIndex * 28;
+    const base = 512 + sampleIndex * 30;
     buffer.writeUInt32LE(values[0], base);
     values.slice(1).forEach((value, fieldIndex) => {
       const signed = fieldIndex >= 4 && fieldIndex <= 7;

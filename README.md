@@ -61,8 +61,8 @@ npm run tauri:dev
 ```
 
 The manually started fake machine listens on `127.0.0.1:8088` and provides a real binary shot
-index, a version-six `.slog`, notes JSON, and the profile WebSocket protocol. The parser also
-retains compatibility with older v1-v5 shot files:
+index, a version-seven `.slog`, notes JSON, and the profile WebSocket protocol. The parser also
+retains compatibility with older v1-v6 shot files:
 
 ```bash
 npm run fake-gaggimate
