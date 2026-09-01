@@ -294,7 +294,8 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   const [showCompleteResyncInfo, setShowCompleteResyncInfo] = useState(false);
   const [showNotesSyncInfo, setShowNotesSyncInfo] = useState(false);
   const [showNotesIntroInfo, setShowNotesIntroInfo] = useState(false);
-  const [availableUpdate, setAvailableUpdate] = useState('');
+  const [updateStatus, setUpdateStatus] = useState({ kind: 'unknown' });
+  const [showUpdateDialog, setShowUpdateDialog] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [notesIntroOpen, setNotesIntroOpen] = useState(false);
   const [notesActivation, setNotesActivation] = useState(null);
@@ -332,11 +333,11 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
       });
     invoke('get_hide_app_icon').then(setHideAppIconState).catch(() => setHideAppIconState(false));
     getVersion().then(setAppVersion).catch(() => setAppVersion('Unknown'));
-    invoke('check_update')
+    invoke('get_update_status')
       .then(result => {
-        if (result.startsWith('available:')) {
-          setAvailableUpdate(result.slice('available:'.length));
-        }
+        const next = result || { kind: 'unknown' };
+        setUpdateStatus(next);
+        setShowUpdateDialog(next.kind === 'available' && next.promptPending);
       })
       .catch(() => {
         // A background update check must never interrupt synchronization.
@@ -438,23 +439,83 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
     }
   };
 
-  const update = async () => {
+  useEffect(() => {
+    let unlisten;
+    listen('update-status-changed', event => {
+      const next = event.payload || { kind: 'unknown' };
+      if (next.kind === 'error') {
+        showStatusMessage(next.message, 'error');
+        return;
+      }
+      setUpdateStatus(next);
+      if (next.kind === 'available' && next.promptPending) setShowUpdateDialog(true);
+    }).then(stop => { unlisten = stop; });
+    return () => unlisten?.();
+  }, []);
+
+  const checkForUpdates = async () => {
     setBusy(true);
     showStatusMessage('Checking for updates…', 'info');
     try {
-      const result = await invoke('install_update');
-      const messages = {
-        installed: 'The update was installed. Restart Sync to use the new version.',
-        'up-to-date': 'MyBrewFolio Sync is up to date.',
-        'store-managed': 'Updates are managed by Microsoft Store.',
-        'not-configured': 'Automatic updates are not available in this development build.',
-      };
-      showStatusMessage(messages[result] || 'Update check completed.');
-      if (result === 'installed' || result === 'up-to-date') setAvailableUpdate('');
-    } catch (error) {
-      showStatusMessage(String(error), 'error');
+      const next = await invoke('check_update');
+      if (next.kind === 'error') {
+        showStatusMessage(next.message, 'error');
+        return;
+      }
+      setUpdateStatus(next);
+      setShowUpdateDialog(next.kind === 'available' && next.promptPending);
+      if (next.kind === 'upToDate') showStatusMessage('MyBrewFolio Sync is up to date.');
+      else if (next.kind === 'storeManaged') showStatusMessage('Updates are managed by Microsoft Store.');
+      else if (next.kind === 'notConfigured') showStatusMessage('Automatic updates are not available in this development build.');
+    } catch {
+      showStatusMessage('Unable to check for updates. Sync will try again later.', 'error');
     } finally {
       setBusy(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setBusy(true);
+    try {
+      const next = await invoke('install_update');
+      if (next.kind === 'error') {
+        showStatusMessage(next.message, 'error');
+        return;
+      }
+      setUpdateStatus(next);
+      if (next.kind === 'installed') setShowUpdateDialog(true);
+      else if (next.kind === 'upToDate') {
+        setShowUpdateDialog(false);
+        showStatusMessage('MyBrewFolio Sync is up to date.');
+      }
+    } catch {
+      showStatusMessage('Unable to install the update. Please try again later.', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const laterUpdate = async () => {
+    try {
+      const next = await invoke('dismiss_update');
+      setUpdateStatus(next);
+      setShowUpdateDialog(false);
+    } catch {
+      showStatusMessage('Unable to postpone the update reminder. Please try again.', 'error');
+    }
+  };
+
+  const restartAfterUpdate = async () => {
+    try {
+      const next = await invoke('restart_after_update');
+      setUpdateStatus(next);
+      if (next.restartRequested) {
+        if (next.restartWaitingForSync) {
+          showStatusMessage('Restarting after the current synchronization finishes.', 'info');
+        }
+      }
+    } catch {
+      showStatusMessage('Unable to restart Sync. Please restart it manually.', 'error');
     }
   };
 
@@ -864,14 +925,27 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
       <h2 className="section-title">App settings</h2>
       <section className="card settings">
         <h3>Updates</h3>
-        {availableUpdate ? (
+        {updateStatus.kind === 'available' ? (
           <output className="update-available" aria-live="polite">
-            Update {availableUpdate} is available.
+            Update {updateStatus.version} is available.
           </output>
         ) : null}
-        <button type="button" className="secondary inline-action" disabled={busy} onClick={update}>
-          {availableUpdate ? `Install update ${availableUpdate}` : 'Check for updates'}
-        </button>
+        {updateStatus.kind === 'installed' ? (
+          <>
+            <p className="muted">Update {updateStatus.version} is installed.</p>
+            {!showUpdateDialog ? (
+              <button type="button" className="primary inline-action" onClick={restartAfterUpdate}>
+                {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
+              </button>
+            ) : null}
+          </>
+        ) : updateStatus.kind === 'storeManaged' ? (
+          <p className="muted">Updates are managed by Microsoft Store.</p>
+        ) : (
+          <button type="button" className="secondary inline-action" disabled={busy} onClick={checkForUpdates}>
+            Check for updates
+          </button>
+        )}
         <p className="muted app-version">Installed version {appVersion || '…'}</p>
       </section>
       <section className="card settings background-app-settings">
@@ -1003,6 +1077,36 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
           <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
         )}
       </section>
+      {showUpdateDialog && updateStatus.kind === 'available' ? (
+        <section className="card modal-card" role="alertdialog" aria-labelledby="update-available-title">
+          <div className="modal-title-row">
+            <h2 id="update-available-title">Update available</h2>
+          </div>
+          <p>MyBrewFolio Sync {updateStatus.version} is ready to install.</p>
+          <div className="dialog-actions">
+            <button type="button" className="secondary compact-button" disabled={busy} onClick={laterUpdate}>Later</button>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={installUpdate}>
+              Install update
+            </button>
+          </div>
+        </section>
+      ) : null}
+      {showUpdateDialog && updateStatus.kind === 'installed' ? (
+        <section className="card modal-card" role="alertdialog" aria-labelledby="update-installed-title">
+          <div className="modal-title-row">
+            <h2 id="update-installed-title">Update installed</h2>
+          </div>
+          <p>MyBrewFolio Sync {updateStatus.version} is installed. Restart Sync to use the new version.</p>
+          {updateStatus.restartWaitingForSync ? (
+            <p className="muted">Restarting after the current synchronization finishes.</p>
+          ) : null}
+          <div className="dialog-actions">
+            <button type="button" className="primary compact-button" onClick={restartAfterUpdate}>
+              {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
+            </button>
+          </div>
+        </section>
+      ) : null}
       <AppFooter />
     </main>
   );

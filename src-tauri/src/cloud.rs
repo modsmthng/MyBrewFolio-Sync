@@ -361,7 +361,7 @@ impl CloudClient {
                 "name": name,
                 "platform": platform,
                 "appVersion": app_version,
-                "capabilities": { "profileStoreBridge": 2 }
+                "capabilities": { "profileStoreBridge": 2, "canonicalNotesHash": 1 }
             }))
             .send()
             .await
@@ -683,7 +683,7 @@ impl CloudClient {
             .json(&json!({
                 "appVersion": env!("CARGO_PKG_VERSION"), "machineReachable": machine_reachable,
                 "lastSyncAt": last_sync_at, "lastErrorCode": error,
-                "capabilities": { "profileStoreBridge": 2 }
+                "capabilities": { "profileStoreBridge": 2, "canonicalNotesHash": 1 }
             }))
             .send()
             .await
@@ -1175,6 +1175,13 @@ mod tests {
             .contains("authorization: Bearer valid-access")
             || request.contains("Authorization: Bearer valid-access")));
         assert!(requests[0].contains("installationId"));
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.contains("canonicalNotesHash"))
+                .count()
+                >= 2
+        );
         assert!(requests[2].contains("sourceKey"));
         assert!(requests[13].contains("items"));
         assert!(requests[14].contains("duplicatePolicy"));

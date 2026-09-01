@@ -45,7 +45,7 @@ beforeEach(() => {
   invoke.mockImplementation(command => {
     if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
     if (command === 'get_hide_app_icon') return Promise.resolve(false);
-    if (command === 'check_update') return Promise.resolve('up-to-date');
+    if (command === 'get_update_status') return Promise.resolve({ kind: 'unknown' });
     return Promise.resolve(undefined);
   });
 });
@@ -181,18 +181,81 @@ describe('Sync interface', () => {
     invoke.mockImplementation(command => {
       if (command === 'get_autostart_status') return Promise.resolve({ enabled: false, requiresWindowsSettings: true, blockedByPolicy: false, migrationAvailable: true });
       if (command === 'get_hide_app_icon') return Promise.resolve(false);
-      if (command === 'check_update') return Promise.resolve('available:0.3.13');
-      if (command === 'install_update') return Promise.resolve('up-to-date');
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'available', version: '0.3.13', promptPending: true });
+      if (command === 'install_update') return Promise.resolve({ kind: 'upToDate' });
       return Promise.resolve(undefined);
     });
     render(<Dashboard status={{ ...status, initialSyncConfigured: false, duplicatePolicy: 'import_all' }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
-    await vi.waitFor(() => expect(screen.getByText('Update 0.3.13 is available.')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByText('Update available')).toBeTruthy());
+    expect(screen.getByText('Update 0.3.13 is available.')).toBeTruthy();
     expect(screen.getByText(/Windows needs a one-time confirmation/)).toBeTruthy();
     expect(screen.getByText(/Windows has disabled startup/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Save and start first sync' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('configure_sync', { reuseMatching: false }));
-    fireEvent.click(screen.getByRole('button', { name: 'Install update 0.3.13' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Install update' }));
     await vi.waitFor(() => expect(screen.getByText('MyBrewFolio Sync is up to date.')).toBeTruthy());
+  });
+
+  it('lets the user defer an available update until the next daily reminder', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_hide_app_icon') return Promise.resolve(false);
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'available', version: '0.4.3', promptPending: true });
+      if (command === 'dismiss_update') return Promise.resolve({ kind: 'available', version: '0.4.3', promptPending: false });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    await vi.waitFor(() => expect(screen.getByRole('alertdialog', { name: 'Update available' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Later' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('dismiss_update'));
+    await vi.waitFor(() => expect(screen.queryByRole('alertdialog', { name: 'Update available' })).toBeNull());
+    expect(screen.getByText('Update 0.4.3 is available.')).toBeTruthy();
+  });
+
+  it('offers a restart after installation and explains a deferred restart', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_hide_app_icon') return Promise.resolve(false);
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'available', version: '0.4.3', promptPending: true });
+      if (command === 'install_update') return Promise.resolve({ kind: 'installed', version: '0.4.3', restartRequested: false, restartWaitingForSync: false });
+      if (command === 'restart_after_update') return Promise.resolve({ kind: 'installed', version: '0.4.3', restartRequested: true, restartWaitingForSync: true });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={{ ...status, syncing: true }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Install update' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Install update' }));
+    await vi.waitFor(() => expect(screen.getByRole('alertdialog', { name: 'Update installed' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Restart Sync' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('restart_after_update'));
+    await vi.waitFor(() => expect(screen.getByText('Restarting after the current synchronization finishes.')).toBeTruthy());
+  });
+
+  it('keeps Microsoft Store updates outside the custom updater flow', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_hide_app_icon') return Promise.resolve(false);
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'storeManaged' });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    await vi.waitFor(() => expect(screen.getByText('Updates are managed by Microsoft Store.')).toBeTruthy());
+    expect(screen.queryByRole('alertdialog', { name: 'Update available' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Check for updates' })).toBeNull();
+  });
+
+  it('shows an English status message rather than an updater error', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_hide_app_icon') return Promise.resolve(false);
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'unknown' });
+      if (command === 'check_update') return Promise.reject(new Error('updater metadata failed'));
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Check for updates' })).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+    await vi.waitFor(() => expect(screen.getByText('Unable to check for updates. Sync will try again later.')).toBeTruthy());
+    expect(screen.queryByText(/updater metadata failed/)).toBeNull();
   });
 
   it('shows successful sync, machine address, app icon and help interactions', async () => {

@@ -242,7 +242,11 @@ impl GaggiMateClient {
         Ok(Some(notes))
     }
 
-    pub async fn save_notes(&self, id: u32, notes: &Value) -> Result<Value, LocalError> {
+    /// Sends one idempotent Notes write to GaggiMate. Callers that need a
+    /// durable acknowledgement must read the Notes object back and compare it
+    /// with their requested content; GaggiMate acknowledges the WebSocket
+    /// command before a filesystem write can be observed by a later request.
+    pub async fn write_notes(&self, id: u32, notes: &Value) -> Result<(), LocalError> {
         let object = notes.as_object().ok_or(LocalError::InvalidData)?;
         if serde_json::to_vec(notes)
             .map_err(|_| LocalError::InvalidData)?
@@ -256,6 +260,11 @@ impl GaggiMateClient {
             json!({ "id": id.to_string(), "notes": object }),
         )
         .await?;
+        Ok(())
+    }
+
+    pub async fn save_notes(&self, id: u32, notes: &Value) -> Result<Value, LocalError> {
+        self.write_notes(id, notes).await?;
         Ok(self.notes(id).await?.unwrap_or_else(|| json!({})))
     }
 

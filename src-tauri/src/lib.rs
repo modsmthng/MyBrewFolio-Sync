@@ -41,6 +41,53 @@ mod desktop {
     pub(crate) struct TrayErrorItem(MenuItem<tauri::Wry>);
     pub(crate) struct TrayAutostartItem(MenuItem<tauri::Wry>);
 
+    const UPDATE_CHECK_INTERVAL_HOURS: i64 = 24;
+    const UPDATE_LAST_CHECK_AT: &str = "update_last_check_at";
+    const UPDATE_AVAILABLE_VERSION: &str = "update_available_version";
+    const UPDATE_LAST_PROMPT_AT: &str = "update_last_prompt_at";
+    const UPDATE_PROMPT_PENDING: &str = "update_prompt_pending";
+    const UPDATE_RESTART_VERSION: &str = "update_restart_version";
+    const UPDATE_CHECK_FAILED_MESSAGE: &str =
+        "Unable to check for updates. Sync will try again later.";
+    const UPDATE_INSTALL_FAILED_MESSAGE: &str =
+        "Unable to install the update. Please try again later.";
+
+    #[derive(Default)]
+    struct UpdateRestartState {
+        requested: AtomicBool,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RestartSchedule {
+        Now,
+        WaitForSync,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    #[serde(
+        tag = "kind",
+        rename_all = "camelCase",
+        rename_all_fields = "camelCase"
+    )]
+    enum UpdateStatus {
+        Unknown,
+        UpToDate,
+        Available {
+            version: String,
+            prompt_pending: bool,
+        },
+        Installed {
+            version: String,
+            restart_requested: bool,
+            restart_waiting_for_sync: bool,
+        },
+        Error {
+            message: String,
+        },
+        StoreManaged,
+        NotConfigured,
+    }
+
     async fn emit_status(app: &tauri::AppHandle, engine: &SyncEngine) {
         let status = engine.status().await;
         if let Some(item) = app.try_state::<TrayStatusItem>() {
@@ -658,44 +705,307 @@ mod desktop {
             .map_err(|error| error.to_string())
     }
 
-    #[tauri::command]
-    async fn check_update(app: tauri::AppHandle) -> Result<String, String> {
+    fn stored_update_status(
+        store: &AppStore,
+        restart_state: &UpdateRestartState,
+    ) -> Result<UpdateStatus, String> {
         if store_managed_updates() {
-            return Ok("store-managed".into());
+            return Ok(UpdateStatus::StoreManaged);
         }
         let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
             .unwrap_or("")
             .trim();
         if public_key.is_empty() {
-            return Ok("not-configured".into());
+            return Ok(UpdateStatus::NotConfigured);
         }
-        let updater = app.updater().map_err(|error| error.to_string())?;
-        let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-            return Ok("up-to-date".into());
+        if let Some(version) = store
+            .setting(UPDATE_RESTART_VERSION)
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(UpdateStatus::Installed {
+                version,
+                restart_requested: restart_state.requested.load(Ordering::SeqCst),
+                restart_waiting_for_sync: false,
+            });
+        }
+        if let Some(version) = store
+            .setting(UPDATE_AVAILABLE_VERSION)
+            .map_err(|error| error.to_string())?
+        {
+            let prompt_pending = store
+                .setting(UPDATE_PROMPT_PENDING)
+                .map_err(|error| error.to_string())?
+                .as_deref()
+                == Some("1");
+            return Ok(UpdateStatus::Available {
+                version,
+                prompt_pending,
+            });
+        }
+        Ok(UpdateStatus::Unknown)
+    }
+
+    fn update_due(last_check: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(last_check) = last_check else {
+            return true;
         };
-        Ok(format!("available:{}", update.version))
+        chrono::DateTime::parse_from_rfc3339(last_check)
+            .map(|last| {
+                now - last.with_timezone(&chrono::Utc)
+                    >= chrono::Duration::hours(UPDATE_CHECK_INTERVAL_HOURS)
+            })
+            .unwrap_or(true)
+    }
+
+    fn update_check_required(
+        last_check: Option<&str>,
+        now: chrono::DateTime<chrono::Utc>,
+        force: bool,
+    ) -> bool {
+        force || update_due(last_check, now)
+    }
+
+    fn update_prompt_due(last_prompt: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+        update_due(last_prompt, now)
+    }
+
+    fn restart_schedule(syncing: bool) -> RestartSchedule {
+        if syncing {
+            RestartSchedule::WaitForSync
+        } else {
+            RestartSchedule::Now
+        }
+    }
+
+    async fn emit_update_status(app: &tauri::AppHandle, status: &UpdateStatus) {
+        let _ = app.emit("update-status-changed", status);
+    }
+
+    async fn check_for_update(
+        app: &tauri::AppHandle,
+        store: &AppStore,
+        restart_state: &UpdateRestartState,
+        force: bool,
+    ) -> Result<UpdateStatus, String> {
+        let current = stored_update_status(store, restart_state)?;
+        if matches!(
+            current,
+            UpdateStatus::StoreManaged
+                | UpdateStatus::NotConfigured
+                | UpdateStatus::Installed { .. }
+        ) {
+            return Ok(current);
+        }
+        let now = chrono::Utc::now();
+        let last_check = store
+            .setting(UPDATE_LAST_CHECK_AT)
+            .map_err(|error| error.to_string())?;
+        if !update_check_required(last_check.as_deref(), now, force) {
+            return Ok(current);
+        }
+
+        store
+            .set_setting(UPDATE_LAST_CHECK_AT, &now.to_rfc3339())
+            .map_err(|error| error.to_string())?;
+        let updater = app.updater().map_err(|error| error.to_string())?;
+        let checked = updater.check().await.map_err(|error| error.to_string())?;
+        let status = if let Some(update) = checked {
+            let version = update.version.to_string();
+            let previous_version = store
+                .setting(UPDATE_AVAILABLE_VERSION)
+                .map_err(|error| error.to_string())?;
+            let last_prompt = store
+                .setting(UPDATE_LAST_PROMPT_AT)
+                .map_err(|error| error.to_string())?;
+            let prompt_pending = force
+                || previous_version.as_deref() != Some(version.as_str())
+                || update_prompt_due(last_prompt.as_deref(), now);
+            store
+                .set_setting(UPDATE_AVAILABLE_VERSION, &version)
+                .map_err(|error| error.to_string())?;
+            if prompt_pending {
+                store
+                    .set_setting(UPDATE_LAST_PROMPT_AT, &now.to_rfc3339())
+                    .map_err(|error| error.to_string())?;
+                store
+                    .set_setting(UPDATE_PROMPT_PENDING, "1")
+                    .map_err(|error| error.to_string())?;
+            }
+            UpdateStatus::Available {
+                version,
+                prompt_pending,
+            }
+        } else {
+            store
+                .remove_setting(UPDATE_AVAILABLE_VERSION)
+                .map_err(|error| error.to_string())?;
+            store
+                .remove_setting(UPDATE_PROMPT_PENDING)
+                .map_err(|error| error.to_string())?;
+            UpdateStatus::UpToDate
+        };
+        if matches!(
+            status,
+            UpdateStatus::Available {
+                prompt_pending: true,
+                ..
+            }
+        ) {
+            show_main_window(app);
+        }
+        emit_update_status(app, &status).await;
+        Ok(status)
+    }
+
+    async fn run_update_check(
+        app: &tauri::AppHandle,
+        store: &AppStore,
+        restart_state: &UpdateRestartState,
+        force: bool,
+    ) -> UpdateStatus {
+        match check_for_update(app, store, restart_state, force).await {
+            Ok(status) => status,
+            Err(_) => {
+                let status = UpdateStatus::Error {
+                    message: UPDATE_CHECK_FAILED_MESSAGE.into(),
+                };
+                emit_update_status(app, &status).await;
+                status
+            }
+        }
     }
 
     #[tauri::command]
-    async fn install_update(app: tauri::AppHandle) -> Result<String, String> {
-        if store_managed_updates() {
-            return Ok("store-managed".into());
+    fn get_update_status(
+        store: State<'_, Arc<AppStore>>,
+        restart_state: State<'_, Arc<UpdateRestartState>>,
+    ) -> Result<UpdateStatus, String> {
+        stored_update_status(&store, &restart_state)
+    }
+
+    #[tauri::command]
+    async fn check_update(
+        app: tauri::AppHandle,
+        store: State<'_, Arc<AppStore>>,
+        restart_state: State<'_, Arc<UpdateRestartState>>,
+    ) -> Result<UpdateStatus, String> {
+        Ok(run_update_check(&app, &store, &restart_state, true).await)
+    }
+
+    #[tauri::command]
+    async fn dismiss_update(
+        app: tauri::AppHandle,
+        store: State<'_, Arc<AppStore>>,
+        restart_state: State<'_, Arc<UpdateRestartState>>,
+    ) -> Result<UpdateStatus, String> {
+        store
+            .set_setting(UPDATE_PROMPT_PENDING, "0")
+            .map_err(|error| error.to_string())?;
+        let status = stored_update_status(&store, &restart_state)?;
+        emit_update_status(&app, &status).await;
+        Ok(status)
+    }
+
+    #[tauri::command]
+    async fn install_update(
+        app: tauri::AppHandle,
+        store: State<'_, Arc<AppStore>>,
+        restart_state: State<'_, Arc<UpdateRestartState>>,
+    ) -> Result<UpdateStatus, String> {
+        match install_available_update(&app, &store, &restart_state).await {
+            Ok(status) => Ok(status),
+            Err(_) => {
+                let status = UpdateStatus::Error {
+                    message: UPDATE_INSTALL_FAILED_MESSAGE.into(),
+                };
+                emit_update_status(&app, &status).await;
+                Ok(status)
+            }
         }
-        let public_key = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
-            .unwrap_or("")
-            .trim();
-        if public_key.is_empty() {
-            return Ok("not-configured".into());
+    }
+
+    async fn install_available_update(
+        app: &tauri::AppHandle,
+        store: &AppStore,
+        restart_state: &UpdateRestartState,
+    ) -> Result<UpdateStatus, String> {
+        let current = stored_update_status(&store, &restart_state)?;
+        if matches!(
+            current,
+            UpdateStatus::StoreManaged
+                | UpdateStatus::NotConfigured
+                | UpdateStatus::Installed { .. }
+        ) {
+            return Ok(current);
         }
         let updater = app.updater().map_err(|error| error.to_string())?;
         let Some(update) = updater.check().await.map_err(|error| error.to_string())? else {
-            return Ok("up-to-date".into());
+            store
+                .remove_setting(UPDATE_AVAILABLE_VERSION)
+                .map_err(|error| error.to_string())?;
+            store
+                .remove_setting(UPDATE_PROMPT_PENDING)
+                .map_err(|error| error.to_string())?;
+            let status = UpdateStatus::UpToDate;
+            emit_update_status(&app, &status).await;
+            return Ok(status);
         };
+        let version = update.version.to_string();
         update
             .download_and_install(|_, _| {}, || {})
             .await
             .map_err(|error| error.to_string())?;
-        Ok("installed".into())
+        store
+            .set_setting(UPDATE_RESTART_VERSION, &version)
+            .map_err(|error| error.to_string())?;
+        store
+            .remove_setting(UPDATE_AVAILABLE_VERSION)
+            .map_err(|error| error.to_string())?;
+        store
+            .remove_setting(UPDATE_PROMPT_PENDING)
+            .map_err(|error| error.to_string())?;
+        restart_state.requested.store(false, Ordering::SeqCst);
+        let status = UpdateStatus::Installed {
+            version,
+            restart_requested: false,
+            restart_waiting_for_sync: false,
+        };
+        emit_update_status(&app, &status).await;
+        Ok(status)
+    }
+
+    #[tauri::command]
+    async fn restart_after_update(
+        app: tauri::AppHandle,
+        engine: State<'_, Arc<SyncEngine>>,
+        store: State<'_, Arc<AppStore>>,
+        restart_state: State<'_, Arc<UpdateRestartState>>,
+    ) -> Result<UpdateStatus, String> {
+        let UpdateStatus::Installed { version, .. } = stored_update_status(&store, &restart_state)?
+        else {
+            return Err("No installed update is waiting for a restart".into());
+        };
+        let schedule = restart_schedule(engine.status().await.syncing);
+        restart_state.requested.store(true, Ordering::SeqCst);
+        let status = UpdateStatus::Installed {
+            version,
+            restart_requested: true,
+            restart_waiting_for_sync: schedule == RestartSchedule::WaitForSync,
+        };
+        emit_update_status(&app, &status).await;
+        let restart_engine = engine.inner().clone();
+        let restart_handle = app.clone();
+        let restart_store = store.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            if schedule == RestartSchedule::WaitForSync {
+                while restart_engine.status().await.syncing {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+            let _ = restart_store.remove_setting(UPDATE_RESTART_VERSION);
+            restart_handle.request_restart();
+        });
+        Ok(status)
     }
 
     fn is_store_managed_build(target_is_windows: bool, store_build: Option<&str>) -> bool {
@@ -768,6 +1078,8 @@ mod desktop {
                     AppStore::open(&data_dir.join("sync.sqlite"))
                         .map_err(|error| error.to_string())?,
                 );
+                app.manage(store.clone());
+                app.manage(Arc::new(UpdateRestartState::default()));
                 let credentials = Arc::new(KeyringCredentialStore);
                 let engine = Arc::new(
                     SyncEngine::open(store.clone(), credentials)
@@ -886,6 +1198,22 @@ mod desktop {
                     }
                 });
 
+                let update_handle = app.handle().clone();
+                let update_store = store.clone();
+                let update_restart_state = app.state::<Arc<UpdateRestartState>>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        let _ = run_update_check(
+                            &update_handle,
+                            &update_store,
+                            &update_restart_state,
+                            false,
+                        )
+                        .await;
+                        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+                    }
+                });
+
                 let bridge_engine = engine.clone();
                 let bridge_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
@@ -953,8 +1281,11 @@ mod desktop {
                 apply_complete_resync,
                 disconnect_account,
                 open_mybrewfolio_page,
+                get_update_status,
                 check_update,
+                dismiss_update,
                 install_update,
+                restart_after_update,
             ])
             .build(tauri::generate_context!())
             .expect("error while running MyBrewFolio Sync");
@@ -973,8 +1304,10 @@ mod desktop {
     mod tests {
         use super::{
             autostart_status_from_state, has_autostart_argument, is_store_managed_build,
-            StoreStartupTaskState,
+            restart_schedule, update_check_required, update_due, RestartSchedule,
+            StoreStartupTaskState, UpdateStatus,
         };
+        use chrono::{Duration, TimeZone, Utc};
 
         #[test]
         fn store_build_is_limited_to_windows_store_packages() {
@@ -1028,6 +1361,48 @@ mod desktop {
                 "--autostarted".to_string(),
                 "--other".to_string(),
             ]));
+        }
+
+        #[test]
+        fn update_check_runs_daily_or_when_the_saved_time_is_invalid() {
+            let now = Utc
+                .with_ymd_and_hms(2026, 9, 1, 12, 0, 0)
+                .single()
+                .expect("test time");
+            assert!(update_due(None, now));
+            assert!(!update_due(
+                Some(&(now - Duration::hours(23)).to_rfc3339()),
+                now
+            ));
+            assert!(update_due(
+                Some(&(now - Duration::hours(24)).to_rfc3339()),
+                now
+            ));
+            assert!(update_due(Some("invalid"), now));
+            assert!(update_check_required(
+                Some(&(now - Duration::hours(1)).to_rfc3339()),
+                now,
+                true
+            ));
+        }
+
+        #[test]
+        fn update_status_uses_the_frontend_field_names() {
+            let status = UpdateStatus::Installed {
+                version: "0.4.3".into(),
+                restart_requested: true,
+                restart_waiting_for_sync: true,
+            };
+            let json = serde_json::to_value(status).expect("status JSON");
+            assert_eq!(json["kind"], "installed");
+            assert_eq!(json["restartRequested"], true);
+            assert_eq!(json["restartWaitingForSync"], true);
+        }
+
+        #[test]
+        fn restart_waits_only_for_an_active_sync_cycle() {
+            assert_eq!(restart_schedule(false), RestartSchedule::Now);
+            assert_eq!(restart_schedule(true), RestartSchedule::WaitForSync);
         }
     }
 }

@@ -219,6 +219,22 @@ impl AppStore {
         Ok(())
     }
 
+    pub fn clear_failure_stage(
+        &self,
+        kind: &str,
+        source_key: &str,
+        stage: &str,
+    ) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute(
+                "delete from sync_failures where kind = ?1 and source_key = ?2 and stage = ?3",
+                params![kind, source_key, stage],
+            )?;
+        Ok(())
+    }
+
     pub fn queue_bridge_completion(
         &self,
         operation_id: &str,

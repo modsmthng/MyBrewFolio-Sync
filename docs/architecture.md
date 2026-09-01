@@ -77,12 +77,21 @@ file and an explicit `--confirm`; the desktop shows the equivalent confirmation 
 
 When Notes Sync is active, the server issues short-lived, idempotent operations containing the
 expected machine hash. Before `req:history:notes:save`, the client reads and compares the current
-machine Notes object; it reads it again after the write and acknowledges only the verified target
-hash. A changed precondition becomes a conflict rather than an overwrite. Before later outbound
-batches or a restore, the client replaces the backup shown as **Latest Backup**; the protected
-First Backup remains separate. Restore is also preview-first and only applies selected backup items
-after explicit confirmation. Disabling Notes Sync immediately invalidates outstanding writer
-leases, so no further machine writes are scheduled.
+machine Notes object; it writes and verifies the target up to three times (immediately, then after
+250 ms and 750 ms) and acknowledges only the verified target hash. A non-persisting or unreachable
+machine remains a retryable English Sync issue rather than a false success or a conflict. A changed
+precondition becomes a conflict rather than an overwrite. Empty objects and GaggiMate's untouched
+default Notes object mean "no Notes": an initially empty machine stays retryable, while clearing a
+previously verified non-empty machine Note becomes a conflict and never clears MyBrewFolio
+automatically. Before later outbound batches or a restore, the client replaces the backup shown as
+**Latest Backup**; the protected First Backup remains separate. Restore is also preview-first and
+only applies selected backup items after explicit confirmation. Disabling Notes Sync immediately
+invalidates outstanding writer leases, so no further machine writes are scheduled.
+
+The Companion declares `canonicalNotesHash: 1` in its device capabilities. The API retains raw
+Notes hash behavior for older Companions that do not declare it, allowing staged Companion rollouts
+without changing their existing Two-way Notes semantics. When that same installation updates, an
+otherwise matching empty default mapping is migrated to the canonical hash without a conflict.
 
 Before the first import, the source stores whether exact GaggiMate-ID/recording-time matches reuse
 existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.
@@ -127,10 +136,20 @@ current DMG, MSI, AppImage, or DEB package. The MyBrewFolio Support page links t
 GitHub's `releases/latest/download` route, while updater-only `.sig` files remain outside the normal
 installation flow.
 
+Desktop bundles have a persistent startup check and then check the signed updater metadata at most
+once per 24 hours. When a new version is available, Sync opens its main window and presents an
+English update dialog. Choosing `Later` suppresses only that dialog until the next daily check;
+the Updates settings area continues to show the available version. Installation is confirmed before
+Sync presents `Restart Sync`. A requested restart waits for an active synchronization cycle to
+finish, leaving unfinished queue entries in the persistent local queue for the next launch.
+
 Windows has two deliberately separate update channels. The direct GitHub MSI build uses the signed
 MyBrewFolio updater and `latest.json`. The manual `Microsoft Store package` workflow builds the
 MSIX with `MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD=true`; that package delegates updates to Microsoft
-Store. A version input must match `package.json`, `tauri.conf.json` and `Cargo.toml`. The workflow is
+Store, with no custom update dialog, download, or restart. Its Updates settings area says
+`Updates are managed by Microsoft Store.` Docker and other headless runs do not perform update
+checks or automatic restarts; their safe manual update procedure is documented in
+[`docs/headless.md`](headless.md). A version input must match `package.json`, `tauri.conf.json` and `Cargo.toml`. The workflow is
 limited to 30 minutes and uploads only to a separate `store-vX.Y.Z` draft release. This draft is
 visible only to repository collaborators with push access and must never be published. The normal
 `vX.Y.Z` release therefore contains only public direct-download and updater assets. The MSIX

@@ -45,6 +45,17 @@ All data commands write JSON to standard output. Logs and errors are written to 
 
 `diagnose` is read-only. It reports the connection, synchronized profile/shot/note counts, local queue and failure counts, conflicts, suppressed matches, duplicate policy, and concrete next commands.
 
+## Updating Docker
+
+Docker updates are manual. The desktop update check and restart prompt do not run in the headless container. From the installation directory created by the installer, pull the current image and recreate the service:
+
+```sh
+docker compose --project-directory ~/.config/mybrewfolio-sync -f ~/.config/mybrewfolio-sync/compose.yaml pull
+docker compose --project-directory ~/.config/mybrewfolio-sync -f ~/.config/mybrewfolio-sync/compose.yaml up -d
+```
+
+If you chose a different installation directory, replace both paths with that directory. This reuses the installer-created Compose file, persistent data volume, encryption key, OAuth token, and configuration. It does not erase or replace local Sync state.
+
 ## Configuration and Recovery
 
 The default duplicate policy is `reuse_matching`. It protects matching library entries from being imported a second time. For example, `10` synchronized shots and `350` suppressed entries means 10 new shots were synchronized while 350 matching entries were safely left unchanged. This is not a failed upload when `diagnose` reports no queue failures.

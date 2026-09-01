@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
+    time::Duration as StdDuration,
 };
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -27,6 +28,13 @@ const MAX_SYNC_BATCH_ITEMS: usize = 25;
 // client version cannot turn an otherwise valid queue entry into a rejected
 // request.
 const MAX_SYNC_BATCH_BYTES: usize = 7 * 1024 * 1024;
+const NOTES_WRITE_ATTEMPTS: usize = 3;
+const NOTES_WRITE_RETRY_DELAYS: [StdDuration; NOTES_WRITE_ATTEMPTS - 1] = [
+    StdDuration::from_millis(250),
+    // The third attempt is scheduled 750 ms after the first, not 750 ms
+    // after the second.
+    StdDuration::from_millis(500),
+];
 
 fn serialized_batch_bytes(items: &[SyncObject]) -> usize {
     serde_json::to_vec(&serde_json::json!({ "items": items }))
@@ -73,6 +81,92 @@ fn suppressed_items(cloud_state: &Value) -> HashSet<(String, String)> {
             ))
         })
         .collect()
+}
+
+fn two_way_notes_active(cloud_state: &Value) -> bool {
+    cloud_state
+        .get("source")
+        .and_then(|source| {
+            source
+                .get("notes_sync_status")
+                .or_else(|| source.get("notesSyncStatus"))
+        })
+        .and_then(Value::as_str)
+        == Some("two_way")
+}
+
+fn note_source_hashes(cloud_state: &Value) -> HashMap<String, String> {
+    cloud_state
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if item.get("kind").and_then(Value::as_str) != Some("notes")
+                || item
+                    .get("suppressed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                return None;
+            }
+            Some((
+                item.get("source_key")
+                    .or_else(|| item.get("sourceKey"))?
+                    .as_str()?
+                    .to_string(),
+                item.get("source_hash")
+                    .or_else(|| item.get("sourceHash"))?
+                    .as_str()?
+                    .to_string(),
+            ))
+        })
+        .collect()
+}
+
+fn zero_notes_value(value: &Value) -> bool {
+    value.as_f64().is_some_and(|number| number == 0.0)
+        || value
+            .as_str()
+            .is_some_and(|text| matches!(text.trim(), "" | "0" | "0.0"))
+}
+
+/// GaggiMate can persist an untouched Notes form as a fully populated default
+/// object. It has the same meaning as an absent Notes record and must never
+/// silently clear a cloud Note.
+fn notes_are_semantically_empty(notes: &Value) -> bool {
+    let Some(values) = notes.as_object() else {
+        return false;
+    };
+    values.iter().all(|(key, value)| match key.as_str() {
+        "id" | "timestamp" => true,
+        "rating" | "doseIn" | "doseOut" | "ratio" => value.is_null() || zero_notes_value(value),
+        "balanceTaste" => {
+            value.is_null()
+                || value.as_str().is_some_and(|text| {
+                    text.trim().is_empty() || text.trim().eq_ignore_ascii_case("balanced")
+                })
+        }
+        "beanType" | "grindSetting" | "notes" => {
+            value.is_null() || value.as_str().is_some_and(|text| text.trim().is_empty())
+        }
+        // Unknown fields are considered user content unless they are null.
+        _ => value.is_null(),
+    })
+}
+
+fn normalized_notes(notes: Value) -> Value {
+    if notes_are_semantically_empty(&notes) {
+        json!({})
+    } else {
+        notes
+    }
+}
+
+enum NotesWriteOutcome {
+    Applied(Value),
+    Conflict(Value),
+    Unverified,
 }
 
 fn scan_due(now: DateTime<Utc>, last: Option<DateTime<Utc>>, interval: Duration) -> bool {
@@ -453,10 +547,12 @@ impl SyncEngine {
             .to_string();
         let mut items = Vec::new();
         for entry in local.shot_index().await? {
-            let notes = local
-                .notes(entry.id)
-                .await?
-                .unwrap_or_else(|| serde_json::json!({}));
+            let notes = normalized_notes(
+                local
+                    .notes(entry.id)
+                    .await?
+                    .unwrap_or_else(|| serde_json::json!({})),
+            );
             items.push(serde_json::json!({
                 "sourceKey": format!("{}:{}", entry.id, entry.timestamp),
                 "machineShotId": entry.id.to_string(),
@@ -868,6 +964,9 @@ impl SyncEngine {
     ) -> Result<Vec<String>, EngineError> {
         let mut skipped = Vec::new();
         let suppressed = suppressed_items(cloud_state);
+        let two_way_notes = two_way_notes_active(cloud_state);
+        let existing_note_hashes = note_source_hashes(cloud_state);
+        let empty_notes_hash = hash_value(&json!({}));
 
         let now = Utc::now();
         let last_profiles = parse_time(self.store.setting("last_profile_scan")?);
@@ -890,7 +989,7 @@ impl SyncEngine {
                         continue;
                     }
                 };
-                self.store.clear_failure("profile", &id)?;
+                self.store.clear_failure_stage("profile", &id, "read")?;
                 self.store.queue(&SyncObject {
                     kind: "profile".into(),
                     source_key: id,
@@ -903,10 +1002,10 @@ impl SyncEngine {
                 .set_setting("last_profile_scan", &now.to_rfc3339())?;
         }
 
-        if self.store.setting("notes_reader_version")?.as_deref() != Some("2") {
+        if self.store.setting("notes_reader_version")?.as_deref() != Some("3") {
             self.store.set_setting("last_full_notes_scan", "")?;
             self.store.set_setting("last_recent_notes_scan", "")?;
-            self.store.set_setting("notes_reader_version", "2")?;
+            self.store.set_setting("notes_reader_version", "3")?;
         }
         let full_notes = scan_due(
             now,
@@ -942,7 +1041,8 @@ impl SyncEngine {
                         continue;
                     }
                 };
-                self.store.clear_failure("shot", &source_key)?;
+                self.store
+                    .clear_failure_stage("shot", &source_key, "read")?;
                 if let Some(object) = shot.as_object_mut() {
                     object.insert(
                         "name".into(),
@@ -964,18 +1064,27 @@ impl SyncEngine {
                 && !suppressed.contains(&("notes".into(), source_key.clone()))
             {
                 match local.notes(entry.id).await {
-                    Ok(Some(notes)) => {
-                        self.store.clear_failure("notes", &source_key)?;
-                        self.store.queue(&SyncObject {
-                            kind: "notes".into(),
-                            source_key: source_key.clone(),
-                            source_hash: hash_value(&notes),
-                            shot_source_key: Some(source_key.clone()),
-                            data: notes,
-                        })?;
-                    }
-                    Ok(None) => {
-                        self.store.clear_failure("notes", &source_key)?;
+                    Ok(notes) => {
+                        self.store
+                            .clear_failure_stage("notes", &source_key, "read")?;
+                        let notes =
+                            normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
+                        let empty = notes_are_semantically_empty(&notes);
+                        let was_verified_nonempty = existing_note_hashes
+                            .get(&source_key)
+                            .is_some_and(|hash| hash != &empty_notes_hash);
+                        // A missing Notes record is normally ignored. In active
+                        // two-way mode it becomes a clear candidate only after a
+                        // non-empty machine version was verified previously.
+                        if !empty || (two_way_notes && was_verified_nonempty) {
+                            self.store.queue(&SyncObject {
+                                kind: "notes".into(),
+                                source_key: source_key.clone(),
+                                source_hash: hash_value(&notes),
+                                shot_source_key: Some(source_key.clone()),
+                                data: notes,
+                            })?;
+                        }
                     }
                     Err(_) => {
                         let reason = "Notes could not be read from the GaggiMate";
@@ -1045,7 +1154,11 @@ impl SyncEngine {
                             reason,
                         )?;
                     } else {
-                        self.store.clear_failure(&object.kind, &object.source_key)?;
+                        self.store.clear_failure_stage(
+                            &object.kind,
+                            &object.source_key,
+                            "upload",
+                        )?;
                     }
                     if is_terminal_batch_status(status) {
                         self.store
@@ -1055,6 +1168,39 @@ impl SyncEngine {
             }
         }
         Ok(invalid)
+    }
+
+    async fn write_and_verify_notes(
+        &self,
+        local: &GaggiMateClient,
+        machine_id: u32,
+        base_hash: &str,
+        desired: &Value,
+    ) -> Result<NotesWriteOutcome, LocalError> {
+        let desired = normalized_notes(desired.clone());
+        let desired_hash = hash_value(&desired);
+        for attempt in 0..NOTES_WRITE_ATTEMPTS {
+            local.write_notes(machine_id, &desired).await?;
+            let actual = normalized_notes(
+                local
+                    .notes(machine_id)
+                    .await?
+                    .unwrap_or_else(|| serde_json::json!({})),
+            );
+            let actual_hash = hash_value(&actual);
+            if actual_hash == desired_hash {
+                return Ok(NotesWriteOutcome::Applied(actual));
+            }
+            // A value other than the version we compared before writing is a
+            // concurrent machine edit, not a reason to overwrite it again.
+            if actual_hash != base_hash {
+                return Ok(NotesWriteOutcome::Conflict(actual));
+            }
+            if let Some(delay) = NOTES_WRITE_RETRY_DELAYS.get(attempt) {
+                tokio::time::sleep(*delay).await;
+            }
+        }
+        Ok(NotesWriteOutcome::Unverified)
     }
 
     async fn process_outbound_notes(
@@ -1092,17 +1238,35 @@ impl SyncEngine {
                 .next()
                 .and_then(|value| value.parse::<u32>().ok())
                 .ok_or(CloudError::Rejected)?;
-            let current = local
-                .notes(machine_id)
-                .await?
-                .unwrap_or_else(|| serde_json::json!({}));
-            let current_hash = hash_value(&current);
             let base_hash = operation
                 .get("baseSourceHash")
                 .or_else(|| operation.get("base_source_hash"))
                 .and_then(Value::as_str)
                 .ok_or(CloudError::Rejected)?;
+            let current = match local.notes(machine_id).await {
+                Ok(notes) => normalized_notes(notes.unwrap_or_else(|| serde_json::json!({}))),
+                Err(error) => {
+                    let reason = "GaggiMate could not be reached to verify the Notes update. Sync will retry automatically.";
+                    self.store
+                        .record_failure(None, "notes", source_key, "write", reason)?;
+                    self.cloud
+                        .complete_outbound_note(
+                            device_id,
+                            operation_id,
+                            serde_json::json!({
+                                "leaseToken": lease_token,
+                                "status": "failed",
+                                "error": error.to_string(),
+                            }),
+                        )
+                        .await?;
+                    continue;
+                }
+            };
+            let current_hash = hash_value(&current);
             if current_hash != base_hash {
+                self.store
+                    .clear_failure_stage("notes", source_key, "write")?;
                 self.cloud
                     .complete_outbound_note(
                         device_id,
@@ -1122,8 +1286,13 @@ impl SyncEngine {
                 .or_else(|| operation.get("desired_data"))
                 .cloned()
                 .ok_or(CloudError::Rejected)?;
-            match local.save_notes(machine_id, &desired).await {
-                Ok(actual) => {
+            match self
+                .write_and_verify_notes(local, machine_id, base_hash, &desired)
+                .await
+            {
+                Ok(NotesWriteOutcome::Applied(actual)) => {
+                    self.store
+                        .clear_failure_stage("notes", source_key, "write")?;
                     self.cloud
                         .complete_outbound_note(
                             device_id,
@@ -1136,7 +1305,42 @@ impl SyncEngine {
                         )
                         .await?;
                 }
+                Ok(NotesWriteOutcome::Conflict(actual)) => {
+                    self.store
+                        .clear_failure_stage("notes", source_key, "write")?;
+                    self.cloud
+                        .complete_outbound_note(
+                            device_id,
+                            operation_id,
+                            serde_json::json!({
+                                "leaseToken": lease_token,
+                                "status": "conflict",
+                                "actualHash": hash_value(&actual),
+                                "actualNotes": actual,
+                            }),
+                        )
+                        .await?;
+                }
+                Ok(NotesWriteOutcome::Unverified) => {
+                    let reason = "GaggiMate did not confirm the Notes update. Sync will retry automatically.";
+                    self.store
+                        .record_failure(None, "notes", source_key, "write", reason)?;
+                    self.cloud
+                        .complete_outbound_note(
+                            device_id,
+                            operation_id,
+                            serde_json::json!({
+                                "leaseToken": lease_token,
+                                "status": "failed",
+                                "error": reason,
+                            }),
+                        )
+                        .await?;
+                }
                 Err(error) => {
+                    let reason = "GaggiMate could not confirm the Notes update. Sync will retry automatically.";
+                    self.store
+                        .record_failure(None, "notes", source_key, "write", reason)?;
                     self.cloud
                         .complete_outbound_note(
                             device_id,
@@ -1814,13 +2018,14 @@ fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> V
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
 
     use super::{
         api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
-        is_terminal_batch_status, profiles_equal, scan_due, select_sync_batch,
-        serialized_batch_bytes, shot_fingerprint, shot_read_failure, shot_source_key,
-        should_refresh_notes, suppressed_items, SyncEngine, MAX_SYNC_BATCH_BYTES,
+        is_terminal_batch_status, normalized_notes, notes_are_semantically_empty, profiles_equal,
+        scan_due, select_sync_batch, serialized_batch_bytes, shot_fingerprint, shot_read_failure,
+        shot_source_key, should_refresh_notes, suppressed_items, NotesWriteOutcome, SyncEngine,
+        MAX_SYNC_BATCH_BYTES, NOTES_WRITE_ATTEMPTS,
     };
     use crate::model::{AppStatus, IndexEntry, OAuthTokens, SyncObject};
     use crate::{
@@ -1831,12 +2036,95 @@ mod tests {
     };
     use chrono::{Duration, TimeZone, Utc};
     use futures_util::{SinkExt, StreamExt};
-    use serde_json::json;
+    use serde_json::{json, Value};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    #[derive(Clone)]
+    struct NotesFixtureState {
+        current: Value,
+        pending: Option<Value>,
+        stale_reads_remaining: usize,
+        ignore_writes: bool,
+        external_change_after_first_write: Option<Value>,
+        writes: usize,
+    }
+
+    async fn notes_write_server(
+        initial: Value,
+        stale_reads: usize,
+        ignore_writes: bool,
+        external_change_after_first_write: Option<Value>,
+    ) -> (String, Arc<StdMutex<NotesFixtureState>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("GaggiMate Notes listener");
+        let address = listener.local_addr().expect("GaggiMate Notes address");
+        let state = Arc::new(StdMutex::new(NotesFixtureState {
+            current: initial,
+            pending: None,
+            stale_reads_remaining: stale_reads,
+            ignore_writes,
+            external_change_after_first_write,
+            writes: 0,
+        }));
+        let server_state = state.clone();
+        tokio::spawn(async move {
+            for _ in 0..16 {
+                let (stream, _) = listener.accept().await.expect("GaggiMate Notes request");
+                let mut socket = accept_async(stream)
+                    .await
+                    .expect("GaggiMate Notes WebSocket");
+                let request = socket
+                    .next()
+                    .await
+                    .expect("GaggiMate Notes message")
+                    .expect("valid GaggiMate Notes message")
+                    .into_text()
+                    .expect("text GaggiMate Notes message");
+                let request: Value = serde_json::from_str(&request).expect("GaggiMate Notes JSON");
+                let rid = request["rid"].as_str().expect("GaggiMate Notes request ID");
+                let response = match request["tp"].as_str() {
+                    Some("req:history:notes:get") => {
+                        let mut state = server_state.lock().expect("Notes state");
+                        if state.pending.is_some() && state.stale_reads_remaining == 0 {
+                            state.current = state.pending.take().expect("pending Notes");
+                        } else if state.pending.is_some() {
+                            state.stale_reads_remaining -= 1;
+                        }
+                        json!({
+                            "tp": "res:history:notes:get", "rid": rid,
+                            "notes": state.current,
+                        })
+                    }
+                    Some("req:history:notes:save") => {
+                        let mut state = server_state.lock().expect("Notes state");
+                        state.writes += 1;
+                        if state.writes == 1 {
+                            if let Some(external) = state.external_change_after_first_write.take() {
+                                state.current = external;
+                                state.pending = None;
+                            } else if !state.ignore_writes {
+                                state.pending = Some(request["notes"].clone());
+                            }
+                        } else if !state.ignore_writes {
+                            state.pending = Some(request["notes"].clone());
+                        }
+                        json!({ "tp": "res:history:notes:save", "rid": rid })
+                    }
+                    _ => json!({ "tp": "res:error", "rid": rid, "error": "unexpected request" }),
+                };
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .expect("GaggiMate Notes response");
+            }
+        });
+        (format!("127.0.0.1:{}", address.port()), state)
+    }
 
     fn status() -> AppStatus {
         AppStatus {
@@ -1874,6 +2162,92 @@ mod tests {
             hash_value(&value),
             "383410d6c75c6bd29378b3b9da39e37fde1ab284f8f1cb0230ecc2c196f5d346"
         );
+    }
+
+    #[test]
+    fn recognizes_absent_and_default_gaggimate_notes_as_empty() {
+        assert!(notes_are_semantically_empty(&json!({})));
+        assert!(notes_are_semantically_empty(&json!({
+            "id": "1",
+            "timestamp": 1_735_689_600,
+            "rating": 0,
+            "beanType": "",
+            "doseIn": "",
+            "doseOut": "",
+            "ratio": "",
+            "grindSetting": "",
+            "balanceTaste": "balanced",
+            "notes": "",
+        })));
+        assert!(!notes_are_semantically_empty(
+            &json!({ "notes": "Keep this" })
+        ));
+        assert_eq!(
+            normalized_notes(json!({ "id": "1", "rating": 0 })),
+            json!({})
+        );
+    }
+
+    #[tokio::test]
+    async fn retries_gaggimate_notes_writes_until_the_target_is_verified() {
+        let (engine, _directory) = test_engine();
+        let base = json!({ "notes": "before" });
+        let desired = json!({ "notes": "after" });
+        let (host, state) = notes_write_server(base.clone(), 2, false, None).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+
+        let result = engine
+            .write_and_verify_notes(&local, 1, &hash_value(&base), &desired)
+            .await
+            .expect("write verification succeeds");
+
+        match result {
+            NotesWriteOutcome::Applied(actual) => assert_eq!(actual, desired),
+            _ => panic!("the delayed write should be verified"),
+        }
+        assert_eq!(state.lock().expect("Notes state").writes, 3);
+    }
+
+    #[tokio::test]
+    async fn reports_an_unverified_gaggimate_notes_write_without_false_success() {
+        let (engine, _directory) = test_engine();
+        let base = json!({ "notes": "before" });
+        let desired = json!({ "notes": "after" });
+        let (host, state) = notes_write_server(base.clone(), 0, true, None).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+
+        let result = engine
+            .write_and_verify_notes(&local, 1, &hash_value(&base), &desired)
+            .await
+            .expect("unverified write is a handled outcome");
+
+        assert!(matches!(result, NotesWriteOutcome::Unverified));
+        assert_eq!(
+            state.lock().expect("Notes state").writes,
+            NOTES_WRITE_ATTEMPTS
+        );
+    }
+
+    #[tokio::test]
+    async fn stops_retrying_when_notes_change_externally_during_verification() {
+        let (engine, _directory) = test_engine();
+        let base = json!({ "notes": "before" });
+        let desired = json!({ "notes": "from MyBrewFolio" });
+        let external = json!({ "notes": "edited on GaggiMate" });
+        let (host, state) =
+            notes_write_server(base.clone(), 0, false, Some(external.clone())).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+
+        let result = engine
+            .write_and_verify_notes(&local, 1, &hash_value(&base), &desired)
+            .await
+            .expect("external edit is a handled outcome");
+
+        match result {
+            NotesWriteOutcome::Conflict(actual) => assert_eq!(actual, external),
+            _ => panic!("the external edit must become a conflict"),
+        }
+        assert_eq!(state.lock().expect("Notes state").writes, 1);
     }
 
     #[test]
@@ -2548,6 +2922,13 @@ mod tests {
             .process_outbound_notes(&local, "device-1")
             .await
             .expect("outbound operations processed");
+        let issues = engine.store.failures().expect("write issues");
+        assert!(issues.iter().any(|issue| {
+            issue.kind == "notes"
+                && issue.stage == "write"
+                && issue.reason
+                    == "GaggiMate did not confirm the Notes update. Sync will retry automatically."
+        }));
     }
 
     #[tokio::test]
