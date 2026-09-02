@@ -83,15 +83,18 @@ machine remains a retryable English Sync issue rather than a false success or a 
 precondition becomes a conflict rather than an overwrite. Empty objects and GaggiMate's untouched
 default Notes object mean "no Notes": an initially empty machine stays retryable, while clearing a
 previously verified non-empty machine Note becomes a conflict and never clears MyBrewFolio
-automatically. Before later outbound batches or a restore, the client replaces the backup shown as
-**Latest Backup**; the protected First Backup remains separate. Restore is also preview-first and
-only applies selected backup items after explicit confirmation. Disabling Notes Sync immediately
-invalidates outstanding writer leases, so no further machine writes are scheduled.
+automatically. Normal outbound writes do not replace **Latest Backup**; users create it manually
+when desired, while the protected First Backup remains separate. Restore always creates a fresh
+Latest Backup first, is preview-first, and only applies selected backup items after explicit
+confirmation. Disabling Notes Sync immediately invalidates outstanding writer leases, so no further
+machine writes are scheduled.
 
-The Companion declares `canonicalNotesHash: 1` in its device capabilities. The API retains raw
-Notes hash behavior for older Companions that do not declare it, allowing staged Companion rollouts
-without changing their existing Two-way Notes semantics. When that same installation updates, an
-otherwise matching empty default mapping is migrated to the canonical hash without a conflict.
+The Companion declares `canonicalNotesHash: 1` and `twoWayNotesProtocol: 2` in its device
+capabilities. The API retains raw hashes, the existing backup gate, and existing missing-Notes
+semantics for older Companions that do not declare the new protocol. Protocol-2 installs scan all
+Notes once after upgrade and establish an empty baseline for newly synchronized Brews without
+overwriting a later MyBrewFolio Note. When that same installation updates, an otherwise matching
+empty default mapping is migrated to the canonical hash without a conflict.
 
 Before the first import, the source stores whether exact GaggiMate-ID/recording-time matches reuse
 existing MyBrewFolio shots. Complete resync builds a read-only preview from a fresh local inventory.

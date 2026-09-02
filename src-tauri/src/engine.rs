@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashSet},
     sync::Arc,
     time::Duration as StdDuration,
 };
@@ -35,6 +35,8 @@ const NOTES_WRITE_RETRY_DELAYS: [StdDuration; NOTES_WRITE_ATTEMPTS - 1] = [
     // after the second.
     StdDuration::from_millis(500),
 ];
+const TWO_WAY_NOTES_PROTOCOL_VERSION: &str = "2";
+const TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING: &str = "two_way_notes_protocol_announced";
 
 fn serialized_batch_bytes(items: &[SyncObject]) -> usize {
     serde_json::to_vec(&serde_json::json!({ "items": items }))
@@ -93,35 +95,6 @@ fn two_way_notes_active(cloud_state: &Value) -> bool {
         })
         .and_then(Value::as_str)
         == Some("two_way")
-}
-
-fn note_source_hashes(cloud_state: &Value) -> HashMap<String, String> {
-    cloud_state
-        .get("items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| {
-            if item.get("kind").and_then(Value::as_str) != Some("notes")
-                || item
-                    .get("suppressed")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            {
-                return None;
-            }
-            Some((
-                item.get("source_key")
-                    .or_else(|| item.get("sourceKey"))?
-                    .as_str()?
-                    .to_string(),
-                item.get("source_hash")
-                    .or_else(|| item.get("sourceHash"))?
-                    .as_str()?
-                    .to_string(),
-            ))
-        })
-        .collect()
 }
 
 fn zero_notes_value(value: &Value) -> bool {
@@ -834,6 +807,10 @@ impl SyncEngine {
             .await?;
         self.store.set_setting("device_id", &device.id)?;
         self.store.set_setting("source_id", &device.source_id)?;
+        self.store.set_setting(
+            TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
+            TWO_WAY_NOTES_PROTOCOL_VERSION,
+        )?;
         let mut status = self.status.write().await;
         status.connected = true;
         status.this_device_id = Some(device.id);
@@ -965,8 +942,6 @@ impl SyncEngine {
         let mut skipped = Vec::new();
         let suppressed = suppressed_items(cloud_state);
         let two_way_notes = two_way_notes_active(cloud_state);
-        let existing_note_hashes = note_source_hashes(cloud_state);
-        let empty_notes_hash = hash_value(&json!({}));
 
         let now = Utc::now();
         let last_profiles = parse_time(self.store.setting("last_profile_scan")?);
@@ -1002,10 +977,10 @@ impl SyncEngine {
                 .set_setting("last_profile_scan", &now.to_rfc3339())?;
         }
 
-        if self.store.setting("notes_reader_version")?.as_deref() != Some("3") {
+        if self.store.setting("notes_reader_version")?.as_deref() != Some("4") {
             self.store.set_setting("last_full_notes_scan", "")?;
             self.store.set_setting("last_recent_notes_scan", "")?;
-            self.store.set_setting("notes_reader_version", "3")?;
+            self.store.set_setting("notes_reader_version", "4")?;
         }
         let full_notes = scan_due(
             now,
@@ -1070,13 +1045,10 @@ impl SyncEngine {
                         let notes =
                             normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
                         let empty = notes_are_semantically_empty(&notes);
-                        let was_verified_nonempty = existing_note_hashes
-                            .get(&source_key)
-                            .is_some_and(|hash| hash != &empty_notes_hash);
-                        // A missing Notes record is normally ignored. In active
-                        // two-way mode it becomes a clear candidate only after a
-                        // non-empty machine version was verified previously.
-                        if !empty || (two_way_notes && was_verified_nonempty) {
+                        // One-way sync keeps ignoring untouched Notes. The
+                        // Protocol-2 two-way baseline needs every empty Note
+                        // so the API can map Brews that appeared after setup.
+                        if !empty || two_way_notes {
                             self.store.queue(&SyncObject {
                                 kind: "notes".into(),
                                 source_key: source_key.clone(),
@@ -1208,11 +1180,19 @@ impl SyncEngine {
         local: &GaggiMateClient,
         device_id: &str,
     ) -> Result<(), EngineError> {
-        let mut claim = self.cloud.claim_outbound_notes(device_id).await?;
+        let claim = self.cloud.claim_outbound_notes(device_id).await?;
         if claim.get("status").and_then(Value::as_str) == Some("backup_required") {
-            self.create_notes_backup("latest").await?;
-            claim = self.cloud.claim_outbound_notes(device_id).await?;
+            self.store.record_failure(
+                None,
+                "notes",
+                "outbound",
+                "backup",
+                "A manual Latest Backup is required before Notes can be updated.",
+            )?;
+            return Ok(());
         }
+        self.store
+            .clear_failure_stage("notes", "outbound", "backup")?;
         for operation in claim
             .get("operations")
             .and_then(Value::as_array)
@@ -1243,6 +1223,13 @@ impl SyncEngine {
                 .or_else(|| operation.get("base_source_hash"))
                 .and_then(Value::as_str)
                 .ok_or(CloudError::Rejected)?;
+            let desired = operation
+                .get("desiredNotes")
+                .or_else(|| operation.get("desired_data"))
+                .cloned()
+                .ok_or(CloudError::Rejected)?;
+            let desired = normalized_notes(desired);
+            let desired_hash = hash_value(&desired);
             let current = match local.notes(machine_id).await {
                 Ok(notes) => normalized_notes(notes.unwrap_or_else(|| serde_json::json!({}))),
                 Err(error) => {
@@ -1264,6 +1251,25 @@ impl SyncEngine {
                 }
             };
             let current_hash = hash_value(&current);
+            // A prior write can have succeeded even if its completion request
+            // was interrupted. Treat the already verified target as applied
+            // instead of turning its retry into a false conflict.
+            if current_hash == desired_hash {
+                self.store
+                    .clear_failure_stage("notes", source_key, "write")?;
+                self.cloud
+                    .complete_outbound_note(
+                        device_id,
+                        operation_id,
+                        serde_json::json!({
+                            "leaseToken": lease_token,
+                            "status": "applied",
+                            "actualHash": current_hash,
+                        }),
+                    )
+                    .await?;
+                continue;
+            }
             if current_hash != base_hash {
                 self.store
                     .clear_failure_stage("notes", source_key, "write")?;
@@ -1281,11 +1287,6 @@ impl SyncEngine {
                     .await?;
                 continue;
             }
-            let desired = operation
-                .get("desiredNotes")
-                .or_else(|| operation.get("desired_data"))
-                .cloned()
-                .ok_or(CloudError::Rejected)?;
             match self
                 .write_and_verify_notes(local, machine_id, base_hash, &desired)
                 .await
@@ -1819,6 +1820,21 @@ impl SyncEngine {
                 status.machine_reachable = true;
                 return Ok(());
             }
+            // An in-place app update keeps the device ID. Advertise the new
+            // protocol before its first repaired empty-Notes batch reaches
+            // the API, while avoiding an extra heartbeat on every sync cycle.
+            if self
+                .store
+                .setting(TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING)?
+                .as_deref()
+                != Some(TWO_WAY_NOTES_PROTOCOL_VERSION)
+            {
+                self.cloud.heartbeat(&device_id, true, None, None).await?;
+                self.store.set_setting(
+                    TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
+                    TWO_WAY_NOTES_PROTOCOL_VERSION,
+                )?;
+            }
             // The Store bridge and the regular synchronizer both speak the
             // GaggiMate WebSocket protocol. Keep their machine requests
             // serialized even though their cloud work is independent.
@@ -2189,6 +2205,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn leaves_empty_notes_out_of_one_way_sync() {
+        let (engine, _directory) = test_engine();
+        let host = gaggimate_server_with_notes(json!({})).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+
+        engine
+            .queue_local_changes(
+                &local,
+                &json!({ "source": { "notesSyncStatus": "one_way" }, "items": [] }),
+            )
+            .await
+            .expect("one-way scan succeeds");
+
+        assert!(engine
+            .store
+            .pending(25)
+            .expect("pending objects")
+            .iter()
+            .all(|object| object.kind != "notes"));
+    }
+
+    #[tokio::test]
+    async fn queues_empty_notes_once_for_the_two_way_protocol_baseline() {
+        let (engine, _directory) = test_engine();
+        let host = gaggimate_server_with_notes(json!({})).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+        let state = json!({ "source": { "notesSyncStatus": "two_way" }, "items": [] });
+        let source_key = "1:1735689600";
+
+        engine
+            .queue_local_changes(&local, &state)
+            .await
+            .expect("two-way baseline scan succeeds");
+        let queued = engine.store.pending(25).expect("pending objects");
+        let note = queued
+            .iter()
+            .find(|object| object.kind == "notes")
+            .expect("empty Note baseline is queued");
+        assert_eq!(note.source_key, source_key);
+        assert_eq!(note.data, json!({}));
+        assert_eq!(
+            engine
+                .store
+                .setting("notes_reader_version")
+                .expect("reader version"),
+            Some("4".into())
+        );
+
+        engine
+            .store
+            .remove_pending("notes", source_key)
+            .expect("baseline removed for second-scan assertion");
+        engine
+            .queue_local_changes(&local, &state)
+            .await
+            .expect("second scan succeeds");
+        assert!(engine
+            .store
+            .pending(25)
+            .expect("pending objects")
+            .iter()
+            .all(|object| object.kind != "notes"));
+    }
+
+    #[tokio::test]
     async fn retries_gaggimate_notes_writes_until_the_target_is_verified() {
         let (engine, _directory) = test_engine();
         let base = json!({ "notes": "before" });
@@ -2248,6 +2329,59 @@ mod tests {
             _ => panic!("the external edit must become a conflict"),
         }
         assert_eq!(state.lock().expect("Notes state").writes, 1);
+    }
+
+    #[tokio::test]
+    async fn completes_an_outbound_retry_when_the_machine_already_has_the_target_notes() {
+        let (mut engine, _directory) = test_engine();
+        let current = json!({ "notes": "already written" });
+        let api_url = cloud_server(vec![
+            &format!(
+                r#"{{"status":"ready","operations":[{{"id":"retry","leaseToken":"lease-1","sourceKey":"1:1735689600","baseSourceHash":"{}","desiredNotes":{current}}}]}}"#,
+                hash_value(&json!({ "notes": "before" })),
+            ),
+            "{}",
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        let (host, state) = notes_write_server(current, 0, false, None).await;
+        let local = GaggiMateClient::new(&host).expect("local client");
+
+        engine
+            .process_outbound_notes(&local, "device-1")
+            .await
+            .expect("already-applied retry completes");
+
+        assert_eq!(state.lock().expect("Notes state").writes, 0);
+        assert!(engine.store.failures().expect("write issues").is_empty());
+    }
+
+    #[tokio::test]
+    async fn keeps_a_legacy_backup_requirement_manual() {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![r#"{"status":"backup_required","operations":[]}"#]).await;
+        configure_test_cloud(&mut engine, &api_url);
+        connect_test_engine(&engine);
+        let local = GaggiMateClient::new("127.0.0.1:1").expect("local client");
+
+        engine
+            .process_outbound_notes(&local, "device-1")
+            .await
+            .expect("manual backup requirement is non-blocking");
+
+        assert!(engine
+            .store
+            .failures()
+            .expect("backup issue")
+            .iter()
+            .any(|issue| {
+                issue.kind == "notes"
+                    && issue.source_key == "outbound"
+                    && issue.stage == "backup"
+                    && issue.reason
+                        == "A manual Latest Backup is required before Notes can be updated."
+            }));
     }
 
     #[test]
@@ -2500,6 +2634,10 @@ mod tests {
     }
 
     async fn gaggimate_server() -> String {
+        gaggimate_server_with_notes(json!({ "text": "dial in finer" })).await
+    }
+
+    async fn gaggimate_server_with_notes(notes: Value) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("GaggiMate listener");
@@ -2532,7 +2670,7 @@ mod tests {
                         }),
                         Some("req:history:notes:get") => json!({
                             "tp": "res:history:notes:get", "rid": rid,
-                            "notes": { "text": "dial in finer" }
+                            "notes": notes.clone()
                         }),
                         Some("req:history:notes:save") => json!({
                             "tp": "res:history:notes:save", "rid": rid
@@ -2691,6 +2829,7 @@ mod tests {
         let api_url = cloud_server(vec![
             r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
             r#"{"operations":[]}"#,
+            "{}",
             r#"{"results":[{"index":0,"status":"created"},{"index":1,"status":"created"},{"index":2,"status":"created"}]}"#,
             r#"{"operations":[]}"#,
             "{}",

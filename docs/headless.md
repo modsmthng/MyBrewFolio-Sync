@@ -84,6 +84,8 @@ Notes Sync is one-way unless explicitly enabled. Its writing operations also use
 ```
 
 Run `~/.config/mybrewfolio-sync/sync notes help` for the complete Notes command reference.
+Normal outgoing Notes updates do not create a Latest Backup automatically; run `sync notes backup`
+whenever you want one. A restore still creates a fresh Latest Backup before it changes the machine.
 
 ## Security, Networking, and Manual Automation
 

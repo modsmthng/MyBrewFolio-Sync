@@ -38,13 +38,14 @@ When items were not synchronized, the app directs users first to MyBrewFolio.com
 with one confirmed bulk action. Shot and Notes conflicts are reviewed in the affected Brew; profile
 conflicts remain on the Not synchronized page.
 
-Optional **Two-way Notes Sync** is limited to exact, already mapped GaggiMate shots. Activation
+Optional **Two-way Notes Sync** is limited to exact, synchronized GaggiMate shots. Activation
 creates the protected **First Backup** first. If existing MyBrewFolio and GaggiMate Notes differ,
 MyBrewFolio is preselected and every choice remains editable before any machine write. The app
-rechecks the machine copy immediately before writing, verifies it afterwards, and creates a
-**Latest Backup** before later outgoing write batches. Both backup slots can be downloaded on the
-MyBrewFolio Account page. Restore is preview-first and applies only the explicitly confirmed
-selection from the desktop app or headless CLI.
+rechecks the machine copy immediately before writing and verifies it afterwards. **Latest Backup**
+is created from the manual button or CLI command, not automatically for normal outgoing writes.
+Both backup slots can be downloaded on the MyBrewFolio Account page. Restore is preview-first,
+creates a fresh Latest Backup first, and applies only the explicitly confirmed selection from the
+desktop app or headless CLI.
 
 ## Code quality
 https://sonarcloud.io/summary/new_code?id=modsmthng_MyBrewFolio-Sync&branch=main 

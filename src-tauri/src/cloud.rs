@@ -82,6 +82,14 @@ async fn log_http_failure(context: &str, response: Response) {
     eprintln!("{context}: HTTP {status} {detail}");
 }
 
+fn companion_capabilities() -> Value {
+    json!({
+        "profileStoreBridge": 2,
+        "canonicalNotesHash": 1,
+        "twoWayNotesProtocol": 2,
+    })
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PendingOAuth {
     pub verifier: String,
@@ -361,7 +369,7 @@ impl CloudClient {
                 "name": name,
                 "platform": platform,
                 "appVersion": app_version,
-                "capabilities": { "profileStoreBridge": 2, "canonicalNotesHash": 1 }
+                "capabilities": companion_capabilities()
             }))
             .send()
             .await
@@ -683,7 +691,7 @@ impl CloudClient {
             .json(&json!({
                 "appVersion": env!("CARGO_PKG_VERSION"), "machineReachable": machine_reachable,
                 "lastSyncAt": last_sync_at, "lastErrorCode": error,
-                "capabilities": { "profileStoreBridge": 2, "canonicalNotesHash": 1 }
+                "capabilities": companion_capabilities()
             }))
             .send()
             .await
@@ -1179,6 +1187,13 @@ mod tests {
             requests
                 .iter()
                 .filter(|request| request.contains("canonicalNotesHash"))
+                .count()
+                >= 2
+        );
+        assert!(
+            requests
+                .iter()
+                .filter(|request| request.contains("twoWayNotesProtocol"))
                 .count()
                 >= 2
         );
