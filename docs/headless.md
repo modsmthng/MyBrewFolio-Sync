@@ -20,9 +20,67 @@ The installer creates an owner-only local helper at `~/.config/mybrewfolio-sync/
 ~/.config/mybrewfolio-sync/sync diagnose
 ```
 
+## Two-way Notes Sync
+
+To enable Notes synchronization in both directions, run this command in an interactive terminal:
+
+```sh
+~/.config/mybrewfolio-sync/sync notes enable
+```
+
+The assistant checks the current installation, creates a complete GaggiMate Notes activation
+backup, and counts the differences for matching Brews. Choose **Keep MyBrewFolio Notes for all**,
+**Use GaggiMate Notes for all**, **Custom**, or **Cancel**. For either bulk choice, no JSON file
+is needed. The selected side wins even when its Note is empty, so review the summary before
+answering `y` to `Enable two-way Notes Sync? [y/N]`.
+
+If all matching Notes agree, only the final confirmation is needed. An already-enabled
+installation does not create another backup. The assistant never takes over another
+installation's active or pending Notes Sync. Cancellation does not enable synchronization or
+change Notes; an activation already started may remain pending and its backup is retained.
+Future Notes conflicts are reviewed in the affected Brew in MyBrewFolio.
+
+### Custom choices
+
+**Custom** does not activate synchronization. It creates a private `decisions.json` file inside
+the container containing only differing `sourceKey` values and a `resolution` for each.
+**MyBrewFolio is preselected**, just as on desktop. Change individual resolutions to `gaggimate`
+where desired; keep the file as a JSON array:
+
+```json
+[
+  { "sourceKey": "123:1735689600", "resolution": "mybrewfolio" },
+  { "sourceKey": "124:1735689660", "resolution": "gaggimate" }
+]
+```
+
+The assistant prints the exact backup ID and commands to copy the file to your host, return
+the edited file with the correct container ownership, and activate it using `--confirm`.
+Follow those generated commands; the example source keys above are not your Brew IDs.
+No Note contents are included in this decision file or the assistant's output. Keep the file
+private and remove the host file and generated container decision directory when finished.
+
+### Existing Docker installations
+
+The assistant is available starting with **0.4.7**. Once that image is published, first
+update the container using the commands in [Updating Docker](#updating-docker). Then update
+only the local helper:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scripts/install-headless.sh \
+  | sh -s -- --update-helper
+```
+
+This does not change the Compose file, credentials, encryption key, volume, or running
+container. For a custom installation directory, set `MYBREWFOLIO_SYNC_HOME` on the `sh`
+command. SSH sessions need an interactive terminal (for example, `ssh -t`). Scripts without
+a terminal should continue to use the explicit JSON commands below.
+
 ## Everyday Commands
 
-All data commands write JSON to standard output. Logs and errors are written to standard error. `help`, `--help`, and `-h` work even while the daemon is stopped.
+Data commands write JSON to standard output. The interactive `notes enable` assistant writes
+its prompts to standard error and reads from the terminal. Logs and errors are also written
+to standard error. `help`, `--help`, and `-h` work even while the daemon is stopped.
 
 ```sh
 # List every command, grouped by purpose
@@ -74,12 +132,16 @@ The default duplicate policy is `reuse_matching`. It protects matching library e
 
 Nothing is restored or imported automatically for suppressed matches. `resync preview` is the only recovery starting point; `resync apply` accepts only the reviewed JSON decision file plus `--confirm`.
 
-Notes Sync is one-way unless explicitly enabled. Its writing operations also use preview files and explicit confirmation:
+Notes Sync is one-way unless explicitly enabled. Prefer the assistant under
+[Two-way Notes Sync](#two-way-notes-sync). For scripted or advanced setup, the existing JSON
+commands remain available:
 
 ```sh
+~/.config/mybrewfolio-sync/sync notes activate-preview > notes-preview.json
+# Build a decisions array from the differing items in the preview, and place
+# the reviewed file in the container. Do not pass the entire preview object.
+~/.config/mybrewfolio-sync/sync notes activate BACKUP_ID /data/decisions.json --confirm
 ~/.config/mybrewfolio-sync/sync notes backup
-~/.config/mybrewfolio-sync/sync notes activate-preview > notes-decisions.json
-~/.config/mybrewfolio-sync/sync notes activate BACKUP_ID notes-decisions.json --confirm
 ~/.config/mybrewfolio-sync/sync notes restore-preview BACKUP_ID
 ```
 

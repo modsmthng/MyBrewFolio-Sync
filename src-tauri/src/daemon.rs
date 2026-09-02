@@ -13,6 +13,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
+mod notes_wizard;
+
 fn data_dir() -> PathBuf {
     env::var_os("MYBREWFOLIO_SYNC_DATA_DIR")
         .map(PathBuf::from)
@@ -52,8 +54,10 @@ fn help_text(args: &[String]) -> &'static str {
              reuse-matching protects matching library entries from duplicate import."
         }
         Some("notes") => {
-            "Usage: mybrewfolio-syncd notes <backup|activate-preview|activate|disable|restore-preview|restore>\n\n\
-             Writing actions require their preview JSON and --confirm."
+            "Usage: mybrewfolio-syncd notes <enable|backup|activate-preview|activate|disable|restore-preview|restore>\n\n\
+             notes enable  Interactively back up, review, and enable two-way Notes Sync.\n\
+             notes activate <backup-id> <decisions.json> --confirm  Apply reviewed custom choices.\n\
+             Other writing actions require their preview JSON and --confirm."
         }
         Some("resync") => {
             "Usage: mybrewfolio-syncd resync <preview|apply decisions.json --confirm>\n\n\
@@ -75,7 +79,8 @@ fn help_text(args: &[String]) -> &'static str {
                retry                   Retry failed local items\n\
                disconnect              Remove this installation's connection\n\n\
              Recovery (preview before writing):\n\
-               notes <subcommand>      Back up, enable, restore, or disable Notes Sync\n\
+               notes enable            Interactive two-way Notes Sync setup\n\
+               notes <subcommand>      Back up, restore, or disable Notes Sync\n\
                resync preview|apply    Review suppressed items; apply needs JSON and --confirm\n\n\
              Service:\n\
                daemon                  Run the continuous local synchronization service\n\n\
@@ -108,6 +113,8 @@ fn print_json(value: serde_json::Value) {
 struct ControlRequest {
     command: String,
     args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decisions: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -324,6 +331,26 @@ async fn execute(
     }
 }
 
+async fn execute_control(engine: &SyncEngine, request: ControlRequest) -> Result<Value, String> {
+    if let Some(decisions) = request.decisions {
+        if request.command != "notes"
+            || request.args.len() != 3
+            || request.args[0] != "activate"
+            || request.args[2] != "--confirm"
+        {
+            return Err("Inline decisions require notes activate <backup-id> --confirm.".into());
+        }
+        notes_wizard::validate_decisions(&decisions)?;
+        return engine
+            .activate_headless_notes(&request.args[1], decisions)
+            .await;
+    }
+    if request.command == "notes" && request.args == ["enable-preview"] {
+        return engine.prepare_headless_notes_activation().await;
+    }
+    execute(engine, &request.command, request.args).await
+}
+
 #[cfg(unix)]
 async fn serve_control(engine: Arc<SyncEngine>, socket: PathBuf) -> Result<(), String> {
     if socket.exists() {
@@ -341,7 +368,7 @@ async fn serve_control(engine: Arc<SyncEngine>, socket: PathBuf) -> Result<(), S
             let _ = stream.read_to_end(&mut input).await;
             let response = match serde_json::from_slice::<ControlRequest>(&input) {
                 Ok(request) if request.command != "daemon" => {
-                    match execute(&engine, &request.command, request.args).await {
+                    match execute_control(&engine, request).await {
                         Ok(value) => ControlResponse {
                             ok: true,
                             value: Some(value),
@@ -413,6 +440,19 @@ async fn main() -> ExitCode {
         unreachable!("an empty command was handled as a help request");
     };
     let socket = data_dir().join("control.sock");
+    if command == "notes" && args.first().map(String::as_str) == Some("enable") {
+        if args.len() != 1 {
+            eprintln!("Usage: mybrewfolio-syncd notes enable");
+            return ExitCode::from(64);
+        }
+        return match notes_wizard::run(&socket).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if command != "daemon" {
         #[cfg(unix)]
         match proxy_control(
@@ -420,6 +460,7 @@ async fn main() -> ExitCode {
             &ControlRequest {
                 command: command.clone(),
                 args: args.to_vec(),
+                decisions: None,
             },
         )
         .await
@@ -495,7 +536,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        confirmed, execute, help_text, is_help_request, json_file, ControlRequest, SyncEngine,
+        confirmed, execute, execute_control, help_text, is_help_request, json_file, ControlRequest,
+        SyncEngine,
     };
     #[cfg(unix)]
     use super::{proxy_control, serve_control, ControlResponse};
@@ -607,6 +649,44 @@ mod tests {
             .contains("Usage:"));
     }
 
+    #[tokio::test]
+    async fn control_requests_preserve_legacy_shape_and_validate_inline_confirmation() {
+        let (engine, _directory) = test_engine();
+        let legacy: ControlRequest =
+            serde_json::from_value(serde_json::json!({"command":"health", "args":[]})).unwrap();
+        assert!(legacy.decisions.is_none());
+        assert_eq!(execute_control(&engine, legacy).await.unwrap()["ok"], true);
+        for (args, decisions, expected) in [
+            (
+                vec!["activate", "backup"],
+                serde_json::json!([]),
+                "--confirm",
+            ),
+            (
+                vec!["activate", "backup", "--confirm"],
+                serde_json::json!({}),
+                "Invalid Notes decisions",
+            ),
+        ] {
+            let result = execute_control(
+                &engine,
+                ControlRequest {
+                    command: "notes".into(),
+                    args: args.into_iter().map(str::to_string).collect(),
+                    decisions: Some(decisions),
+                },
+            )
+            .await;
+            assert!(result.unwrap_err().contains(expected));
+        }
+        assert!(
+            execute(&engine, "notes", vec!["enable".into()])
+                .await
+                .is_err(),
+            "a background daemon must never prompt"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn local_control_socket_proxies_requests_and_rejects_invalid_input() {
@@ -622,6 +702,7 @@ mod tests {
             &ControlRequest {
                 command: "health".into(),
                 args: vec![],
+                decisions: None,
             }
         )
         .await
@@ -642,6 +723,7 @@ mod tests {
             &ControlRequest {
                 command: "health".into(),
                 args: vec![],
+                decisions: None,
             },
         )
         .await

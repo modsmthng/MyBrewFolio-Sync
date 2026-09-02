@@ -10,13 +10,18 @@ INSTALL_DIR="${MYBREWFOLIO_SYNC_HOME:-${HOME:?HOME must be set}/.config/mybrewfo
 MACHINE_HOST=""
 START_DAEMON=1
 NON_INTERACTIVE=0
+UPDATE_HELPER=0
 
 usage() {
-  printf '%s\n' "Usage: install-headless.sh [--host HOST] [--no-start] [--non-interactive]"
+  printf '%s\n' "Usage: install-headless.sh [--host HOST] [--no-start] [--non-interactive] | --update-helper"
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --update-helper)
+      UPDATE_HELPER=1
+      shift
+      ;;
     --host)
       [ "$#" -ge 2 ] || { usage >&2; exit 64; }
       MACHINE_HOST="$2"
@@ -40,6 +45,55 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+write_helper() {
+  helper_tmp=$(mktemp "$INSTALL_DIR/.sync-helper.XXXXXX")
+  cat > "$helper_tmp" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+
+INSTALL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ "$#" -eq 0 ]; then
+  set -- help
+fi
+case "$1:${2-}" in
+  help:*|--help:*|-h:*|*:help|*:--help|*:-h)
+    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" run --rm --no-deps sync "$@"
+    ;;
+  notes:enable)
+    if [ "$#" -ne 2 ]; then
+      printf '%s\n' 'Usage: sync notes enable' >&2
+      exit 64
+    fi
+    if [ ! -t 0 ] || [ ! -t 1 ] || [ ! -t 2 ]; then
+      printf '%s\n' 'notes enable requires an interactive terminal. Use notes activate-preview and notes activate <backup-id> <decisions.json> --confirm for scripted setup.' >&2
+      exit 64
+    fi
+    # Compose exec allocates a terminal by default; only scripted commands use -T.
+    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" exec -e "MYBREWFOLIO_SYNC_CLI_INSTALL_DIR=$INSTALL_DIR" sync mybrewfolio-syncd "$@"
+    ;;
+  *)
+    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" exec -T sync mybrewfolio-syncd "$@"
+    ;;
+esac
+EOF
+  chmod 700 "$helper_tmp"
+  mv -f "$helper_tmp" "$INSTALL_DIR/sync"
+}
+
+if [ "$UPDATE_HELPER" -eq 1 ]; then
+  if [ -n "$MACHINE_HOST" ] || [ "$START_DAEMON" -ne 1 ] || [ "$NON_INTERACTIVE" -ne 0 ]; then
+    printf '%s\n' '--update-helper cannot be combined with installation options.' >&2
+    exit 64
+  fi
+  if [ ! -f "$INSTALL_DIR/compose.yaml" ] || [ ! -f "$INSTALL_DIR/sync" ] || [ -L "$INSTALL_DIR/sync" ]; then
+    printf '%s\n' 'No existing installation with a regular helper was found. Set MYBREWFOLIO_SYNC_HOME if you used a custom installation directory.' >&2
+    exit 73
+  fi
+  write_helper
+  printf '%s\n' "Updated helper: $INSTALL_DIR/sync" 'Configuration, credentials, keys, volumes, and running containers were not changed. Update the Docker image separately before using notes enable.'
+  exit 0
+fi
 
 TTY_AVAILABLE=0
 if ( : </dev/tty ) 2>/dev/null; then
@@ -141,24 +195,7 @@ volumes:
   sync-data:
 EOF
 
-cat > "$HELPER_FILE" <<'EOF'
-#!/usr/bin/env sh
-set -eu
-
-INSTALL_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-if [ "$#" -eq 0 ]; then
-  set -- help
-fi
-case "$1:${2-}" in
-  help:*|--help:*|-h:*|*:help|*:--help|*:-h)
-    # This works even if the continuous daemon service is currently stopped.
-    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" run --rm --no-deps sync "$@"
-    ;;
-  *)
-    exec docker compose --project-directory "$INSTALL_DIR" -f "$INSTALL_DIR/compose.yaml" exec -T sync mybrewfolio-syncd "$@"
-    ;;
-esac
-EOF
+write_helper
 chmod 600 "$ENV_FILE" "$COMPOSE_FILE"
 chmod 700 "$HELPER_FILE"
 

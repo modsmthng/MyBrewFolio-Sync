@@ -546,6 +546,84 @@ impl SyncEngine {
         Ok(backup_id)
     }
 
+    #[cfg(feature = "headless")]
+    async fn refresh_notes_activation_status(&self) -> Result<AppStatus, String> {
+        if !self.status().await.connected {
+            return Err(
+                "Connect this installation to MyBrewFolio before enabling Notes Sync.".into(),
+            );
+        }
+        let device_id = self.device_id().map_err(|error| error.to_string())?;
+        let state = self
+            .cloud
+            .state(&device_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let source = &state["source"];
+        let mode = source
+            .get("notes_sync_status")
+            .or_else(|| source.get("notesSyncStatus"));
+        if !matches!(
+            mode.and_then(Value::as_str),
+            Some("one_way" | "activation_pending" | "two_way")
+        ) {
+            return Err(
+                "MyBrewFolio did not return a valid Notes Sync status. Please retry.".into(),
+            );
+        }
+        self.update_from_cloud_state(&state).await;
+        Ok(self.status().await)
+    }
+
+    /// The interactive client must not use a cached status to take over another writer.
+    /// Hold engine locks only during operations, never while waiting for terminal input.
+    #[cfg(feature = "headless")]
+    pub async fn prepare_headless_notes_activation(&self) -> Result<Value, String> {
+        let _sync = self.sync_lock.lock().await;
+        let _machine = self.profile_store_lock.lock().await;
+        let status = self.refresh_notes_activation_status().await?;
+        if status.notes_sync_status == "two_way" {
+            return if status.notes_sync_writer_device_id == status.this_device_id {
+                Ok(serde_json::json!({ "alreadyEnabled": true }))
+            } else {
+                Err(
+                    "Two-way Notes Sync is assigned to another installation. No changes were made."
+                        .into(),
+                )
+            };
+        }
+        if status.notes_sync_status == "activation_pending"
+            && status.notes_sync_target_device_id != status.this_device_id
+        {
+            return Err(
+                "Notes Sync activation is assigned to another installation. No changes were made."
+                    .into(),
+            );
+        }
+        self.begin_two_way_notes_activation()
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(feature = "headless")]
+    pub async fn activate_headless_notes(
+        &self,
+        backup_id: &str,
+        decisions: Value,
+    ) -> Result<Value, String> {
+        let _sync = self.sync_lock.lock().await;
+        let _machine = self.profile_store_lock.lock().await;
+        let status = self.refresh_notes_activation_status().await?;
+        if status.notes_sync_status != "activation_pending"
+            || status.notes_sync_target_device_id != status.this_device_id
+        {
+            return Err("Notes Sync activation is no longer assigned to this installation. Run notes enable again.".into());
+        }
+        self.activate_two_way_notes(backup_id, decisions)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn begin_two_way_notes_activation(&self) -> Result<Value, EngineError> {
         let device_id = self.device_id()?;
         let status = self.status.read().await.clone();
@@ -2980,6 +3058,82 @@ mod tests {
 
         assert_eq!(backup_id, "backup-1");
         assert_eq!(preview["restoreItems"][0]["sourceKey"], "1:1735689600");
+    }
+
+    #[cfg(feature = "headless")]
+    #[tokio::test]
+    async fn headless_activation_uses_fresh_status_and_never_takes_over_another_writer() {
+        for (mode, device, expected) in [
+            ("two_way", "device-1", "already"),
+            ("two_way", "another-device", "another installation"),
+            (
+                "activation_pending",
+                "another-device",
+                "another installation",
+            ),
+            ("unknown", "device-1", "valid Notes Sync status"),
+        ] {
+            let (mut engine, _directory) = test_engine();
+            connect_test_engine(&engine);
+            engine.status.write().await.connected = true;
+            let body = json!({"source": {"notes_sync_status": mode,
+                "notes_sync_writer_device_id": device, "notes_sync_target_device_id": device}})
+            .to_string();
+            // Exactly one read is served. No request/backup endpoints are available.
+            let api_url = cloud_server(vec![&body]).await;
+            configure_test_cloud(&mut engine, &api_url);
+            assert_eq!(engine.status().await.notes_sync_status, "one_way");
+            let result = engine.prepare_headless_notes_activation().await;
+            if expected == "already" {
+                assert_eq!(result.unwrap(), json!({"alreadyEnabled": true}));
+            } else {
+                assert!(result.unwrap_err().contains(expected));
+            }
+        }
+        let (engine, _directory) = test_engine();
+        assert!(engine
+            .prepare_headless_notes_activation()
+            .await
+            .unwrap_err()
+            .contains("Connect this installation"));
+    }
+
+    #[cfg(feature = "headless")]
+    #[tokio::test]
+    async fn headless_activation_prepares_backup_and_confirms_only_its_pending_assignment() {
+        let (mut engine, _directory) = test_engine();
+        connect_test_engine(&engine);
+        engine.status.write().await.connected = true;
+        engine
+            .store
+            .set_setting("machine_host", &gaggimate_server().await)
+            .unwrap();
+        let api_url = cloud_server(vec![
+            r#"{"source":{"notes_sync_status":"one_way"}}"#,
+            "{}", r#"{"backup":{"id":"activation-backup"}}"#, "{}", "{}",
+            r#"{"items":[]}"#,
+            r#"{"source":{"notes_sync_status":"activation_pending","notes_sync_target_device_id":"device-1"}}"#,
+            r#"{"status":"two_way"}"#,
+            r#"{"source":{"notes_sync_status":"two_way","notes_sync_writer_device_id":"device-1"}}"#,
+        ]).await;
+        configure_test_cloud(&mut engine, &api_url);
+        let preview = engine.prepare_headless_notes_activation().await.unwrap();
+        assert_eq!(preview["backupId"], "activation-backup");
+        assert_eq!(
+            engine
+                .activate_headless_notes("activation-backup", json!([]))
+                .await
+                .unwrap()["status"],
+            "two_way"
+        );
+
+        let api_url = cloud_server(vec![r#"{"source":{"notes_sync_status":"activation_pending","notes_sync_target_device_id":"another-device"}}"#]).await;
+        configure_test_cloud(&mut engine, &api_url);
+        assert!(engine
+            .activate_headless_notes("activation-backup", json!([]))
+            .await
+            .unwrap_err()
+            .contains("no longer assigned"));
     }
 
     #[tokio::test]
