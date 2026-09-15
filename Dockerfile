@@ -23,5 +23,6 @@ COPY --from=build /source/src-tauri/target/release/mybrewfolio-syncd /usr/local/
 USER mybrewfolio-sync:mybrewfolio-sync
 VOLUME ["/data"]
 ENV MYBREWFOLIO_SYNC_DATA_DIR=/data
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD mybrewfolio-syncd health
 ENTRYPOINT ["mybrewfolio-syncd"]
 CMD ["daemon"]

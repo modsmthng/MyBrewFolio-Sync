@@ -1,6 +1,6 @@
 # MyBrewFolio Sync
 
-MyBrewFolio Sync is the open-source desktop companion for copying shots, profiles, and notes from
+MyBrewFolio Sync is the open-source desktop and Docker companion for copying shots, profiles, and notes from
 one local GaggiMate to a private MyBrewFolio library. Automatic shot and profile synchronization is
 one-way. Users may separately enable two-way Notes synchronization after a full machine-Notes backup
 and review. A separately confirmed Profile Store installation may save, favorite and select only the
@@ -16,6 +16,10 @@ Track and share brews, quickly complete brew notes with smart suggestions from y
 1. Install MyBrewFolio Sync.
 2. Choose **Connect MyBrewFolio** and confirm sign-in in the normal browser.
 3. Confirm the detected `gaggimate.local` address, or enter a private local IP.
+4. Open **Account → MyBrewFolio Sync** to choose matching preferences and start the first import.
+
+For Docker, start the container and open the connection link in its logs; see
+[the Docker and NAS guide](docs/headless.md).
 
 The application then starts with the computer in the background, checks for new shots every 30
 seconds, compares profiles every five minutes, and catches up after either the computer, machine,
@@ -28,7 +32,7 @@ The optional **Hide app icon from Dock or taskbar** setting keeps the menu bar o
 permanent entry point. On macOS it uses accessory-app mode to hide Sync from the Dock and app
 switcher. On Windows and supported Linux desktops it hides the window from the taskbar or dock.
 
-Before its first import, Sync asks whether matching GaggiMate shots already in MyBrewFolio should
+Before its first import, MyBrewFolio asks whether matching GaggiMate shots already in MyBrewFolio should
 be reused. **Complete resync** can later scan the whole machine, preview recoverable deleted
 machine content and safe duplicate merges, then apply only the user's confirmed choices.
 After applying a resync, Sync refreshes the authoritative cloud state before rebuilding its local
@@ -44,8 +48,7 @@ MyBrewFolio is preselected and every choice remains editable before any machine 
 rechecks the machine copy immediately before writing and verifies it afterwards. **Latest Backup**
 is created from the manual button or CLI command, not automatically for normal outgoing writes.
 Both backup slots can be downloaded on the MyBrewFolio Account page. Restore is preview-first,
-creates a fresh Latest Backup first, and applies only the explicitly confirmed selection from the
-desktop app or headless CLI.
+creates a fresh Latest Backup first, and applies only the explicitly confirmed selection from MyBrewFolio. The advanced headless CLI remains available.
 
 ## Code quality
 https://sonarcloud.io/summary/new_code?id=modsmthng_MyBrewFolio-Sync&branch=main 
@@ -87,20 +90,20 @@ MYBREWFOLIO_SYNC_DEVICE_CALLBACK_URL=https://mybrewfolio.com/v1/sync/device-auth
 MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY=<Tauri updater public key>
 ```
 
-OAuth tokens are stored in the operating-system keychain. SQLite stores settings, the local
-offline/retry queue, cached server state, and bounded diagnostics without notes contents,
-credentials, or the machine address.
+Desktop OAuth tokens are stored in the operating-system keychain. SQLite stores local settings,
+the offline/retry queue and cached server state. Bounded diagnostics omit Notes contents,
+credentials and the machine address.
 
 ## Headless Linux and Docker
 
 `mybrewfolio-syncd` is a Tauri-free Linux binary that shares the desktop application's SyncEngine.
 It provides daemon, one-shot, authentication, status, configuration, Notes, and resync commands
-as JSON-producing CLI operations. The Docker installer asks for the local GaggiMate host, starts
-pairing in the browser, and creates a local `sync` helper, so users do not need to manage Compose
-paths. Docker state is stored under `/data`; tokens are encrypted locally with an installer-created
-32-byte key mounted as a Docker secret instead of an OS keychain. See
-[docs/headless.md](docs/headless.md) for installation, everyday commands, browser pairing, and LAN
-networking guidance.
+as JSON-producing CLI operations. The container generates its key and starts browser pairing
+itself. State persists under `/data`; an external key mount remains optional. The local `sync`
+shortcut is optional too. Matching, Notes activation, backups, restore and resync are managed in
+MyBrewFolio through the shared engine's outgoing action channel. The desktop keeps its local
+connection, status, update and operating-system preferences. See [docs/headless.md](docs/headless.md)
+for Compose, Unraid and Synology installation and existing-installation upgrades.
 
 ## Verification
 
@@ -132,7 +135,7 @@ visible in both Light and Dark appearances. Windows and Linux use the generated,
 ## Security and privacy
 
 - Desktop OAuth tokens are stored in the operating-system keychain. The headless runtime stores
-  them in an encrypted local file whose 32-byte key is mounted as a Docker secret.
+  them in an encrypted local file whose 32-byte key is generated in `/data` or supplied separately.
 - The GaggiMate hostname or local IP remains on the computer.
 - Support and privacy links use a fixed allowlist and open in the operating system's browser.
 - Only explicitly synchronized library content is sent to the MyBrewFolio Sync API.

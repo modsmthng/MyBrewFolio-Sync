@@ -104,6 +104,40 @@ struct CredentialEnvelope {
 }
 
 impl EncryptedFileCredentialStore {
+    /// Generate a private key once. Never replace a missing key for existing credentials.
+    pub fn initialize_key(data: &Path) -> Result<std::path::PathBuf, StoreError> {
+        use std::io::Write;
+        let path = data.join("state.key");
+        if path.exists() {
+            Self::from_key_file(data.join("credentials.enc"), &path)?;
+            return Ok(path);
+        }
+        if data.join("credentials.enc").exists() {
+            return Err(StoreError::InvalidCredentials);
+        }
+        fs::create_dir_all(data).map_err(|_| StoreError::InvalidCredentials)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                let mut key = [0u8; 32];
+                OsRng.fill_bytes(&mut key);
+                file.write_all(&key)
+                    .and_then(|_| file.sync_all())
+                    .map_err(|_| StoreError::InvalidCredentials)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(StoreError::InvalidCredentials),
+        }
+        Self::from_key_file(data.join("credentials.enc"), &path)?;
+        Ok(path)
+    }
+
     /// `key_path` contains either exactly 32 raw bytes or their base64 form.
     pub fn from_key_file(path: impl Into<PathBuf>, key_path: &Path) -> Result<Self, StoreError> {
         let bytes = fs::read(key_path).map_err(|_| StoreError::InvalidCredentials)?;
@@ -209,6 +243,40 @@ mod tests {
     use super::{CredentialStore, EncryptedFileCredentialStore};
     use crate::model::OAuthTokens;
     use base64::{engine::general_purpose::STANDARD, Engine};
+
+    #[test]
+    fn generated_key_survives_reopen_and_never_replaces_a_lost_key() {
+        let directory = tempfile::tempdir().unwrap();
+        let key = EncryptedFileCredentialStore::initialize_key(directory.path()).unwrap();
+        let original = std::fs::read(&key).unwrap();
+        assert_eq!(original.len(), 32);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&key).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let store = EncryptedFileCredentialStore::from_key_file(
+            directory.path().join("credentials.enc"),
+            &key,
+        )
+        .unwrap();
+        store
+            .save_tokens(&OAuthTokens {
+                access_token: "test-access".into(),
+                refresh_token: Some("test-refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .unwrap();
+        EncryptedFileCredentialStore::initialize_key(directory.path()).unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), original);
+        assert_eq!(store.tokens().unwrap().unwrap().access_token, "test-access");
+        std::fs::remove_file(&key).unwrap();
+        assert!(EncryptedFileCredentialStore::initialize_key(directory.path()).is_err());
+        assert!(!key.exists());
+    }
 
     #[test]
     fn encrypted_file_never_contains_token_text() {

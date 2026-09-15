@@ -87,6 +87,7 @@ fn companion_capabilities() -> Value {
         "profileStoreBridge": 2,
         "canonicalNotesHash": 1,
         "twoWayNotesProtocol": 2,
+        "syncControl": 1,
     })
 }
 
@@ -732,6 +733,38 @@ impl CloudClient {
             result,
         )
         .await
+    }
+
+    pub async fn control_request(
+        &self,
+        device_id: &str,
+        path: &str,
+        body: Value,
+    ) -> Result<Value, CloudError> {
+        let response = self
+            .authorized(reqwest::Method::POST, &format!("/v1/sync/control/{path}"))
+            .await?
+            .header("X-MyBrewFolio-Sync-Device", device_id)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            return Err(CloudError::Revoked);
+        }
+        // A dismissed or expired operation no longer needs a saved acknowledgement.
+        if path.ends_with("/complete")
+            && matches!(
+                response.status(),
+                StatusCode::NOT_FOUND | StatusCode::CONFLICT
+            )
+        {
+            return Ok(json!({"discarded":true}));
+        }
+        if !response.status().is_success() {
+            return Err(CloudError::Rejected);
+        }
+        response.json().await.map_err(|_| CloudError::Rejected)
     }
 
     pub async fn revoke(&self, device_id: &str) -> Result<(), CloudError> {

@@ -54,10 +54,10 @@ printf '%s\\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
     env: environment
   });
   assert.equal(nonInteractive.code, 0, nonInteractive.stderr);
-  assert.match(nonInteractive.stdout, /Pair later with: .*sync auth begin/);
+  assert.match(nonInteractive.stdout, /connection link shown in the container logs/);
   assert.equal((await stat(join(installDir, 'sync'))).mode & 0o777, 0o700);
   assert.match(await readFile(join(installDir, '.env'), 'utf8'), /MYBREWFOLIO_SYNC_GAGGIMATE_HOST=192\.168\.1\.42/);
-  assert.match(await readFile(join(installDir, 'compose.yaml'), 'utf8'), /mybrewfolio_sync_state_key/);
+  assert.doesNotMatch(await readFile(join(installDir, 'compose.yaml'), 'utf8'), /secrets:|CREDENTIAL_KEY/);
 
   const helper = await run(join(installDir, 'sync'), ['help'], { env: environment });
   assert.equal(helper.code, 0, helper.stderr);
@@ -85,6 +85,8 @@ printf '%s\\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
   assert.equal(status.code, 0, status.stderr);
   assert.match(await readFile(dockerLog, 'utf8'), /exec -T sync mybrewfolio-syncd status/);
 
+  // Simulate an existing external key; a helper-only update must preserve it.
+  await writeFile(join(installDir, 'state.key'), 'legacy-private-key');
   const retainedNames = ['compose.yaml', '.env', 'state.key'];
   const retained = await Promise.all(retainedNames.map(name => readFile(join(installDir, name))));
   const callsBeforeUpdate = await readFile(dockerLog, 'utf8');
@@ -116,7 +118,8 @@ printf '%s\\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
 
   const installer = await readFile(installerPath, 'utf8');
   assert.match(installer, /GaggiMate host \[gaggimate\.local\]/);
-  assert.match(installer, /Connect your MyBrewFolio account now/);
+  assert.match(installer, /connection link/);
+  assert.doesNotMatch(installer, /openssl rand/);
   assert.match(installer, /<\/dev\/tty/);
   assert.match(installer, /--non-interactive/);
   assert.match(installer, /HELPER_FILE/);

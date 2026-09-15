@@ -997,13 +997,11 @@ mod desktop {
         let restart_handle = app.clone();
         let restart_store = store.inner().clone();
         tauri::async_runtime::spawn(async move {
-            if schedule == RestartSchedule::WaitForSync {
-                while restart_engine.status().await.syncing {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-            }
+            let _pause = restart_engine.pause_operations().await;
             let _ = restart_store.remove_setting(UPDATE_RESTART_VERSION);
             restart_handle.request_restart();
+            // Keep the engine paused until the application actually exits.
+            std::future::pending::<()>().await;
         });
         Ok(status)
     }
@@ -1212,6 +1210,11 @@ mod desktop {
                         .await;
                         tokio::time::sleep(Duration::from_secs(60 * 60)).await;
                     }
+                });
+
+                let control_engine = engine.clone();
+                tauri::async_runtime::spawn(async move {
+                    control_engine.run_control_worker().await;
                 });
 
                 let bridge_engine = engine.clone();

@@ -22,11 +22,12 @@ fn data_dir() -> PathBuf {
 }
 
 fn key_path() -> Result<PathBuf, String> {
-    env::var_os("MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            "MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE must point to a 32-byte Docker secret".into()
-        })
+    if let Some(path) = env::var_os("MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+    EncryptedFileCredentialStore::initialize_key(&data_dir()).map_err(|_| {
+        "Cannot initialize the private state key. Check /data permissions. Existing credentials require their original key; mount it with MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE.".into()
+    })
 }
 
 fn usage() -> &'static str {
@@ -484,6 +485,33 @@ async fn main() -> ExitCode {
         }
     };
     if command == "daemon" {
+        let pairing_engine = engine.clone();
+        tokio::spawn(async move {
+            let mut last_url = None;
+            loop {
+                match pairing_engine.headless_pairing().await {
+                    Ok(url) => {
+                        if url != last_url {
+                            if let Some(url) = &url {
+                                eprintln!("Connect MyBrewFolio: {url}\nOpen this link in your browser. It expires after 10 minutes.");
+                            }
+                            last_url = url;
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "Account connection unavailable: {error}. Retrying automatically."
+                        );
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let control_engine = engine.clone();
+        tokio::spawn(async move {
+            control_engine.run_control_worker().await;
+        });
         #[cfg(unix)]
         {
             let control_engine = engine.clone();

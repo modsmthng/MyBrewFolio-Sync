@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -22,6 +22,9 @@ use crate::{
     model::{AppStatus, IndexEntry, NoteBackupSummary, SyncObject},
     store::{AppStore, StoreError},
 };
+
+#[path = "control.rs"]
+mod control;
 
 const MAX_SYNC_BATCH_ITEMS: usize = 25;
 // The API accepts 8 MiB batches. Keep a margin so metadata added by a future
@@ -260,6 +263,7 @@ pub struct SyncEngine {
     credentials: Arc<dyn CredentialStore>,
     pending_oauth: Mutex<Option<PendingOAuth>>,
     status: RwLock<AppStatus>,
+    control_lock: Mutex<()>,
     sync_lock: Mutex<()>,
     profile_store_lock: Mutex<()>,
 }
@@ -408,13 +412,30 @@ impl SyncEngine {
                 note_backups: Vec::new(),
                 issues,
             }),
+            control_lock: Mutex::new(()),
             sync_lock: Mutex::new(()),
             profile_store_lock: Mutex::new(()),
         })
     }
 
     pub async fn status(&self) -> AppStatus {
-        self.status.read().await.clone()
+        let mut status = self.status.read().await.clone();
+        // Cancelled futures drop their locks even when they cannot clear the cached flag.
+        status.syncing = self.control_lock.try_lock().is_err()
+            || self.sync_lock.try_lock().is_err()
+            || self.profile_store_lock.try_lock().is_err();
+        status
+    }
+
+    /// Wait for work, including durable action acknowledgements, then prevent new
+    /// machine operations until these guards are dropped (or the app exits).
+    pub async fn pause_operations(
+        &self,
+    ) -> (MutexGuard<'_, ()>, MutexGuard<'_, ()>, MutexGuard<'_, ()>) {
+        let control = self.control_lock.lock().await;
+        let sync = self.sync_lock.lock().await;
+        let machine = self.profile_store_lock.lock().await;
+        (control, sync, machine)
     }
 
     /// Returns local, read-only diagnostics. This intentionally reports the
@@ -546,7 +567,6 @@ impl SyncEngine {
         Ok(backup_id)
     }
 
-    #[cfg(feature = "headless")]
     async fn refresh_notes_activation_status(&self) -> Result<AppStatus, String> {
         if !self.status().await.connected {
             return Err(
@@ -577,7 +597,6 @@ impl SyncEngine {
 
     /// The interactive client must not use a cached status to take over another writer.
     /// Hold engine locks only during operations, never while waiting for terminal input.
-    #[cfg(feature = "headless")]
     pub async fn prepare_headless_notes_activation(&self) -> Result<Value, String> {
         let _sync = self.sync_lock.lock().await;
         let _machine = self.profile_store_lock.lock().await;
@@ -605,7 +624,6 @@ impl SyncEngine {
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(feature = "headless")]
     pub async fn activate_headless_notes(
         &self,
         backup_id: &str,
@@ -841,17 +859,27 @@ impl SyncEngine {
     }
 
     pub async fn begin_device_oauth(&self) -> Result<DeviceAuthorizationInfo, EngineError> {
+        let _auth = self.pending_oauth.lock().await;
         let (info, pending) = self.cloud.begin_device_authorization().await?;
+        self.store.remove_setting("headless_pairing_disabled")?;
+        self.store.set_setting(
+            "device_auth_expires",
+            &(Utc::now().timestamp() + info.expires_in as i64).to_string(),
+        )?;
+        self.store
+            .set_setting("device_auth_url", &info.verification_uri)?;
         let value = serde_json::to_string(&pending).map_err(|_| StoreError::InvalidCredentials)?;
         self.credentials.save_pending_device_authorization(&value)?;
         Ok(info)
     }
 
     pub async fn poll_device_oauth(&self) -> Result<bool, EngineError> {
-        let value = self
-            .credentials
-            .pending_device_authorization()?
-            .ok_or(EngineError::OAuthState)?;
+        let _auth = self.pending_oauth.lock().await;
+        let value = match self.credentials.pending_device_authorization()? {
+            Some(value) => value,
+            None if self.status().await.connected => return Ok(true),
+            None => return Err(EngineError::OAuthState),
+        };
         let pending = serde_json::from_str::<PendingDeviceAuthorization>(&value)
             .map_err(|_| StoreError::InvalidCredentials)?;
         if self
@@ -1960,6 +1988,7 @@ impl SyncEngine {
                 // revoked installation cannot keep presenting itself as linked.
                 self.credentials.delete_tokens()?;
                 self.store.clear_account_data()?;
+                self.store.set_setting("headless_pairing_disabled", "1")?;
                 let host = self
                     .store
                     .setting("machine_host")?
@@ -2024,6 +2053,8 @@ impl SyncEngine {
         };
         let credentials_removed = self.credentials.delete_tokens().is_ok();
         self.store.clear_account_data()?;
+        self.credentials.delete_pending_device_authorization()?;
+        self.store.set_setting("headless_pairing_disabled", "1")?;
         let host = self
             .store
             .setting("machine_host")?
@@ -2368,6 +2399,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verifies_restoring_empty_notes_against_firmware_defaults() {
+        let (engine, _directory) = test_engine();
+        let defaults = json!({"id":"1", "rating":0, "notes":"", "balanceTaste":"balanced"});
+        let (host, _state) = notes_write_server(defaults, 0, true, None).await;
+        let local = GaggiMateClient::new(&host).unwrap();
+        let result = engine
+            .write_and_verify_notes(&local, 1, &hash_value(&json!({})), &json!({}))
+            .await
+            .unwrap();
+        assert!(matches!(result, NotesWriteOutcome::Applied(actual) if actual == json!({})));
+    }
+
+    #[tokio::test]
     async fn reports_an_unverified_gaggimate_notes_write_without_false_success() {
         let (engine, _directory) = test_engine();
         let base = json!({ "notes": "before" });
@@ -2624,7 +2668,7 @@ mod tests {
         assert!(!is_terminal_batch_status("retry"));
     }
 
-    fn test_engine() -> (SyncEngine, tempfile::TempDir) {
+    pub(super) fn test_engine() -> (SyncEngine, tempfile::TempDir) {
         let directory = tempfile::tempdir().expect("temporary directory");
         let key_path = directory.path().join("key");
         std::fs::write(&key_path, [3_u8; 32]).expect("key written");
@@ -2642,7 +2686,7 @@ mod tests {
         )
     }
 
-    async fn cloud_server(responses: Vec<&str>) -> String {
+    pub(super) async fn cloud_server(responses: Vec<&str>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("cloud listener");
@@ -2788,7 +2832,7 @@ mod tests {
         format!("127.0.0.1:{}", address.port())
     }
 
-    fn configure_test_cloud(engine: &mut SyncEngine, api_url: &str) {
+    pub(super) fn configure_test_cloud(engine: &mut SyncEngine, api_url: &str) {
         engine.cloud.config = CloudConfig {
             api_url: api_url.into(),
             client_id: "test-client".into(),
@@ -2799,7 +2843,7 @@ mod tests {
         };
     }
 
-    fn connect_test_engine(engine: &SyncEngine) {
+    pub(super) fn connect_test_engine(engine: &SyncEngine) {
         engine
             .credentials
             .save_tokens(&OAuthTokens {

@@ -143,7 +143,6 @@ docker compose version >/dev/null 2>&1 || {
 umask 077
 mkdir -p "$INSTALL_DIR"
 chmod 700 "$INSTALL_DIR"
-KEY_FILE="$INSTALL_DIR/state.key"
 COMPOSE_FILE="$INSTALL_DIR/compose.yaml"
 ENV_FILE="$INSTALL_DIR/.env"
 HELPER_FILE="$INSTALL_DIR/sync"
@@ -154,19 +153,8 @@ if [ -e "$COMPOSE_FILE" ]; then
   exit 73
 fi
 
-if [ ! -f "$KEY_FILE" ]; then
-  command -v openssl >/dev/null 2>&1 || {
-    printf '%s\n' "OpenSSL is required to create the local state key." >&2
-    exit 69
-  }
-  openssl rand -base64 32 > "$KEY_FILE"
-  chmod 600 "$KEY_FILE"
-  printf '%s\n' "Created local encryption key: $KEY_FILE"
-fi
-
 cat > "$ENV_FILE" <<EOF
 MYBREWFOLIO_SYNC_GAGGIMATE_HOST=$MACHINE_HOST
-MYBREWFOLIO_SYNC_STATE_KEY=$KEY_FILE
 EOF
 
 cat > "$COMPOSE_FILE" <<'EOF'
@@ -176,9 +164,6 @@ services:
     restart: unless-stopped
     environment:
       MYBREWFOLIO_SYNC_GAGGIMATE_HOST: ${MYBREWFOLIO_SYNC_GAGGIMATE_HOST}
-      MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE: /run/secrets/mybrewfolio_sync_state_key
-    secrets:
-      - mybrewfolio_sync_state_key
     volumes:
       - sync-data:/data
     healthcheck:
@@ -186,10 +171,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-secrets:
-  mybrewfolio_sync_state_key:
-    file: ${MYBREWFOLIO_SYNC_STATE_KEY}
 
 volumes:
   sync-data:
@@ -209,35 +190,7 @@ fi
 
 docker compose --project-directory "$INSTALL_DIR" -f "$COMPOSE_FILE" up -d
 
-if [ "$NON_INTERACTIVE" -eq 1 ]; then
-  printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
-  exit 0
-fi
-
-if [ "$TTY_AVAILABLE" -ne 1 ]; then
-  printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
-  exit 0
-fi
-
-pair_answer=$(read_from_tty "Connect your MyBrewFolio account now? [Y/n]: ") || {
-  printf '%s\n' "Could not read the pairing choice. Pair later with: $HELPER_FILE auth begin" >&2
-  exit 0
-}
-case "$pair_answer" in
-  n|N|no|NO|No)
-    printf '%s\n' "Installation is ready. Pair later with: $HELPER_FILE auth begin"
-    ;;
-  *)
-    printf '%s\n' "Open the authorization URL below in your browser, then finish sign-in."
-    if ! "$HELPER_FILE" auth begin; then
-      printf '%s\n' "Could not begin pairing. Try again later with: $HELPER_FILE auth begin" >&2
-      exit 1
-    fi
-    printf '%s\n' "Waiting for browser authorization (up to 10 minutes)..."
-    if ! "$HELPER_FILE" auth wait; then
-      printf '%s\n' "Pairing was not completed. The installation is intact; retry with: $HELPER_FILE auth begin" >&2
-      exit 1
-    fi
-    printf '%s\n' "MyBrewFolio Sync is connected. Check it any time with: $HELPER_FILE diagnose"
-    ;;
-esac
+printf '%s\n' "Sync creates its private state inside the data volume. Open the connection link shown in the container logs."
+printf '%s\n' "View logs: docker compose --project-directory \"$INSTALL_DIR\" -f \"$COMPOSE_FILE\" logs -f sync"
+printf '%s\n' "After connecting, manage Sync at https://mybrewfolio.com/account/sync"
+docker compose --project-directory "$INSTALL_DIR" -f "$COMPOSE_FILE" logs --tail 20 sync

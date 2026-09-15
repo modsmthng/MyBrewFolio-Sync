@@ -1,7 +1,7 @@
 {
   "name": "@mybrewfolio/sync",
   "private": true,
-  "version": "0.4.7",
+  "version": "0.4.8",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -13,7 +13,8 @@
     "test:coverage": "vitest run --coverage",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "test:headless-container": "node tests/verify-headless-container.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

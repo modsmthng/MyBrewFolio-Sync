@@ -15,7 +15,7 @@ vi.mock('@tauri-apps/api/app', () => ({ getVersion }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
 vi.mock('@tauri-apps/plugin-deep-link', () => ({ getCurrent, onOpenUrl }));
 
-import { App, Dashboard, Setup, activationDecisions, formatDate, resyncDecisions, statusTone } from './main.jsx';
+import { App, Dashboard, Setup, formatDate, statusTone } from './main.jsx';
 
 const status = {
   connected: true, machineHost: 'gaggimate.local', machineReachable: true, syncing: false,
@@ -53,23 +53,6 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('dashboard decisions', () => {
-  it('keeps MyBrewFolio preselected only for differing activation Notes', () => {
-    expect(activationDecisions({ items: [
-      { sourceKey: 'one', differs: true },
-      { sourceKey: 'two', differs: false },
-    ] })).toEqual({ one: 'mybrewfolio' });
-  });
-
-  it('creates the safe default resync decisions', () => {
-    expect(resyncDecisions({
-      restoreItems: [{ id: 'restore-one' }],
-      duplicates: [{ mapping_id: 'mapping', keep_shot_id: 'old', remove_shot_id: 'new', notes_conflict: true }],
-    })).toEqual({
-      restoreIds: ['restore-one'],
-      duplicateDecisions: [{ mappingId: 'mapping', keepShotId: 'old', removeShotId: 'new', selected: true, notesResolution: '' }],
-    });
-  });
-
   it('uses deterministic status priority', () => {
     expect(statusTone('sync', 'Saved', 'success', 'Error')).toBe('working');
     expect(statusTone('', 'Saved', 'success', 'Error')).toBe('success');
@@ -105,79 +88,20 @@ describe('Sync interface', () => {
   it('renders normal controls and asks before disconnecting', () => {
     render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
     expect(screen.getByText('10')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Set up two-way Notes Sync' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Open Sync settings' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect account' }));
     expect(screen.getByText('Disconnect this computer?')).toBeTruthy();
   });
 
-  it('opens Notes activation with MyBrewFolio preselected', async () => {
-    const activation = { ...status, notesSyncStatus: 'activation_pending', notesSyncTargetDeviceId: 'this-device' };
-    invoke.mockImplementation(command => {
-      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
-      if (command === 'begin_two_way_notes_activation') return Promise.resolve({ backupId: 'backup', items: [{ sourceKey: 'shot:1', displayName: 'Shot 1', differs: true }] });
-      return Promise.resolve(undefined);
-    });
-    render(<Dashboard status={activation} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
-    await vi.waitFor(() => expect(screen.getByText('Review Notes to sync')).toBeTruthy());
-    expect(screen.getByRole('combobox', { name: 'Notes source for Shot 1' }).value).toBe('mybrewfolio');
+  it('keeps Notes activation in MyBrewFolio even when requested remotely', async () => {
+    render(<Dashboard status={{ ...status, notesSyncStatus: 'activation_pending', notesSyncTargetDeviceId: 'this-device' }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'accountSync' }));
+    expect(invoke).not.toHaveBeenCalledWith('begin_two_way_notes_activation');
+    expect(screen.queryByRole('button', { name: 'Complete resync' })).toBeNull();
   });
 
-  it('restores only available Notes from a selected backup', async () => {
-    const backup = { id: 'backup-1', slot: 'latest', itemCount: 2, createdAt: '2026-08-20T10:00:00Z' };
-    invoke.mockImplementation(command => {
-      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
-      if (command === 'get_hide_app_icon') return Promise.resolve(false);
-      if (command === 'check_update') return Promise.resolve('up-to-date');
-      if (command === 'preview_notes_restore') return Promise.resolve({ items: [
-        { source_key: 'shot:1', available: true },
-        { sourceKey: 'shot:2', available: false },
-      ] });
-      if (command === 'restore_notes_backup') return Promise.resolve({ applied: 1, skipped: 1 });
-      return Promise.resolve(undefined);
-    });
-    render(<Dashboard status={{ ...status, noteBackups: [backup] }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-    await vi.waitFor(() => expect(screen.getByText('Restore GaggiMate Notes')).toBeTruthy());
-    expect(screen.getByRole('checkbox', { name: 'shot:2 · no longer available on this GaggiMate' }).disabled).toBe(true);
-    fireEvent.click(screen.getByRole('button', { name: 'Restore selected Notes' }));
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('restore_notes_backup', {
-      backupId: 'backup-1', sourceKeys: ['shot:1'],
-    }));
-    await vi.waitFor(() => expect(screen.getByText('Notes restore finished. 1 restored, 1 skipped.')).toBeTruthy());
-  });
-
-  it('requires a Notes decision and a second confirmation before applying a resync', async () => {
-    invoke.mockImplementation(command => {
-      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
-      if (command === 'get_hide_app_icon') return Promise.resolve(false);
-      if (command === 'check_update') return Promise.resolve('up-to-date');
-      if (command === 'preview_complete_resync') return Promise.resolve({
-        restoreItems: [{ id: 'restore-1', kind: 'shot', sourceKey: 'shot:1' }],
-        duplicates: [{ mapping_id: 'mapping-1', keep_shot_id: 'existing', remove_shot_id: 'copy', keep_name: 'Existing', remove_name: 'Copy', mapped_name: 'Shot 1', notes_conflict: true }],
-        ambiguousDuplicates: [{ mapping_id: 'ambiguous', mapped_name: 'Shot 2', candidate_count: 2 }],
-      });
-      if (command === 'apply_complete_resync') return Promise.resolve({ restored: 1, merged: 1 });
-      return Promise.resolve(undefined);
-    });
-    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
-    fireEvent.click(screen.getByRole('button', { name: 'Complete resync' }));
-    await vi.waitFor(() => expect(screen.getByText('Complete resync preview')).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Apply complete resync' }));
-    expect(screen.getByText('Choose which Notes to keep for every selected Notes conflict.')).toBeTruthy();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Notes resolution for Shot 1' }), { target: { value: 'gaggimate' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Apply complete resync' }));
-    expect(screen.getByText('Confirm restoring 1 selected machine items and merging 1 selected duplicate shots.')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm complete resync' }));
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('apply_complete_resync', {
-      decisions: {
-        restoreItemIds: ['restore-1'],
-        duplicateResolutions: [{ mappingId: 'mapping-1', keepShotId: 'existing', removeShotId: 'copy', notesResolution: 'gaggimate' }],
-      },
-    }));
-    await vi.waitFor(() => expect(screen.getByText('Complete resync finished. 1 restored, 1 duplicates merged.')).toBeTruthy());
-  });
-
-  it('saves first-sync policy and exposes update and startup feedback', async () => {
+  it('opens first-sync preferences in MyBrewFolio and preserves update and startup feedback', async () => {
     invoke.mockImplementation(command => {
       if (command === 'get_autostart_status') return Promise.resolve({ enabled: false, requiresWindowsSettings: true, blockedByPolicy: false, migrationAvailable: true });
       if (command === 'get_hide_app_icon') return Promise.resolve(false);
@@ -190,8 +114,9 @@ describe('Sync interface', () => {
     expect(screen.getByText('Update 0.3.13 is available.')).toBeTruthy();
     expect(screen.getByText(/Windows needs a one-time confirmation/)).toBeTruthy();
     expect(screen.getByText(/Windows has disabled startup/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Save and start first sync' }));
-    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('configure_sync', { reuseMatching: false }));
+    expect(screen.getByText(/Finish choosing your Sync preferences/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'accountSync' }));
     fireEvent.click(screen.getByRole('button', { name: 'Install update' }));
     await vi.waitFor(() => expect(screen.getByText('MyBrewFolio Sync is up to date.')).toBeTruthy());
   });
@@ -271,8 +196,6 @@ describe('Sync interface', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Hide app icon from Dock or taskbar' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('set_hide_app_icon', { hidden: true }));
     await vi.waitFor(() => expect(screen.getByText('App icon hidden. Use the menu bar or tray icon to open Sync.')).toBeTruthy());
-    fireEvent.click(screen.getByRole('button', { name: 'Explain complete resync' }));
-    expect(screen.getByText(/Reads the complete GaggiMate library again/)).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Support' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'syncHelp' }));
   });

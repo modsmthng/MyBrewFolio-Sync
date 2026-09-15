@@ -67,6 +67,12 @@ impl AppStore {
                lease_token text not null,
                payload text not null,
                updated_at integer not null
+             );
+             create table if not exists control_completions (
+               operation_id text primary key,
+               lease_token text not null,
+               payload text not null,
+               updated_at integer not null
              );",
         )?;
         Ok(Self {
@@ -282,6 +288,53 @@ impl AppStore {
         Ok(())
     }
 
+    pub fn queue_control_completion(
+        &self,
+        operation_id: &str,
+        lease_token: &str,
+        payload: &Value,
+    ) -> Result<(), StoreError> {
+        let payload = serde_json::to_string(payload).map_err(|_| StoreError::InvalidCredentials)?;
+        self.connection.lock().map_err(|_| StoreError::InvalidCredentials)?.execute(
+            "insert into control_completions (operation_id, lease_token, payload, updated_at)
+             values (?1, ?2, ?3, unixepoch())
+             on conflict (operation_id) do update
+               set lease_token = excluded.lease_token, payload = excluded.payload, updated_at = unixepoch()",
+            params![operation_id, lease_token, payload],
+        )?;
+        Ok(())
+    }
+
+    pub fn control_completions(&self, limit: usize) -> Result<Vec<BridgeCompletion>, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let mut statement = connection.prepare(
+            "select operation_id, lease_token, payload from control_completions order by updated_at limit ?1",
+        )?;
+        let rows = statement.query_map([limit as i64], |row| {
+            let payload: String = row.get(2)?;
+            Ok(BridgeCompletion {
+                operation_id: row.get(0)?,
+                lease_token: row.get(1)?,
+                payload: serde_json::from_str(&payload).unwrap_or(Value::Null),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn remove_control_completion(&self, operation_id: &str) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute(
+                "delete from control_completions where operation_id = ?1",
+                [operation_id],
+            )?;
+        Ok(())
+    }
+
     pub fn failures(&self) -> Result<Vec<crate::model::SyncIssue>, StoreError> {
         let connection = self
             .connection
@@ -366,6 +419,7 @@ impl AppStore {
                 "delete from pending_objects;
                  delete from sync_failures;
                  delete from bridge_completions;
+                 delete from control_completions;
                  delete from settings where key not in ('machine_host', 'installation_id', 'hide_app_icon');",
             )?;
         Ok(())

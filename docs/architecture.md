@@ -39,8 +39,8 @@ The Store package uses a small startup launcher because MSIX startup tasks canno
 the main executable.
 
 The desktop adapter stores OAuth tokens in the operating-system keychain. The headless adapter
-stores them in an encrypted file in its data directory; its 32-byte encryption key is supplied from
-a key file (normally mounted as a Docker secret) and is never sent to MyBrewFolio. SQLite stores
+stores them in an encrypted file in its data directory; its 32-byte encryption key is generated inside `/data` with owner-only permissions by default
+or supplied through `MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE` and is never sent to MyBrewFolio. SQLite stores
 settings, cached server state, source hashes, and validated content waiting for an upload retry in
 both runtimes. A running daemon accepts local CLI requests through a Unix socket only; it does not
 open a network port.
@@ -69,11 +69,10 @@ automatic reimport but does not modify the GaggiMate.
 ## Two-way Notes synchronization
 
 Two-way Notes synchronization is off by default and is bound to one active writer installation.
-Activation starts with a complete, finalized machine-Notes backup, shown as **First Backup** in the
-desktop interface. The client then obtains an activation preview containing the differences and the
+Activation starts with a complete, finalized machine-Notes backup, shown as **First Backup** in MyBrewFolio. The client then obtains an activation preview containing the differences and the
 proposed decisions; existing MyBrewFolio Notes are preselected. A user must review those decisions
 before writing is enabled. In the headless CLI, activation accepts only that reviewed JSON decision
-file and an explicit `--confirm`; the desktop shows the equivalent confirmation in its interface.
+file and an explicit `--confirm`; the shared web interface provides preview and confirmation for both runtimes.
 
 When Notes Sync is active, the server issues short-lived, idempotent operations containing the
 expected machine hash. Before `req:history:notes:save`, the client reads and compares the current
@@ -103,6 +102,35 @@ unambiguous later Sync copy into the older MyBrewFolio shot. Differing notes req
 choice; ambiguous matches remain untouched. After apply, the client discards the old scan state
 and refreshes the authoritative server state before uploading the restored inventory.
 
+## Shared controls in MyBrewFolio
+
+`engine.rs` includes `control.rs` in every runtime. MyBrewFolio renders the common workflows;
+Tauri retains local pairing, host configuration, status, disconnect, updates and OS preferences.
+Advanced CLI commands delegate to the same engine. Capability `syncControl: 1` is announced on
+registration and heartbeat, including upgrades that keep their existing device ID.
+
+The worker claims only enumerated actions for its authenticated account/device, using an outgoing
+25-second long poll and separate wake keys on the existing bridge notification broker. It opens no
+network listener and accepts no shell commands, paths or arbitrary URLs. Running actions hold a
+renewable lease and serialize machine work with the ordinary sync and Profile Store workers.
+A durable interruption record is saved before execution and replaced by the result after execution.
+Only acknowledgements are retried: a crashed restore or resync is never automatically replayed.
+
+Destructive actions require a completed preview no older than 15 minutes and explicit account
+confirmation. The API binds the selected items to that device and preview and permits a single
+apply. Restore takes an operation-specific copy of the selected backup items before the normal
+Latest Backup is rotated. The worker rechecks machine hashes, takes a safety backup, verifies each
+write, and checks the writer authorization again before each write. Disabling Notes or revoking
+the device prevents further authorized writes. Web diagnostics include only counts and availability;
+local diagnostics remain available through the CLI.
+
+Roll out hosted API migration `038_sync_control.sql` and the API first. Coordinate the remaining
+releases: publish the new Docker image before the standalone installation guide, and make the web
+controls available before offering the new desktop packages. Existing clients keep their API paths and continue syncing; the web requests
+an update for clients without `syncControl`. The standalone Docker configuration requires the new
+image; retain original external-key mounts on existing installations. Source changes do not update
+already published `latest` images or installed desktop apps.
+
 ## Public server contract
 
 The companion uses only authenticated endpoints below `/v1/sync`:
@@ -120,6 +148,8 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 | `GET /v1/sync/notes/activation-preview/:id` | Return the activation differences and proposed user decisions |
 | `POST /v1/sync/notes/outbound/claim`, `POST /:id/result` | Claim and acknowledge short-lived compare-before-write operations |
 | `GET /v1/sync/notes/backups/:id/items`, `POST /:id/restore-results` | Read backup contents and report verified restore results |
+| `POST /v1/sync/control/operations/claim`, `POST /:id/renew`, `POST /:id/complete` | Claim and acknowledge account-requested Sync actions |
+| `POST /v1/sync/control/operations/:id/restore-items`, `POST /:id/restore-results` | Read the selected restore snapshot and report verified results |
 | `POST /v1/sync/heartbeat` | Report app and machine availability without a local address |
 | `POST /v1/sync/conflicts/:itemId/resolve` | Resolve a synchronization conflict |
 | `DELETE /v1/sync/devices/:id` | Disconnect an installation |
@@ -143,8 +173,8 @@ Desktop bundles have a persistent startup check and then check the signed update
 once per 24 hours. When a new version is available, Sync opens its main window and presents an
 English update dialog. Choosing `Later` suppresses only that dialog until the next daily check;
 the Updates settings area continues to show the available version. Installation is confirmed before
-Sync presents `Restart Sync`. A requested restart waits for an active synchronization cycle to
-finish, leaving unfinished queue entries in the persistent local queue for the next launch.
+Sync presents `Restart Sync`. A requested restart waits for synchronization, Profile Store work and web actions (including
+their durable acknowledgements), then pauses new machine operations until the app exits, leaving unfinished queue entries in the persistent local queue for the next launch.
 
 Windows has two deliberately separate update channels. The direct GitHub MSI build uses the signed
 MyBrewFolio updater and `latest.json`. The manual `Microsoft Store package` workflow builds the

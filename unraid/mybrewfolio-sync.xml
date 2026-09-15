@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>MyBrewFolio-Sync</Name>
+  <Repository>ghcr.io/modsmthng/mybrewfolio-sync:latest</Repository>
+  <Registry>https://github.com/modsmthng/MyBrewFolio-Sync/pkgs/container/mybrewfolio-sync</Registry>
+  <Network>bridge</Network>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/modsmthng/MyBrewFolio-Sync</Support>
+  <Project>https://mybrewfolio.com</Project>
+  <Overview>Synchronize GaggiMate with MyBrewFolio. Set the machine's LAN IP, start the container, then open the connection link in its Logs. Manage synchronization, Notes and backups in MyBrewFolio. Data and the automatically generated private key persist in appdata. No host helper or port forwarding is required.</Overview>
+  <Category>HomeAutomation:</Category>
+  <WebUI>https://mybrewfolio.com/account/sync</WebUI>
+  <Icon>https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/assets/textlogosync-1024.png</Icon>
+  <ExtraParams>--user=99:100</ExtraParams>
+  <Config Name="Appdata" Target="/data" Default="/mnt/user/appdata/mybrewfolio-sync" Mode="rw" Description="Dedicated persistent Sync data directory. Must be writable by UID 99 / GID 100. Contains the private state key and account connection." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/mybrewfolio-sync</Config>
+  <Config Name="GaggiMate address" Target="MYBREWFOLIO_SYNC_GAGGIMATE_HOST" Default="gaggimate.local" Description="Use the machine's fixed LAN IP when gaggimate.local is unavailable in Docker." Type="Variable" Display="always" Required="true" Mask="false">gaggimate.local</Config>
+</Container>
