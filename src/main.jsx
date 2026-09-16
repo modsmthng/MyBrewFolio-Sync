@@ -8,6 +8,13 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import './style.css';
 
+export const FIRST_SYNCHRONIZATION_MESSAGE =
+  'First synchronization in progress. This may take a few minutes, depending on your history.';
+
+export function firstSynchronizationInProgress(status) {
+  return Boolean(status?.connected && status?.syncing && !status?.lastSyncAt && !status?.lastError);
+}
+
 const initialStatus = {
   connected: false,
   machineHost: 'gaggimate.local',
@@ -380,7 +387,9 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
     ? status.lastError
     : '';
   const visibleStatusMessage = activeSyncActivity
-    ? syncActivityLabels[activeSyncActivity]
+    ? (firstSynchronizationInProgress(status)
+      ? FIRST_SYNCHRONIZATION_MESSAGE
+      : syncActivityLabels[activeSyncActivity])
     : message || engineError;
   const visibleStatusTone = statusTone(activeSyncActivity, message, messageTone, engineError);
   return (

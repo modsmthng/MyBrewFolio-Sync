@@ -15,7 +15,15 @@ vi.mock('@tauri-apps/api/app', () => ({ getVersion }));
 vi.mock('@tauri-apps/api/event', () => ({ listen }));
 vi.mock('@tauri-apps/plugin-deep-link', () => ({ getCurrent, onOpenUrl }));
 
-import { App, Dashboard, Setup, formatDate, statusTone } from './main.jsx';
+import {
+  App,
+  Dashboard,
+  FIRST_SYNCHRONIZATION_MESSAGE,
+  Setup,
+  firstSynchronizationInProgress,
+  formatDate,
+  statusTone,
+} from './main.jsx';
 
 const status = {
   connected: true, machineHost: 'gaggimate.local', machineReachable: true, syncing: false,
@@ -53,6 +61,21 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe('dashboard decisions', () => {
+  it('explains a first synchronization while it is running', () => {
+    expect(FIRST_SYNCHRONIZATION_MESSAGE).toBe(
+      'First synchronization in progress. This may take a few minutes, depending on your history.',
+    );
+    expect(firstSynchronizationInProgress({ ...status, syncing: true })).toBe(true);
+    expect(firstSynchronizationInProgress({ ...status, syncing: true, lastSyncAt: '2026-09-16T00:00:00Z' })).toBe(false);
+    expect(firstSynchronizationInProgress({ ...status, syncing: true, lastError: 'The GaggiMate could not be reached' })).toBe(false);
+
+    const view = render(<Dashboard status={{ ...status, syncing: true }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.getByText(FIRST_SYNCHRONIZATION_MESSAGE)).toBeTruthy();
+
+    view.rerender(<Dashboard status={{ ...status, syncing: true, lastSyncAt: '2026-09-16T00:00:00Z' }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.queryByText(FIRST_SYNCHRONIZATION_MESSAGE)).toBeNull();
+  });
+
   it('uses deterministic status priority', () => {
     expect(statusTone('sync', 'Saved', 'success', 'Error')).toBe('working');
     expect(statusTone('', 'Saved', 'success', 'Error')).toBe('success');

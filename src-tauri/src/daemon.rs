@@ -15,6 +15,18 @@ use tokio::net::{UnixListener, UnixStream};
 
 mod notes_wizard;
 
+const FIRST_SYNCHRONIZATION_MESSAGE: &str =
+    "First synchronization in progress. This may take a few minutes, depending on your history.";
+
+fn first_sync_notice_due(
+    announced: bool,
+    connected: bool,
+    last_sync_at: Option<&str>,
+    last_error: Option<&str>,
+) -> bool {
+    !announced && connected && last_sync_at.is_none() && last_error.is_none()
+}
+
 fn data_dir() -> PathBuf {
     env::var_os("MYBREWFOLIO_SYNC_DATA_DIR")
         .map(PathBuf::from)
@@ -538,8 +550,19 @@ async fn main() -> ExitCode {
                 }
             }
         });
+        let mut first_sync_notice_printed = false;
         loop {
-            if engine.status().await.connected {
+            let status = engine.status().await;
+            if status.connected {
+                if first_sync_notice_due(
+                    first_sync_notice_printed,
+                    status.connected,
+                    status.last_sync_at.as_deref(),
+                    status.last_error.as_deref(),
+                ) {
+                    eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
+                    first_sync_notice_printed = true;
+                }
                 if let Err(error) = engine.sync_once().await {
                     eprintln!("sync error: {error}");
                 }
@@ -564,8 +587,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        confirmed, execute, execute_control, help_text, is_help_request, json_file, ControlRequest,
-        SyncEngine,
+        confirmed, execute, execute_control, first_sync_notice_due, help_text, is_help_request,
+        json_file, ControlRequest, SyncEngine, FIRST_SYNCHRONIZATION_MESSAGE,
     };
     #[cfg(unix)]
     use super::{proxy_control, serve_control, ControlResponse};
@@ -587,6 +610,28 @@ mod tests {
             Arc::new(SyncEngine::open(store, credentials).expect("engine")),
             directory,
         )
+    }
+
+    #[test]
+    fn first_sync_notice_is_emitted_once_without_an_error() {
+        assert_eq!(
+            FIRST_SYNCHRONIZATION_MESSAGE,
+            "First synchronization in progress. This may take a few minutes, depending on your history."
+        );
+        assert!(first_sync_notice_due(false, true, None, None));
+        assert!(!first_sync_notice_due(true, true, None, None));
+        assert!(!first_sync_notice_due(
+            false,
+            true,
+            Some("2026-09-16T00:00:00Z"),
+            None
+        ));
+        assert!(!first_sync_notice_due(
+            false,
+            true,
+            None,
+            Some("The GaggiMate could not be reached")
+        ));
     }
 
     #[test]
