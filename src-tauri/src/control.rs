@@ -31,9 +31,22 @@ impl SyncEngine {
             let info = self.begin_device_oauth().await?;
             return Ok(Some(info.verification_uri));
         }
-        if self.poll_device_oauth().await? {
-            eprintln!("MyBrewFolio connected. Manage Sync at https://mybrewfolio.com/account/sync");
-            return Ok(None);
+        match self.poll_device_oauth().await {
+            Ok(true) => {
+                eprintln!(
+                    "MyBrewFolio connected. Manage Sync at https://mybrewfolio.com/account/sync"
+                );
+                return Ok(None);
+            }
+            Ok(false) => {}
+            Err(EngineError::Cloud(
+                CloudError::DeviceAuthorizationRejected
+                | CloudError::DeviceAuthorizationExchangeFailed,
+            )) => {
+                let info = self.restart_rejected_device_oauth().await?;
+                return Ok(Some(info.verification_uri));
+            }
+            Err(error) => return Err(error),
         }
         Ok(self.store.setting("device_auth_url")?)
     }

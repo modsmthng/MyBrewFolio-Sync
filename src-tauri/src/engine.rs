@@ -480,6 +480,10 @@ impl EngineError {
         match self {
             Self::Cloud(CloudError::NotConfigured) => "SYNC_OAUTH_NOT_CONFIGURED",
             Self::Cloud(CloudError::OAuth) => "SYNC_OAUTH_FAILED",
+            Self::Cloud(CloudError::DeviceAuthorizationRejected) => "SYNC_DEVICE_AUTH_REJECTED",
+            Self::Cloud(CloudError::DeviceAuthorizationExchangeFailed) => {
+                "SYNC_DEVICE_AUTH_EXCHANGE_FAILED"
+            }
             Self::Cloud(CloudError::Revoked) => "SYNC_DEVICE_REVOKED",
             Self::Cloud(CloudError::Unreachable) => "MYBREWFOLIO_UNREACHABLE",
             Self::Cloud(CloudError::Rejected) => "SYNC_DATA_REJECTED",
@@ -1134,6 +1138,18 @@ impl SyncEngine {
             return Ok(true);
         }
         Ok(false)
+    }
+
+    #[cfg(feature = "headless")]
+    pub async fn restart_rejected_device_oauth(
+        &self,
+    ) -> Result<DeviceAuthorizationInfo, EngineError> {
+        let _auth = self.pending_oauth.lock().await;
+        self.credentials.delete_pending_device_authorization()?;
+        self.store.remove_setting("device_auth_expires")?;
+        self.store.remove_setting("device_auth_url")?;
+        drop(_auth);
+        self.begin_device_oauth().await
     }
 
     async fn register_connected_device(&self) -> Result<(), EngineError> {

@@ -23,6 +23,10 @@ pub enum CloudError {
     NotConfigured,
     #[error("The MyBrewFolio connection could not be completed")]
     OAuth,
+    #[error("The device authorization was rejected or has expired. Run auth begin again.")]
+    DeviceAuthorizationRejected,
+    #[error("The device authorization completed, but the OAuth code exchange failed. Run auth begin again.")]
+    DeviceAuthorizationExchangeFailed,
     #[error("This Sync installation is no longer authorized")]
     Revoked,
     #[error("MyBrewFolio could not be reached")]
@@ -293,6 +297,9 @@ impl CloudClient {
         if response.status() == StatusCode::ACCEPTED {
             return Ok(None);
         }
+        if response.status() == StatusCode::CONFLICT {
+            return Err(CloudError::DeviceAuthorizationRejected);
+        }
         if !response.status().is_success() {
             log_http_failure("device authorization poll", response).await;
             return Err(CloudError::OAuth);
@@ -304,7 +311,11 @@ impl CloudClient {
         }
         let code = result.authorization_code.ok_or(CloudError::OAuth)?;
         self.exchange_authorization_code(&code, &pending.oauth, &self.config.device_redirect_uri)
-            .await?;
+            .await
+            .map_err(|error| match error {
+                CloudError::OAuth => CloudError::DeviceAuthorizationExchangeFailed,
+                other => other,
+            })?;
         Ok(Some(()))
     }
 
@@ -798,7 +809,7 @@ mod tests {
         net::TcpListener,
     };
 
-    use super::{CloudClient, CloudConfig, CredentialStore, OAuthTokens};
+    use super::{CloudClient, CloudConfig, CloudError, CredentialStore, OAuthTokens};
     use crate::store::StoreError;
 
     #[derive(Default)]
@@ -999,6 +1010,56 @@ mod tests {
                 .access_token,
             "access-token"
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_device_pairing_is_reported_without_exchanging_a_token() {
+        let url = response_server(vec![
+            ("201 Created", r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://mybrewfolio.example.test/pair","pollToken":"poll-secret","expiresIn":600}"#),
+            ("409 Conflict", r#"{"error":"Device authorization was rejected or already consumed"}"#),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        let client = client(credentials.clone(), &url);
+
+        let (_, pending) = client
+            .begin_device_authorization()
+            .await
+            .expect("pairing begins");
+        let error = client
+            .poll_device_authorization(&pending)
+            .await
+            .expect_err("rejected pairing is terminal");
+
+        assert!(matches!(error, CloudError::DeviceAuthorizationRejected));
+        assert!(credentials.tokens().expect("tokens read").is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_device_code_exchange_can_start_a_fresh_pairing_attempt() {
+        let url = response_server(vec![
+            ("201 Created", r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://mybrewfolio.example.test/pair","pollToken":"poll-secret","expiresIn":600}"#),
+            ("200 OK", r#"{"status":"authorized","authorizationCode":"one-time-code"}"#),
+            ("400 Bad Request", r#"{"error":"invalid authorization code"}"#),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        let client = client(credentials.clone(), &url);
+
+        let (_, pending) = client
+            .begin_device_authorization()
+            .await
+            .expect("pairing begins");
+        let error = client
+            .poll_device_authorization(&pending)
+            .await
+            .expect_err("failed exchange requires a fresh pairing attempt");
+
+        assert!(matches!(
+            error,
+            CloudError::DeviceAuthorizationExchangeFailed
+        ));
+        assert!(credentials.tokens().expect("tokens read").is_none());
     }
 
     #[tokio::test]
