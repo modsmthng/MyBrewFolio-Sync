@@ -929,7 +929,7 @@ mod desktop {
         store: &AppStore,
         restart_state: &UpdateRestartState,
     ) -> Result<UpdateStatus, String> {
-        let current = stored_update_status(&store, &restart_state)?;
+        let current = stored_update_status(store, restart_state)?;
         if matches!(
             current,
             UpdateStatus::StoreManaged
@@ -947,7 +947,7 @@ mod desktop {
                 .remove_setting(UPDATE_PROMPT_PENDING)
                 .map_err(|error| error.to_string())?;
             let status = UpdateStatus::UpToDate;
-            emit_update_status(&app, &status).await;
+            emit_update_status(app, &status).await;
             return Ok(status);
         };
         let version = update.version.to_string();
@@ -970,7 +970,7 @@ mod desktop {
             restart_requested: false,
             restart_waiting_for_sync: false,
         };
-        emit_update_status(&app, &status).await;
+        emit_update_status(app, &status).await;
         Ok(status)
     }
 
@@ -1034,232 +1034,247 @@ mod desktop {
         has_autostart_argument(std::env::args().skip(1))
     }
 
-    #[cfg_attr(mobile, tauri::mobile_entry_point)]
-    pub fn run() {
-        let mut builder = tauri::Builder::default();
-        let launch_in_background = launched_from_autostart();
+    type DesktopSetupResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+    fn initialize_application(
+        app: &mut tauri::App,
+    ) -> DesktopSetupResult<(Arc<AppStore>, Arc<SyncEngine>, Arc<StartupDiagnostics>)> {
+        let data_dir = app.path().app_data_dir()?;
+        let startup_diagnostics = Arc::new(StartupDiagnostics::new(
+            data_dir.join("startup-diagnostics.log"),
+        ));
+        startup_diagnostics.reset(&app.package_info().version.to_string());
+        app.manage(startup_diagnostics.clone());
+        let store = Arc::new(AppStore::open(&data_dir.join("sync.sqlite"))?);
+        app.manage(store.clone());
+        app.manage(Arc::new(UpdateRestartState::default()));
+        let engine = Arc::new(SyncEngine::open(
+            store.clone(),
+            Arc::new(KeyringCredentialStore),
+        )?);
+        app.manage(engine.clone());
+        apply_app_icon_visibility(app.handle(), engine.hide_app_icon().unwrap_or(false))
+            .map_err(std::io::Error::other)?;
+        Ok((store, engine, startup_diagnostics))
+    }
+
+    fn configure_deep_links(_app: &mut tauri::App) -> DesktopSetupResult<()> {
+        #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
+        {
+            use tauri_plugin_deep_link::DeepLinkExt;
+            _app.deep_link().register_all()?;
+        }
+        Ok(())
+    }
+
+    fn configure_tray(app: &mut tauri::App) -> DesktopSetupResult<()> {
+        let status_item =
+            MenuItem::with_id(app, "status", "MyBrewFolio Sync", false, None::<&str>)?;
+        app.manage(TrayStatusItem(status_item.clone()));
+        let machine_host = app
+            .state::<Arc<AppStore>>()
+            .setting("machine_host")?
+            .unwrap_or_else(|| "gaggimate.local".to_string());
+        let machine_item = MenuItem::with_id(
+            app,
+            "machine",
+            format!("Machine: {machine_host}"),
+            false,
+            None::<&str>,
+        )?;
+        app.manage(TrayMachineItem(machine_item.clone()));
+        let error_item = MenuItem::with_id(app, "error", "No Sync errors", false, None::<&str>)?;
+        app.manage(TrayErrorItem(error_item.clone()));
+        let show_item = MenuItem::with_id(app, "show", "Open Sync", true, None::<&str>)?;
+        let sync_item = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
+        let autostart_item =
+            MenuItem::with_id(app, "autostart", "Start with computer", true, None::<&str>)?;
+        app.manage(TrayAutostartItem(autostart_item.clone()));
+        let disconnect_item =
+            MenuItem::with_id(app, "disconnect", "Disconnect account", true, None::<&str>)?;
+        let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+        let menu = Menu::with_items(
+            app,
+            &[
+                &status_item,
+                &machine_item,
+                &error_item,
+                &show_item,
+                &sync_item,
+                &autostart_item,
+                &disconnect_item,
+                &quit_item,
+            ],
+        )?;
+        #[cfg(target_os = "macos")]
+        let tray_icon =
+            tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
+        #[cfg(not(target_os = "macos"))]
+        let tray_icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-color.png"))?;
+        TrayIconBuilder::new()
+            .icon(tray_icon)
+            .icon_as_template(cfg!(target_os = "macos"))
+            .tooltip("MyBrewFolio Sync")
+            .menu(&menu)
+            .on_menu_event(|app, event| match event.id.as_ref() {
+                "show" => show_main_window(app),
+                "sync" => {
+                    let engine = app.state::<Arc<SyncEngine>>().inner().clone();
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let _ = engine.sync_once().await;
+                        emit_status(&handle, &engine).await;
+                    });
+                }
+                "autostart" => {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let Ok(current) = autostart_status(&handle).await else {
+                            return;
+                        };
+                        if let Ok(updated) = set_autostart(&handle, !current.enabled).await {
+                            update_autostart_tray_item(&handle, &updated);
+                        }
+                    });
+                }
+                "disconnect" => {
+                    show_main_window(app);
+                    let _ = app.emit("disconnect-confirmation-requested", ());
+                }
+                "quit" => app.exit(0),
+                _ => {}
+            })
+            .build(app)?;
+        Ok(())
+    }
+
+    fn start_background_services(
+        app: &tauri::App,
+        engine: Arc<SyncEngine>,
+        store: Arc<AppStore>,
+        startup_diagnostics: Arc<StartupDiagnostics>,
+    ) {
+        let autostart_handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(status) = autostart_status(&autostart_handle).await {
+                update_autostart_tray_item(&autostart_handle, &status);
+            }
+        });
+
+        let background_engine = engine.clone();
+        let background_handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            loop {
+                if background_engine.status().await.connected {
+                    let _ = background_engine.sync_once().await;
+                    emit_status(&background_handle, &background_engine).await;
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+        });
+
+        let update_handle = app.handle().clone();
+        let update_restart_state = app.state::<Arc<UpdateRestartState>>().inner().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                let _ =
+                    run_update_check(&update_handle, &store, &update_restart_state, false).await;
+                tokio::time::sleep(Duration::from_secs(60 * 60)).await;
+            }
+        });
+
+        let control_engine = engine.clone();
+        tauri::async_runtime::spawn(async move {
+            control_engine.run_control_worker().await;
+        });
+
+        let bridge_engine = engine;
+        let bridge_handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                if bridge_engine.status().await.connected {
+                    if bridge_engine
+                        .wait_for_profile_store_operations()
+                        .await
+                        .is_ok()
+                    {
+                        emit_status(&bridge_handle, &bridge_engine).await;
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                } else {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        });
+
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            if !startup_diagnostics.frontend_ready.load(Ordering::SeqCst) {
+                startup_diagnostics.append(&format!(
+                    "frontend_timeout=true\nfrontend_timeout_utc={}",
+                    chrono::Utc::now().to_rfc3339()
+                ));
+            }
+        });
+    }
+
+    fn configure_main_window(app: &tauri::App) {
+        if let Some(window) = app.get_webview_window("main") {
+            let window_handle = app.handle().clone();
+            window.on_window_event(move |event| {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    if let Some(window) = window_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+            });
+        }
+    }
+
+    fn setup_application(
+        app: &mut tauri::App,
+        launch_in_background: bool,
+    ) -> DesktopSetupResult<()> {
+        let (store, engine, startup_diagnostics) = initialize_application(app)?;
+        configure_deep_links(app)?;
+        configure_tray(app)?;
+        if !launch_in_background {
+            show_main_window(app.handle());
+        }
+        start_background_services(app, engine, store, startup_diagnostics);
+        configure_main_window(app);
+        Ok(())
+    }
+
+    fn build_application(launch_in_background: bool) -> tauri::App {
+        let mut builder = tauri::Builder::default();
         #[cfg(desktop)]
         {
             builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
                 show_main_window(app);
             }));
         }
-
         let mut updater = tauri_plugin_updater::Builder::new();
         if let Some(public_key) = option_env!("MYBREWFOLIO_SYNC_UPDATER_PUBLIC_KEY")
             .filter(|value| !value.trim().is_empty())
         {
             updater = updater.pubkey(public_key);
         }
-
         let autostart = {
             let builder = tauri_plugin_autostart::Builder::new().arg("--autostart");
             #[cfg(target_os = "macos")]
             let builder = builder.macos_launcher(MacosLauncher::LaunchAgent);
             builder.build()
         };
-
-        let app = builder
+        builder
             .plugin(tauri_plugin_deep_link::init())
             .plugin(tauri_plugin_opener::init())
             .plugin(updater.build())
             .plugin(autostart)
-            .setup(move |app| {
-                let data_dir = app.path().app_data_dir()?;
-                let startup_diagnostics = Arc::new(StartupDiagnostics::new(
-                    data_dir.join("startup-diagnostics.log"),
-                ));
-                startup_diagnostics.reset(&app.package_info().version.to_string());
-                app.manage(startup_diagnostics.clone());
-                let store = Arc::new(
-                    AppStore::open(&data_dir.join("sync.sqlite"))
-                        .map_err(|error| error.to_string())?,
-                );
-                app.manage(store.clone());
-                app.manage(Arc::new(UpdateRestartState::default()));
-                let credentials = Arc::new(KeyringCredentialStore);
-                let engine = Arc::new(
-                    SyncEngine::open(store.clone(), credentials)
-                        .map_err(|error| error.to_string())?,
-                );
-                app.manage(engine.clone());
-                apply_app_icon_visibility(app.handle(), engine.hide_app_icon().unwrap_or(false))?;
-
-                #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
-                {
-                    use tauri_plugin_deep_link::DeepLinkExt;
-                    app.deep_link().register_all()?;
-                }
-
-                let status_item =
-                    MenuItem::with_id(app, "status", "MyBrewFolio Sync", false, None::<&str>)?;
-                app.manage(TrayStatusItem(status_item.clone()));
-                let machine_host = store
-                    .setting("machine_host")?
-                    .unwrap_or_else(|| "gaggimate.local".to_string());
-                let machine_item = MenuItem::with_id(
-                    app,
-                    "machine",
-                    format!("Machine: {machine_host}"),
-                    false,
-                    None::<&str>,
-                )?;
-                app.manage(TrayMachineItem(machine_item.clone()));
-                let error_item =
-                    MenuItem::with_id(app, "error", "No Sync errors", false, None::<&str>)?;
-                app.manage(TrayErrorItem(error_item.clone()));
-                let show_item = MenuItem::with_id(app, "show", "Open Sync", true, None::<&str>)?;
-                let sync_item = MenuItem::with_id(app, "sync", "Sync now", true, None::<&str>)?;
-                let autostart_item =
-                    MenuItem::with_id(app, "autostart", "Start with computer", true, None::<&str>)?;
-                app.manage(TrayAutostartItem(autostart_item.clone()));
-                let disconnect_item =
-                    MenuItem::with_id(app, "disconnect", "Disconnect account", true, None::<&str>)?;
-                let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-                let menu = Menu::with_items(
-                    app,
-                    &[
-                        &status_item,
-                        &machine_item,
-                        &error_item,
-                        &show_item,
-                        &sync_item,
-                        &autostart_item,
-                        &disconnect_item,
-                        &quit_item,
-                    ],
-                )?;
-                #[cfg(target_os = "macos")]
-                let tray_icon =
-                    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?;
-                #[cfg(not(target_os = "macos"))]
-                let tray_icon =
-                    tauri::image::Image::from_bytes(include_bytes!("../icons/tray-color.png"))?;
-                TrayIconBuilder::new()
-                    .icon(tray_icon)
-                    .icon_as_template(cfg!(target_os = "macos"))
-                    .tooltip("MyBrewFolio Sync")
-                    .menu(&menu)
-                    .on_menu_event(|app, event| match event.id.as_ref() {
-                        "show" => show_main_window(app),
-                        "sync" => {
-                            let engine = app.state::<Arc<SyncEngine>>().inner().clone();
-                            let handle = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let _ = engine.sync_once().await;
-                                emit_status(&handle, &engine).await;
-                            });
-                        }
-                        "autostart" => {
-                            let handle = app.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let Ok(current) = autostart_status(&handle).await else {
-                                    return;
-                                };
-                                if let Ok(updated) = set_autostart(&handle, !current.enabled).await
-                                {
-                                    update_autostart_tray_item(&handle, &updated);
-                                }
-                            });
-                        }
-                        "disconnect" => {
-                            show_main_window(app);
-                            let _ = app.emit("disconnect-confirmation-requested", ());
-                        }
-                        "quit" => app.exit(0),
-                        _ => {}
-                    })
-                    .build(app)?;
-
-                if !launch_in_background {
-                    show_main_window(app.handle());
-                }
-
-                let autostart_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Ok(status) = autostart_status(&autostart_handle).await {
-                        update_autostart_tray_item(&autostart_handle, &status);
-                    }
-                });
-
-                let background_engine = engine.clone();
-                let background_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(8)).await;
-                    loop {
-                        if background_engine.status().await.connected {
-                            let _ = background_engine.sync_once().await;
-                            emit_status(&background_handle, &background_engine).await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    }
-                });
-
-                let update_handle = app.handle().clone();
-                let update_store = store.clone();
-                let update_restart_state = app.state::<Arc<UpdateRestartState>>().inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        let _ = run_update_check(
-                            &update_handle,
-                            &update_store,
-                            &update_restart_state,
-                            false,
-                        )
-                        .await;
-                        tokio::time::sleep(Duration::from_secs(60 * 60)).await;
-                    }
-                });
-
-                let control_engine = engine.clone();
-                tauri::async_runtime::spawn(async move {
-                    control_engine.run_control_worker().await;
-                });
-
-                let bridge_engine = engine.clone();
-                let bridge_handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        if bridge_engine.status().await.connected {
-                            if bridge_engine
-                                .wait_for_profile_store_operations()
-                                .await
-                                .is_ok()
-                            {
-                                emit_status(&bridge_handle, &bridge_engine).await;
-                            } else {
-                                tokio::time::sleep(Duration::from_secs(2)).await;
-                            }
-                        } else {
-                            tokio::time::sleep(Duration::from_secs(2)).await;
-                        }
-                    }
-                });
-
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(15)).await;
-                    if !startup_diagnostics.frontend_ready.load(Ordering::SeqCst) {
-                        startup_diagnostics.append(&format!(
-                            "frontend_timeout=true\nfrontend_timeout_utc={}",
-                            chrono::Utc::now().to_rfc3339()
-                        ));
-                    }
-                });
-
-                if let Some(window) = app.get_webview_window("main") {
-                    let window_handle = app.handle().clone();
-                    window.on_window_event(move |event| {
-                        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                            api.prevent_close();
-                            if let Some(window) = window_handle.get_webview_window("main") {
-                                let _ = window.hide();
-                            }
-                        }
-                    });
-                }
-                Ok(())
-            })
+            .setup(move |app| setup_application(app, launch_in_background))
             .invoke_handler(tauri::generate_handler![
                 frontend_ready,
                 get_status,
@@ -1291,8 +1306,12 @@ mod desktop {
                 restart_after_update,
             ])
             .build(tauri::generate_context!())
-            .expect("error while running MyBrewFolio Sync");
+            .expect("error while running MyBrewFolio Sync")
+    }
 
+    #[cfg_attr(mobile, tauri::mobile_entry_point)]
+    pub fn run() {
+        let app = build_application(launched_from_autostart());
         app.run(|app, event| {
             let _ = app;
             match event {

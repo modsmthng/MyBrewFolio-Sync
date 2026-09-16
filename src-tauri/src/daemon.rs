@@ -370,7 +370,11 @@ async fn serve_control(engine: Arc<SyncEngine>, socket: PathBuf) -> Result<(), S
         if UnixStream::connect(&socket).await.is_ok() {
             return Err("another MyBrewFolio Sync daemon is already running".into());
         }
-        fs::remove_file(&socket).map_err(|error| error.to_string())?;
+        let stale_socket = socket.clone();
+        tokio::task::spawn_blocking(move || fs::remove_file(stale_socket))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
     }
     let listener = UnixListener::bind(&socket).map_err(|error| error.to_string())?;
     loop {
@@ -442,6 +446,119 @@ async fn proxy_control(
     }
 }
 
+async fn run_notes_wizard(command: &str, args: &[String], socket: &PathBuf) -> Option<ExitCode> {
+    if command == "notes" && args.first().map(String::as_str) == Some("enable") {
+        if args.len() != 1 {
+            eprintln!("Usage: mybrewfolio-syncd notes enable");
+            return Some(ExitCode::from(64));
+        }
+        return Some(match notes_wizard::run(socket).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(1)
+            }
+        });
+    }
+    None
+}
+
+#[cfg(unix)]
+async fn proxy_active_daemon(socket: &PathBuf, command: &str, args: &[String]) -> Option<ExitCode> {
+    match proxy_control(
+        socket,
+        &ControlRequest {
+            command: command.to_string(),
+            args: args.to_vec(),
+            decisions: None,
+        },
+    )
+    .await
+    {
+        Ok(Some(value)) => {
+            print_json(value);
+            Some(ExitCode::SUCCESS)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            eprintln!("{error}");
+            Some(ExitCode::from(1))
+        }
+    }
+}
+
+async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
+    let pairing_engine = engine.clone();
+    tokio::spawn(async move {
+        let mut last_url = None;
+        loop {
+            match pairing_engine.headless_pairing().await {
+                Ok(url) => {
+                    if url != last_url {
+                        if let Some(url) = &url {
+                            eprintln!("Connect MyBrewFolio: {url}\nOpen this link in your browser. It expires after 10 minutes.");
+                        }
+                        last_url = url;
+                    }
+                }
+                Err(error) => {
+                    eprintln!("Account connection unavailable: {error}. Retrying automatically.");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
+    let control_engine = engine.clone();
+    tokio::spawn(async move {
+        control_engine.run_control_worker().await;
+    });
+    #[cfg(unix)]
+    {
+        let control_engine = engine.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_control(control_engine, socket).await {
+                eprintln!("control socket error: {error}");
+            }
+        });
+    }
+    let bridge_engine = engine.clone();
+    tokio::spawn(async move {
+        loop {
+            if bridge_engine.status().await.connected {
+                if bridge_engine
+                    .wait_for_profile_store_operations()
+                    .await
+                    .is_err()
+                {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            } else {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        }
+    });
+    let mut first_sync_notice_printed = false;
+    loop {
+        let status = engine.status().await;
+        if status.connected {
+            if first_sync_notice_due(
+                first_sync_notice_printed,
+                status.connected,
+                status.last_sync_at.as_deref(),
+                status.last_error.as_deref(),
+            ) {
+                eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
+                first_sync_notice_printed = true;
+            }
+            if let Err(error) = engine.sync_once().await {
+                eprintln!("sync error: {error}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let all_args: Vec<String> = env::args().skip(1).collect();
@@ -453,40 +570,13 @@ async fn main() -> ExitCode {
         unreachable!("an empty command was handled as a help request");
     };
     let socket = data_dir().join("control.sock");
-    if command == "notes" && args.first().map(String::as_str) == Some("enable") {
-        if args.len() != 1 {
-            eprintln!("Usage: mybrewfolio-syncd notes enable");
-            return ExitCode::from(64);
-        }
-        return match notes_wizard::run(&socket).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(1)
-            }
-        };
+    if let Some(exit_code) = run_notes_wizard(command, args, &socket).await {
+        return exit_code;
     }
     if command != "daemon" {
         #[cfg(unix)]
-        match proxy_control(
-            &socket,
-            &ControlRequest {
-                command: command.clone(),
-                args: args.to_vec(),
-                decisions: None,
-            },
-        )
-        .await
-        {
-            Ok(Some(value)) => {
-                print_json(value);
-                return ExitCode::SUCCESS;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("{error}");
-                return ExitCode::from(1);
-            }
+        if let Some(exit_code) = proxy_active_daemon(&socket, command, args).await {
+            return exit_code;
         }
     }
     let engine = match open_engine().await {
@@ -497,78 +587,7 @@ async fn main() -> ExitCode {
         }
     };
     if command == "daemon" {
-        let pairing_engine = engine.clone();
-        tokio::spawn(async move {
-            let mut last_url = None;
-            loop {
-                match pairing_engine.headless_pairing().await {
-                    Ok(url) => {
-                        if url != last_url {
-                            if let Some(url) = &url {
-                                eprintln!("Connect MyBrewFolio: {url}\nOpen this link in your browser. It expires after 10 minutes.");
-                            }
-                            last_url = url;
-                        }
-                    }
-                    Err(error) => {
-                        eprintln!(
-                            "Account connection unavailable: {error}. Retrying automatically."
-                        );
-                        tokio::time::sleep(Duration::from_secs(60)).await;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(5)).await;
-            }
-        });
-        let control_engine = engine.clone();
-        tokio::spawn(async move {
-            control_engine.run_control_worker().await;
-        });
-        #[cfg(unix)]
-        {
-            let control_engine = engine.clone();
-            let control_socket = socket.clone();
-            tokio::spawn(async move {
-                if let Err(error) = serve_control(control_engine, control_socket).await {
-                    eprintln!("control socket error: {error}");
-                }
-            });
-        }
-        let bridge_engine = engine.clone();
-        tokio::spawn(async move {
-            loop {
-                if bridge_engine.status().await.connected {
-                    if bridge_engine
-                        .wait_for_profile_store_operations()
-                        .await
-                        .is_err()
-                    {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                } else {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-            }
-        });
-        let mut first_sync_notice_printed = false;
-        loop {
-            let status = engine.status().await;
-            if status.connected {
-                if first_sync_notice_due(
-                    first_sync_notice_printed,
-                    status.connected,
-                    status.last_sync_at.as_deref(),
-                    status.last_error.as_deref(),
-                ) {
-                    eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
-                    first_sync_notice_printed = true;
-                }
-                if let Err(error) = engine.sync_once().await {
-                    eprintln!("sync error: {error}");
-                }
-            }
-            tokio::time::sleep(Duration::from_secs(30)).await;
-        }
+        run_daemon(engine, socket).await;
     }
     match execute(&engine, command, args.to_vec()).await {
         Ok(value) => {

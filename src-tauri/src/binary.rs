@@ -202,6 +202,16 @@ fn field_width(version: u8, bit: u32) -> usize {
 
 type PhaseTransition = (usize, u8, String);
 
+struct SampleLayout<'a> {
+    bytes: &'a [u8],
+    header_size: usize,
+    sample_size: usize,
+    active_bits: &'a [u32],
+    sample_interval: u32,
+    version: u8,
+    transitions: &'a [PhaseTransition],
+}
+
 fn parse_phase_transitions(
     bytes: &[u8],
     version: u8,
@@ -277,29 +287,26 @@ fn phase_at(sample_index: usize, transitions: &[PhaseTransition]) -> (u8, String
     phase
 }
 
-fn parse_samples(
-    bytes: &[u8],
-    header_size: usize,
-    sample_size: usize,
-    sample_count: usize,
-    active_bits: &[u32],
-    sample_interval: u32,
-    version: u8,
-    transitions: &[PhaseTransition],
-) -> Result<Vec<Value>, BinaryError> {
+fn parse_samples(layout: SampleLayout<'_>, sample_count: usize) -> Result<Vec<Value>, BinaryError> {
     let mut samples = Vec::with_capacity(sample_count);
     for sample_index in 0..sample_count {
-        let base = header_size + sample_index * sample_size;
+        let base = layout.header_size + sample_index * layout.sample_size;
         let mut sample = Map::new();
         let mut offset = base;
-        for bit in active_bits {
-            let (name, value) = field_value(bytes, version, *bit, offset, sample_interval)?;
+        for bit in layout.active_bits {
+            let (name, value) = field_value(
+                layout.bytes,
+                layout.version,
+                *bit,
+                offset,
+                layout.sample_interval,
+            )?;
             sample.insert(name, value);
-            offset += field_width(version, *bit);
+            offset += field_width(layout.version, *bit);
         }
-        debug_assert_eq!(offset, base + sample_size);
-        if version >= 5 {
-            let (number, name) = phase_at(sample_index, transitions);
+        debug_assert_eq!(offset, base + layout.sample_size);
+        if layout.version >= 5 {
+            let (number, name) = phase_at(sample_index, layout.transitions);
             sample.insert("phaseNumber".into(), json!(number));
             sample.insert("phaseDisplayNumber".into(), json!(number + 1));
             sample.insert("phaseName".into(), json!(name));
@@ -353,14 +360,16 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
 
     let (transitions, phase_transitions) = parse_phase_transitions(bytes, version)?;
     let samples = parse_samples(
-        bytes,
-        header_size,
-        sample_size,
+        SampleLayout {
+            bytes,
+            header_size,
+            sample_size,
+            active_bits: &active_bits,
+            sample_interval,
+            version,
+            transitions: &transitions,
+        },
         sample_count,
-        &active_bits,
-        sample_interval,
-        version,
-        &transitions,
     )?;
     let last_t = samples
         .last()

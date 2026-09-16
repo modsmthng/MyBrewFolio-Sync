@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Account-owned actions, shared by desktop and Docker. No network listener or shell execution.
-use super::*;
+use std::{collections::HashSet, time::Duration as StdDuration};
+
+#[cfg(feature = "headless")]
+use chrono::Utc;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+use super::{
+    hash_value, normalized_notes, shot_source_key, CloudError, EngineError, NotesWriteOutcome,
+    SyncEngine,
+};
 
 impl SyncEngine {
     #[cfg(feature = "headless")]

@@ -91,6 +91,48 @@ function StatusPill({ status }) {
   return <span className={`status status-${kind}`}>{status.connected ? 'Connected' : 'Not connected'}</span>;
 }
 
+const syncActivityLabels = {
+  sync: 'Synchronizing with GaggiMate…',
+  'first-sync': 'Running the first synchronization…',
+  retry: 'Retrying failed Sync items…',
+  'resync-preview': 'Reading the complete GaggiMate library…',
+  'resync-apply': 'Applying the complete resync…',
+  'notes-activation': 'Backing up GaggiMate Notes…',
+  'notes-backup': 'Backing up GaggiMate Notes…',
+  'notes-write': 'Enabling two-way Notes Sync…',
+  'notes-restore': 'Restoring GaggiMate Notes…',
+};
+
+function visibleDashboardStatus(activeSyncActivity, status, message, engineError) {
+  if (!activeSyncActivity) return message || engineError;
+  if (firstSynchronizationInProgress(status)) return FIRST_SYNCHRONIZATION_MESSAGE;
+  return syncActivityLabels[activeSyncActivity];
+}
+
+function UpdateSettings({ updateStatus, showUpdateDialog, busy, checkForUpdates, restartAfterUpdate, appVersion }) {
+  let updateAction = <button type="button" className="secondary inline-action" disabled={busy} onClick={checkForUpdates}>Check for updates</button>;
+  if (updateStatus.kind === 'installed') {
+    updateAction = <>
+      <p className="muted">Update {updateStatus.version} is installed.</p>
+      {!showUpdateDialog ? (
+        <button type="button" className="primary inline-action" onClick={restartAfterUpdate}>
+          {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
+        </button>
+      ) : null}
+    </>;
+  } else if (updateStatus.kind === 'storeManaged') {
+    updateAction = <p className="muted">Updates are managed by Microsoft Store.</p>;
+  }
+  return (
+    <section className="card settings">
+      <h3>Updates</h3>
+      {updateStatus.kind === 'available' ? <output className="update-available" aria-live="polite">Update {updateStatus.version} is available.</output> : null}
+      {updateAction}
+      <p className="muted app-version">Installed version {appVersion || '…'}</p>
+    </section>
+  );
+}
+
 export function Setup({ status, refresh, externalNotice }) {
   const [host, setHost] = useState(status.machineHost || 'gaggimate.local');
   const [busy, setBusy] = useState(false);
@@ -372,26 +414,48 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   };
 
   const activeSyncActivity = syncActivity || (status.syncing ? 'sync' : '');
-  const syncActivityLabels = {
-    sync: 'Synchronizing with GaggiMate…',
-    'first-sync': 'Running the first synchronization…',
-    retry: 'Retrying failed Sync items…',
-    'resync-preview': 'Reading the complete GaggiMate library…',
-    'resync-apply': 'Applying the complete resync…',
-    'notes-activation': 'Backing up GaggiMate Notes…',
-    'notes-backup': 'Backing up GaggiMate Notes…',
-    'notes-write': 'Enabling two-way Notes Sync…',
-    'notes-restore': 'Restoring GaggiMate Notes…',
-  };
   const engineError = status.lastError && status.lastError !== acknowledgedLastError
     ? status.lastError
     : '';
-  const visibleStatusMessage = activeSyncActivity
-    ? (firstSynchronizationInProgress(status)
-      ? FIRST_SYNCHRONIZATION_MESSAGE
-      : syncActivityLabels[activeSyncActivity])
-    : message || engineError;
+  const visibleStatusMessage = visibleDashboardStatus(activeSyncActivity, status, message, engineError);
   const visibleStatusTone = statusTone(activeSyncActivity, message, messageTone, engineError);
+  return (
+    <DashboardContent
+      status={status}
+      visibleStatusMessage={visibleStatusMessage}
+      visibleStatusTone={visibleStatusTone}
+      busy={busy}
+      activeSyncActivity={activeSyncActivity}
+      syncNow={syncNow}
+      host={host}
+      setHost={setHost}
+      saveHost={saveHost}
+      updateStatus={updateStatus}
+      showUpdateDialog={showUpdateDialog}
+      checkForUpdates={checkForUpdates}
+      restartAfterUpdate={restartAfterUpdate}
+      appVersion={appVersion}
+      autostart={autostart}
+      autostartStatus={autostartStatus}
+      hideAppIcon={hideAppIcon}
+      toggleAutostart={toggleAutostart}
+      toggleAppIcon={toggleAppIcon}
+      confirmDisconnect={confirmDisconnect}
+      setConfirmDisconnect={setConfirmDisconnect}
+      disconnect={disconnect}
+      laterUpdate={laterUpdate}
+      installUpdate={installUpdate}
+    />
+  );
+}
+
+function DashboardContent({
+  status, visibleStatusMessage, visibleStatusTone, busy, activeSyncActivity, syncNow,
+  host, setHost, saveHost, updateStatus, showUpdateDialog, checkForUpdates,
+  restartAfterUpdate, appVersion, autostart, autostartStatus, hideAppIcon,
+  toggleAutostart, toggleAppIcon, confirmDisconnect, setConfirmDisconnect,
+  disconnect, laterUpdate, installUpdate,
+}) {
   return (
     <main className="shell">
       <header className="brand-row dashboard-header">
@@ -427,31 +491,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
         {status.issues?.length ? <p className="muted">{status.issues.length} local items need attention. Review and retry them in MyBrewFolio.</p> : null}
       </section>
       <h2 className="section-title">App settings</h2>
-      <section className="card settings">
-        <h3>Updates</h3>
-        {updateStatus.kind === 'available' ? (
-          <output className="update-available" aria-live="polite">
-            Update {updateStatus.version} is available.
-          </output>
-        ) : null}
-        {updateStatus.kind === 'installed' ? (
-          <>
-            <p className="muted">Update {updateStatus.version} is installed.</p>
-            {!showUpdateDialog ? (
-              <button type="button" className="primary inline-action" onClick={restartAfterUpdate}>
-                {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
-              </button>
-            ) : null}
-          </>
-        ) : updateStatus.kind === 'storeManaged' ? (
-          <p className="muted">Updates are managed by Microsoft Store.</p>
-        ) : (
-          <button type="button" className="secondary inline-action" disabled={busy} onClick={checkForUpdates}>
-            Check for updates
-          </button>
-        )}
-        <p className="muted app-version">Installed version {appVersion || '…'}</p>
-      </section>
+      <UpdateSettings updateStatus={updateStatus} showUpdateDialog={showUpdateDialog} busy={busy} checkForUpdates={checkForUpdates} restartAfterUpdate={restartAfterUpdate} appVersion={appVersion} />
       <section className="card settings background-app-settings">
         <h3>Background app</h3>
         <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy || autostartStatus.requiresWindowsSettings || autostartStatus.blockedByPolicy} /><span>Start Sync with this computer</span></label>
