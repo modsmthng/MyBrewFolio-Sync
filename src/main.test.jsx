@@ -23,6 +23,7 @@ import {
   firstSynchronizationInProgress,
   formatDate,
   statusTone,
+  syncProgressMessage,
 } from './main.jsx';
 
 const status = {
@@ -77,10 +78,26 @@ describe('dashboard decisions', () => {
   });
 
   it('uses deterministic status priority', () => {
-    expect(statusTone('sync', 'Saved', 'success', 'Error')).toBe('working');
-    expect(statusTone('', 'Saved', 'success', 'Error')).toBe('success');
+    expect(statusTone('sync', 'Saved', 'success', 'Error')).toBe('error');
+    expect(statusTone('', 'Saved', 'success', 'Error')).toBe('error');
     expect(statusTone('', '', 'success', 'Error')).toBe('error');
     expect(statusTone('', '', 'success', '')).toBe('info');
+  });
+
+  it('shows safe first-sync progress for every phase', () => {
+    expect(
+      syncProgressMessage({ phase: 'reading_history', scannedShots: 8, totalShots: 20 }),
+    ).toBe('Reading history: 8 of 20 brews');
+    expect(
+      syncProgressMessage({
+        phase: 'uploading',
+        scannedShots: 20,
+        totalShots: 20,
+        uploadedItems: 25,
+        totalItems: 40,
+      }),
+    ).toBe('Uploading: 25 of 40 items');
+    expect(syncProgressMessage({ phase: 'finishing' })).toBe('Finishing your first sync…');
   });
 
   it('formats missing and invalid dates safely', () => {

@@ -4,7 +4,7 @@ use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
 use mybrewfolio_sync_lib::{
     credentials::{CredentialStore, EncryptedFileCredentialStore},
-    engine::SyncEngine,
+    engine::{EngineError, SyncEngine},
     store::AppStore,
 };
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,10 @@ fn first_sync_notice_due(
     last_error: Option<&str>,
 ) -> bool {
     !announced && connected && last_sync_at.is_none() && last_error.is_none()
+}
+
+fn should_log_sync_error(error: &EngineError) -> bool {
+    !matches!(error, EngineError::Busy)
 }
 
 fn data_dir() -> PathBuf {
@@ -551,8 +555,10 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                 eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
                 first_sync_notice_printed = true;
             }
-            if let Err(error) = engine.sync_once().await {
-                eprintln!("sync error: {error}");
+            match engine.sync_once().await {
+                Ok(()) => {}
+                Err(error) if should_log_sync_error(&error) => eprintln!("sync error: {error}"),
+                Err(_) => {}
             }
         }
         tokio::time::sleep(Duration::from_secs(30)).await;
@@ -607,7 +613,8 @@ mod tests {
 
     use super::{
         confirmed, execute, execute_control, first_sync_notice_due, help_text, is_help_request,
-        json_file, ControlRequest, SyncEngine, FIRST_SYNCHRONIZATION_MESSAGE,
+        json_file, should_log_sync_error, ControlRequest, EngineError, SyncEngine,
+        FIRST_SYNCHRONIZATION_MESSAGE,
     };
     #[cfg(unix)]
     use super::{proxy_control, serve_control, ControlResponse};
@@ -651,6 +658,11 @@ mod tests {
             None,
             Some("The GaggiMate could not be reached")
         ));
+    }
+
+    #[test]
+    fn expected_busy_syncs_are_not_written_as_errors() {
+        assert!(!should_log_sync_error(&EngineError::Busy));
     }
 
     #[test]

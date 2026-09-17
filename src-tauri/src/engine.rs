@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
-    time::Duration as StdDuration,
+    time::{Duration as StdDuration, Instant},
 };
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -19,7 +19,9 @@ use crate::{
     },
     credentials::CredentialStore,
     local::{normalize_host, GaggiMateClient, LocalError},
-    model::{AppStatus, IndexEntry, NoteBackupSummary, SyncObject},
+    model::{
+        AppStatus, IndexEntry, NoteBackupSummary, SyncObject, SyncProgress, SyncProgressPhase,
+    },
     store::{AppStore, BridgeCompletion, StoreError},
 };
 
@@ -617,6 +619,21 @@ fn api_timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn sync_progress_log_line(progress: &SyncProgress) -> String {
+    match progress.phase {
+        SyncProgressPhase::ReadingHistory => format!(
+            "First sync: Reading history: {} of {} brews",
+            progress.scanned_shots, progress.total_shots
+        ),
+        SyncProgressPhase::Uploading => format!(
+            "First sync: Uploading: {} of {} items",
+            progress.uploaded_items.unwrap_or_default(),
+            progress.total_items.unwrap_or_default()
+        ),
+        SyncProgressPhase::Finishing => "First sync: Finishing your first sync…".into(),
+    }
+}
+
 impl SyncEngine {
     pub fn open(
         store: Arc<AppStore>,
@@ -642,6 +659,7 @@ impl SyncEngine {
                 syncing: false,
                 last_sync_at: None,
                 last_error: None,
+                sync_progress: None,
                 profiles: 0,
                 shots: 0,
                 notes: 0,
@@ -672,6 +690,30 @@ impl SyncEngine {
         status
     }
 
+    async fn report_sync_progress(
+        &self,
+        device_id: &str,
+        progress: SyncProgress,
+        publish: bool,
+    ) -> Result<(), EngineError> {
+        {
+            let mut status = self.status.write().await;
+            status.machine_reachable = true;
+            status.sync_progress = Some(progress.clone());
+        }
+        eprintln!("{}", sync_progress_log_line(&progress));
+        if publish {
+            self.cloud
+                .heartbeat(device_id, true, None, None, Some(&progress))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_sync_progress(&self) {
+        self.status.write().await.sync_progress = None;
+    }
+
     /// Wait for work, including durable action acknowledgements, then prevent new
     /// machine operations until these guards are dropped (or the app exits).
     pub async fn pause_operations(
@@ -698,6 +740,7 @@ impl SyncEngine {
                 "syncing": status.syncing,
                 "lastSyncAt": status.last_sync_at,
                 "lastError": status.last_error,
+                "syncProgress": status.sync_progress,
             },
             "items": {
                 "profiles": status.profiles,
@@ -1297,11 +1340,23 @@ impl SyncEngine {
             .map(str::to_string);
     }
 
+    #[cfg(test)]
     async fn queue_local_changes(
         &self,
         local: &GaggiMateClient,
         cloud_state: &Value,
     ) -> Result<Vec<String>, EngineError> {
+        self.queue_local_changes_with_progress(local, cloud_state, None)
+            .await
+            .map(|(skipped, _)| skipped)
+    }
+
+    async fn queue_local_changes_with_progress(
+        &self,
+        local: &GaggiMateClient,
+        cloud_state: &Value,
+        progress: Option<(&str, bool)>,
+    ) -> Result<(Vec<String>, usize), EngineError> {
         let mut skipped = Vec::new();
         let suppressed = suppressed_items(cloud_state);
         let two_way_notes = two_way_notes_active(cloud_state);
@@ -1326,77 +1381,128 @@ impl SyncEngine {
             Duration::minutes(5),
         );
         let index = local.shot_index().await?;
+        let total_shots = index.len();
+        if let Some((device_id, publish)) = progress {
+            self.report_sync_progress(
+                device_id,
+                SyncProgress {
+                    phase: SyncProgressPhase::ReadingHistory,
+                    scanned_shots: 0,
+                    total_shots,
+                    uploaded_items: None,
+                    total_items: None,
+                },
+                publish,
+            )
+            .await?;
+        }
+        let mut last_progress_update = Instant::now();
         for (position, entry) in index.into_iter().enumerate() {
             // IDs can be reused after history maintenance. The timestamp keeps a
             // later shot from silently replacing an older cloud copy.
             let source_key = shot_source_key(&entry);
-            if suppressed.contains(&("shot".into(), source_key.clone())) {
-                continue;
-            }
-            let fingerprint = shot_fingerprint(&entry);
-            // v2 deliberately requeues shots once after the original client
-            // used non-canonical JSON hashes that the API could not accept.
-            let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
-            let changed = self.store.setting(&fingerprint_key)?.as_deref() != Some(&fingerprint);
-            if changed {
-                let mut shot = match local.shot(entry.id).await {
-                    Ok(shot) => shot,
-                    Err(error) => {
-                        let reason = shot_read_failure(&error);
-                        self.store
-                            .record_failure(None, "shot", &source_key, "read", &reason)?;
-                        skipped.push(format!("Shot {} could not be read: {reason}", entry.id));
-                        continue;
-                    }
-                };
-                self.store
-                    .clear_failure_stage("shot", &source_key, "read")?;
-                if let Some(object) = shot.as_object_mut() {
-                    object.insert(
-                        "name".into(),
-                        Value::String(format!("{} · {}", entry.profile_name, entry.id)),
-                    );
-                    object.insert("rating".into(), serde_json::json!(entry.rating));
-                    object.insert("volume".into(), serde_json::json!(entry.volume));
-                }
-                self.store.queue(&SyncObject {
-                    kind: "shot".into(),
-                    source_key: source_key.clone(),
-                    source_hash: hash_value(&shot),
-                    shot_source_key: None,
-                    data: shot,
-                })?;
-                self.store.set_setting(&fingerprint_key, &fingerprint)?;
-            }
-            if should_refresh_notes(changed, full_notes, recent_notes, position)
-                && !suppressed.contains(&("notes".into(), source_key.clone()))
-            {
-                match local.notes(entry.id).await {
-                    Ok(notes) => {
-                        self.store
-                            .clear_failure_stage("notes", &source_key, "read")?;
-                        let notes =
-                            normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
-                        let empty = notes_are_semantically_empty(&notes);
-                        // One-way sync keeps ignoring untouched Notes. The
-                        // Protocol-2 two-way baseline needs every empty Note
-                        // so the API can map Brews that appeared after setup.
-                        if !empty || two_way_notes {
+            if !suppressed.contains(&("shot".into(), source_key.clone())) {
+                let fingerprint = shot_fingerprint(&entry);
+                // v2 deliberately requeues shots once after the original client
+                // used non-canonical JSON hashes that the API could not accept.
+                let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
+                let changed =
+                    self.store.setting(&fingerprint_key)?.as_deref() != Some(&fingerprint);
+                let shot_readable = if changed {
+                    match local.shot(entry.id).await {
+                        Ok(mut shot) => {
+                            self.store
+                                .clear_failure_stage("shot", &source_key, "read")?;
+                            if let Some(object) = shot.as_object_mut() {
+                                object.insert(
+                                    "name".into(),
+                                    Value::String(format!("{} · {}", entry.profile_name, entry.id)),
+                                );
+                                object.insert("rating".into(), serde_json::json!(entry.rating));
+                                object.insert("volume".into(), serde_json::json!(entry.volume));
+                            }
                             self.store.queue(&SyncObject {
-                                kind: "notes".into(),
+                                kind: "shot".into(),
                                 source_key: source_key.clone(),
-                                source_hash: hash_value(&notes),
-                                shot_source_key: Some(source_key.clone()),
-                                data: notes,
+                                source_hash: hash_value(&shot),
+                                shot_source_key: None,
+                                data: shot,
                             })?;
+                            self.store.set_setting(&fingerprint_key, &fingerprint)?;
+                            true
+                        }
+                        Err(error) => {
+                            let reason = shot_read_failure(&error);
+                            self.store.record_failure(
+                                None,
+                                "shot",
+                                &source_key,
+                                "read",
+                                &reason,
+                            )?;
+                            skipped.push(format!("Shot {} could not be read: {reason}", entry.id));
+                            false
                         }
                     }
-                    Err(_) => {
-                        let reason = "Notes could not be read from the GaggiMate";
-                        self.store
-                            .record_failure(None, "notes", &source_key, "read", reason)?;
-                        skipped.push(format!("Notes for shot {} could not be read", entry.id))
+                } else {
+                    true
+                };
+                if shot_readable
+                    && should_refresh_notes(changed, full_notes, recent_notes, position)
+                    && !suppressed.contains(&("notes".into(), source_key.clone()))
+                {
+                    match local.notes(entry.id).await {
+                        Ok(notes) => {
+                            self.store
+                                .clear_failure_stage("notes", &source_key, "read")?;
+                            let notes =
+                                normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
+                            let empty = notes_are_semantically_empty(&notes);
+                            // One-way sync keeps ignoring untouched Notes. The
+                            // Protocol-2 two-way baseline needs every empty Note
+                            // so the API can map Brews that appeared after setup.
+                            if !empty || two_way_notes {
+                                self.store.queue(&SyncObject {
+                                    kind: "notes".into(),
+                                    source_key: source_key.clone(),
+                                    source_hash: hash_value(&notes),
+                                    shot_source_key: Some(source_key.clone()),
+                                    data: notes,
+                                })?;
+                            }
+                        }
+                        Err(_) => {
+                            let reason = "Notes could not be read from the GaggiMate";
+                            self.store.record_failure(
+                                None,
+                                "notes",
+                                &source_key,
+                                "read",
+                                reason,
+                            )?;
+                            skipped.push(format!("Notes for shot {} could not be read", entry.id))
+                        }
                     }
+                }
+            }
+            let scanned_shots = position + 1;
+            if let Some((device_id, publish)) = progress {
+                if scanned_shots == total_shots
+                    || last_progress_update.elapsed() >= StdDuration::from_secs(5)
+                {
+                    self.report_sync_progress(
+                        device_id,
+                        SyncProgress {
+                            phase: SyncProgressPhase::ReadingHistory,
+                            scanned_shots,
+                            total_shots,
+                            uploaded_items: None,
+                            total_items: None,
+                        },
+                        publish,
+                    )
+                    .await?;
+                    last_progress_update = Instant::now();
                 }
             }
         }
@@ -1408,7 +1514,7 @@ impl SyncEngine {
             self.store
                 .set_setting("last_full_notes_scan", &now.to_rfc3339())?;
         }
-        Ok(skipped)
+        Ok((skipped, total_shots))
     }
 
     async fn queue_due_profiles(
@@ -1454,8 +1560,29 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn flush_queue(&self, device_id: &str) -> Result<usize, EngineError> {
+    async fn flush_queue_with_progress(
+        &self,
+        device_id: &str,
+        progress: Option<(usize, usize)>,
+    ) -> Result<(usize, usize), EngineError> {
         let mut invalid = 0;
+        let total_items = self.store.pending_count()?;
+        let mut uploaded_items = 0;
+        if let Some((scanned_shots, total_shots)) = progress {
+            self.report_sync_progress(
+                device_id,
+                SyncProgress {
+                    phase: SyncProgressPhase::Uploading,
+                    scanned_shots,
+                    total_shots,
+                    uploaded_items: Some(uploaded_items),
+                    total_items: Some(total_items),
+                },
+                true,
+            )
+            .await?;
+        }
+        let mut last_progress_update = Instant::now();
         loop {
             let pending = self.store.pending(MAX_SYNC_BATCH_ITEMS)?;
             if pending.is_empty() {
@@ -1511,11 +1638,29 @@ impl SyncEngine {
                     if is_terminal_batch_status(status) {
                         self.store
                             .remove_pending(&object.kind, &object.source_key)?;
+                        uploaded_items += 1;
                     }
                 }
             }
+            if let Some((scanned_shots, total_shots)) = progress {
+                if last_progress_update.elapsed() >= StdDuration::from_secs(5) {
+                    self.report_sync_progress(
+                        device_id,
+                        SyncProgress {
+                            phase: SyncProgressPhase::Uploading,
+                            scanned_shots,
+                            total_shots,
+                            uploaded_items: Some(uploaded_items),
+                            total_items: Some(total_items),
+                        },
+                        true,
+                    )
+                    .await?;
+                    last_progress_update = Instant::now();
+                }
+            }
         }
-        Ok(invalid)
+        Ok((invalid, total_items))
     }
 
     async fn write_and_verify_notes(
@@ -1983,11 +2128,15 @@ impl SyncEngine {
                         .or_else(|| source.get("initialSyncConfiguredAt"))
                 })
                 .is_some_and(|value| !value.is_null());
+            let first_sync = self.status().await.last_sync_at.is_none();
             let local = GaggiMateClient::new(&host)?;
             self.process_profile_store_operations(&local, &device_id, 0)
                 .await?;
             if !configured {
-                self.cloud.heartbeat(&device_id, true, None, None).await?;
+                self.clear_sync_progress().await;
+                self.cloud
+                    .heartbeat(&device_id, true, None, None, None)
+                    .await?;
                 let mut status = self.status.write().await;
                 status.machine_reachable = true;
                 return Ok(());
@@ -2001,7 +2150,9 @@ impl SyncEngine {
                 .as_deref()
                 != Some(TWO_WAY_NOTES_PROTOCOL_VERSION)
             {
-                self.cloud.heartbeat(&device_id, true, None, None).await?;
+                self.cloud
+                    .heartbeat(&device_id, true, None, None, None)
+                    .await?;
                 self.store.set_setting(
                     TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
                     TWO_WAY_NOTES_PROTOCOL_VERSION,
@@ -2012,14 +2163,41 @@ impl SyncEngine {
             // serialized even though their cloud work is independent.
             let skipped = {
                 let _machine_guard = self.profile_store_lock.lock().await;
-                self.queue_local_changes(&local, &state).await?
+                self.queue_local_changes_with_progress(
+                    &local,
+                    &state,
+                    first_sync.then_some((device_id.as_str(), !cloud_unreachable)),
+                )
+                .await?
             };
             if cloud_unreachable {
                 // Local changes are safely queued before reporting the missing
                 // internet connection. They are uploaded on the next cycle.
                 return Err(CloudError::Unreachable.into());
             }
-            let invalid = self.flush_queue(&device_id).await?;
+            let (skipped, total_shots) = skipped;
+            let (invalid, total_items) = self
+                .flush_queue_with_progress(
+                    &device_id,
+                    first_sync.then_some((total_shots, total_shots)),
+                )
+                .await?;
+            if first_sync {
+                self.report_sync_progress(
+                    &device_id,
+                    SyncProgress {
+                        phase: SyncProgressPhase::Finishing,
+                        scanned_shots: total_shots,
+                        total_shots,
+                        uploaded_items: Some(
+                            total_items.saturating_sub(self.store.pending_count()?),
+                        ),
+                        total_items: Some(total_items),
+                    },
+                    true,
+                )
+                .await?;
+            }
             {
                 let _machine_guard = self.profile_store_lock.lock().await;
                 self.process_outbound_notes(&local, &device_id).await?;
@@ -2027,8 +2205,9 @@ impl SyncEngine {
             let synchronized_at = api_timestamp(Utc::now());
             let warning_code =
                 (!skipped.is_empty() || invalid > 0).then_some("LOCAL_ITEMS_SKIPPED");
+            self.clear_sync_progress().await;
             self.cloud
-                .heartbeat(&device_id, true, Some(&synchronized_at), warning_code)
+                .heartbeat(&device_id, true, Some(&synchronized_at), warning_code, None)
                 .await?;
             let refreshed = self.cloud.state(&device_id).await?;
             self.store
@@ -2066,6 +2245,7 @@ impl SyncEngine {
                     syncing: false,
                     last_sync_at: None,
                     last_error: Some(error.to_string()),
+                    sync_progress: None,
                     profiles: 0,
                     shots: 0,
                     notes: 0,
@@ -2090,6 +2270,7 @@ impl SyncEngine {
                 let mut status = self.status.write().await;
                 status.machine_reachable = !matches!(error, EngineError::Local(_));
                 status.last_error = Some(message.clone());
+                status.sync_progress = None;
                 (status.machine_reachable, status.last_sync_at.clone())
             };
             let _ = self
@@ -2099,6 +2280,7 @@ impl SyncEngine {
                     machine_reachable,
                     last_sync_at.as_deref(),
                     Some(error.heartbeat_code()),
+                    None,
                 )
                 .await;
         }
@@ -2132,6 +2314,7 @@ impl SyncEngine {
             syncing: false,
             last_sync_at: None,
             last_error: None,
+            sync_progress: None,
             profiles: 0,
             shots: 0,
             notes: 0,
@@ -2215,10 +2398,12 @@ mod tests {
         api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
         is_terminal_batch_status, normalized_notes, notes_are_semantically_empty, profiles_equal,
         scan_due, select_sync_batch, serialized_batch_bytes, shot_fingerprint, shot_read_failure,
-        shot_source_key, should_refresh_notes, suppressed_items, NotesWriteOutcome, SyncEngine,
-        MAX_SYNC_BATCH_BYTES, NOTES_WRITE_ATTEMPTS,
+        shot_source_key, should_refresh_notes, suppressed_items, sync_progress_log_line,
+        NotesWriteOutcome, SyncEngine, MAX_SYNC_BATCH_BYTES, NOTES_WRITE_ATTEMPTS,
     };
-    use crate::model::{AppStatus, IndexEntry, OAuthTokens, SyncObject};
+    use crate::model::{
+        AppStatus, IndexEntry, OAuthTokens, SyncObject, SyncProgress, SyncProgressPhase,
+    };
     use crate::{
         cloud::CloudConfig,
         credentials::EncryptedFileCredentialStore,
@@ -2325,6 +2510,7 @@ mod tests {
             syncing: false,
             last_sync_at: None,
             last_error: None,
+            sync_progress: None,
             profiles: 0,
             shots: 10,
             notes: 0,
@@ -2629,6 +2815,45 @@ mod tests {
             .single()
             .expect("valid timestamp");
         assert_eq!(api_timestamp(timestamp), "2026-07-27T09:41:33.000Z");
+    }
+
+    #[tokio::test]
+    async fn keeps_first_sync_progress_visible_until_a_terminal_heartbeat() {
+        let (engine, _directory) = test_engine();
+        let progress = SyncProgress {
+            phase: SyncProgressPhase::ReadingHistory,
+            scanned_shots: 8,
+            total_shots: 20,
+            uploaded_items: None,
+            total_items: None,
+        };
+
+        engine
+            .report_sync_progress("device-1", progress.clone(), false)
+            .await
+            .expect("local progress is stored");
+        assert_eq!(engine.status().await.sync_progress, Some(progress));
+        assert_eq!(
+            engine.diagnose().await.expect("diagnostics")["connection"]["syncProgress"]["phase"],
+            "reading_history"
+        );
+
+        engine.clear_sync_progress().await;
+        assert_eq!(engine.status().await.sync_progress, None);
+    }
+
+    #[test]
+    fn formats_first_sync_progress_for_container_logs() {
+        assert_eq!(
+            sync_progress_log_line(&SyncProgress {
+                phase: SyncProgressPhase::Uploading,
+                scanned_shots: 20,
+                total_shots: 20,
+                uploaded_items: Some(25),
+                total_items: Some(40),
+            }),
+            "First sync: Uploading: 25 of 40 items"
+        );
     }
 
     #[test]
@@ -3018,7 +3243,11 @@ mod tests {
             r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
             r#"{"operations":[]}"#,
             "{}",
+            "{}",
+            "{}",
+            "{}",
             r#"{"results":[{"index":0,"status":"created"},{"index":1,"status":"created"},{"index":2,"status":"created"}]}"#,
+            "{}",
             r#"{"operations":[]}"#,
             "{}",
             r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z","duplicatePolicy":"reuse_matching"},"items":[{"kind":"profile"},{"kind":"shot"},{"kind":"notes"}]}"#,

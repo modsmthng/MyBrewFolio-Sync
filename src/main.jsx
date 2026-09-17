@@ -15,6 +15,17 @@ export function firstSynchronizationInProgress(status) {
   return Boolean(status?.connected && status?.syncing && !status?.lastSyncAt && !status?.lastError);
 }
 
+export function syncProgressMessage(progress) {
+  if (!progress) return '';
+  if (progress.phase === 'reading_history') {
+    return `Reading history: ${progress.scannedShots} of ${progress.totalShots} brews`;
+  }
+  if (progress.phase === 'uploading') {
+    return `Uploading: ${progress.uploadedItems || 0} of ${progress.totalItems || 0} items`;
+  }
+  return 'Finishing your first sync…';
+}
+
 const initialStatus = {
   connected: false,
   machineHost: 'gaggimate.local',
@@ -22,6 +33,7 @@ const initialStatus = {
   syncing: false,
   lastSyncAt: null,
   lastError: null,
+  syncProgress: null,
   profiles: 0,
   shots: 0,
   notes: 0,
@@ -45,9 +57,9 @@ export function formatDate(value) {
 }
 
 export function statusTone(activeSyncActivity, message, messageTone, engineError) {
+  if (engineError) return 'error';
   if (activeSyncActivity) return 'working';
   if (message) return messageTone;
-  if (engineError) return 'error';
   return 'info';
 }
 
@@ -104,7 +116,9 @@ const syncActivityLabels = {
 };
 
 function visibleDashboardStatus(activeSyncActivity, status, message, engineError) {
-  if (!activeSyncActivity) return message || engineError;
+  if (engineError) return engineError;
+  if (!activeSyncActivity) return message;
+  if (status.syncProgress) return `First sync: ${syncProgressMessage(status.syncProgress)}`;
   if (firstSynchronizationInProgress(status)) return FIRST_SYNCHRONIZATION_MESSAGE;
   return syncActivityLabels[activeSyncActivity];
 }

@@ -3,6 +3,26 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncProgressPhase {
+    ReadingHistory,
+    Uploading,
+    Finishing,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub phase: SyncProgressPhase,
+    pub scanned_shots: usize,
+    pub total_shots: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_items: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppStatus {
@@ -12,6 +32,7 @@ pub struct AppStatus {
     pub syncing: bool,
     pub last_sync_at: Option<String>,
     pub last_error: Option<String>,
+    pub sync_progress: Option<SyncProgress>,
     pub profiles: usize,
     pub shots: usize,
     pub notes: usize,

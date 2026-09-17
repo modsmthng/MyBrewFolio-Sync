@@ -151,7 +151,8 @@ impl SyncEngine {
                 json!({"connected": status.connected, "machineReachable": status.machine_reachable,
                 "lastSyncAt":status.last_sync_at,"profiles":status.profiles,"shots":status.shots,"notes":status.notes,
                 "pending":self.store.pending_count()?,"failures":self.store.failure_count()?,
-                "conflicts":status.conflicts,"suppressed":status.suppressed}),
+                "conflicts":status.conflicts,"suppressed":status.suppressed,
+                "syncProgress":status.sync_progress}),
             );
         }
         if kind == "notes_prepare" {
@@ -184,7 +185,7 @@ impl SyncEngine {
                     .create_notes_activation_from_import(&device_id)
                     .await?;
                 self.dismiss_notes_sync_intro().await?;
-                return Ok(json!({"backupId":backup["backup"]["id"]}));
+                return Ok(json!({"backupId":backup["backup"]["id"], "reviewOperationId":id}));
             }
             let preview = self
                 .prepare_headless_notes_activation()

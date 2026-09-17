@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::{
     credentials::CredentialStore,
-    model::{DeviceRegistration, OAuthTokens, SyncObject},
+    model::{DeviceRegistration, OAuthTokens, SyncObject, SyncProgress},
 };
 
 #[derive(Debug, Error)]
@@ -93,6 +93,7 @@ fn companion_capabilities() -> Value {
         "twoWayNotesProtocol": 2,
         "syncControl": 1,
         "initialNotesActivation": 1,
+        "syncProgress": 1,
     })
 }
 
@@ -709,6 +710,7 @@ impl CloudClient {
         machine_reachable: bool,
         last_sync_at: Option<&str>,
         error: Option<&str>,
+        sync_progress: Option<&SyncProgress>,
     ) -> Result<(), CloudError> {
         let response = self
             .authorized(reqwest::Method::POST, "/v1/sync/heartbeat")
@@ -717,6 +719,7 @@ impl CloudClient {
             .json(&json!({
                 "appVersion": env!("CARGO_PKG_VERSION"), "machineReachable": machine_reachable,
                 "lastSyncAt": last_sync_at, "lastErrorCode": error,
+                "syncProgress": sync_progress,
                 "capabilities": companion_capabilities()
             }))
             .send()
@@ -824,7 +827,10 @@ mod tests {
     };
 
     use super::{CloudClient, CloudConfig, CloudError, CredentialStore, OAuthTokens};
-    use crate::store::StoreError;
+    use crate::{
+        model::{SyncProgress, SyncProgressPhase},
+        store::StoreError,
+    };
 
     #[derive(Default)]
     struct TestCredentials {
@@ -1280,7 +1286,19 @@ mod tests {
             .await
             .expect("resync applied");
         client
-            .heartbeat("device-1", true, Some("2026-08-27T10:00:00.000Z"), None)
+            .heartbeat(
+                "device-1",
+                true,
+                Some("2026-08-27T10:00:00.000Z"),
+                None,
+                Some(&SyncProgress {
+                    phase: SyncProgressPhase::Uploading,
+                    scanned_shots: 4,
+                    total_shots: 4,
+                    uploaded_items: Some(25),
+                    total_items: Some(50),
+                }),
+            )
             .await
             .expect("heartbeat sent");
         client.revoke("device-1").await.expect("device revoked");
@@ -1308,5 +1326,9 @@ mod tests {
         assert!(requests[2].contains("sourceKey"));
         assert!(requests[13].contains("items"));
         assert!(requests[14].contains("duplicatePolicy"));
+        assert!(requests.iter().any(|request| {
+            request.contains("\"syncProgress\":{\"phase\":\"uploading\"")
+                && request.contains("\"uploadedItems\":25")
+        }));
     }
 }
