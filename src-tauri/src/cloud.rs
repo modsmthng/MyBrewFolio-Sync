@@ -92,6 +92,7 @@ fn companion_capabilities() -> Value {
         "canonicalNotesHash": 1,
         "twoWayNotesProtocol": 2,
         "syncControl": 1,
+        "initialNotesActivation": 1,
     })
 }
 
@@ -522,6 +523,19 @@ impl CloudClient {
     pub async fn disable_two_way_notes(&self, device_id: &str) -> Result<(), CloudError> {
         self.device_empty(reqwest::Method::DELETE, "/v1/sync/notes/two-way", device_id)
             .await
+    }
+
+    pub async fn create_notes_activation_from_import(
+        &self,
+        device_id: &str,
+    ) -> Result<Value, CloudError> {
+        self.device_json(
+            reqwest::Method::POST,
+            "/v1/sync/notes/activation-from-import",
+            device_id,
+            json!({}),
+        )
+        .await
     }
 
     pub async fn begin_notes_backup(

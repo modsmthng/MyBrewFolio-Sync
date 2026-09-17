@@ -16,7 +16,7 @@ use tokio::net::{UnixListener, UnixStream};
 mod notes_wizard;
 
 const FIRST_SYNCHRONIZATION_MESSAGE: &str =
-    "First synchronization in progress. This may take a few minutes, depending on your history.";
+    "Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running.";
 
 fn first_sync_notice_due(
     announced: bool,
@@ -635,7 +635,7 @@ mod tests {
     fn first_sync_notice_is_emitted_once_without_an_error() {
         assert_eq!(
             FIRST_SYNCHRONIZATION_MESSAGE,
-            "First synchronization in progress. This may take a few minutes, depending on your history."
+            "Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running."
         );
         assert!(first_sync_notice_due(false, true, None, None));
         assert!(!first_sync_notice_due(true, true, None, None));

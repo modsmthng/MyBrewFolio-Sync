@@ -63,7 +63,7 @@ afterEach(cleanup);
 describe('dashboard decisions', () => {
   it('explains a first synchronization while it is running', () => {
     expect(FIRST_SYNCHRONIZATION_MESSAGE).toBe(
-      'First synchronization in progress. This may take a few minutes, depending on your history.',
+      'Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running.',
     );
     expect(firstSynchronizationInProgress({ ...status, syncing: true })).toBe(true);
     expect(firstSynchronizationInProgress({ ...status, syncing: true, lastSyncAt: '2026-09-16T00:00:00Z' })).toBe(false);

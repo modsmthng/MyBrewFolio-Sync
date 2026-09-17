@@ -155,6 +155,37 @@ impl SyncEngine {
             );
         }
         if kind == "notes_prepare" {
+            if payload["afterInitialSync"].as_bool() == Some(true) {
+                // The background first sync may already hold the machine lock while it uploads a
+                // long history. Wait for it instead of failing the server-owned setup action.
+                let mut synchronized = false;
+                for _ in 0..900 {
+                    if self.status().await.last_sync_at.is_some() {
+                        synchronized = true;
+                        break;
+                    }
+                    match self.sync_once().await {
+                        Err(EngineError::Busy) => {
+                            tokio::time::sleep(StdDuration::from_secs(1)).await
+                        }
+                        Ok(()) => {
+                            synchronized = true;
+                            break;
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                if !synchronized {
+                    return Err(EngineError::Busy);
+                }
+                let device_id = self.device_id()?;
+                let backup = self
+                    .cloud
+                    .create_notes_activation_from_import(&device_id)
+                    .await?;
+                self.dismiss_notes_sync_intro().await?;
+                return Ok(json!({"backupId":backup["backup"]["id"]}));
+            }
             let preview = self
                 .prepare_headless_notes_activation()
                 .await

@@ -9,7 +9,7 @@ import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import './style.css';
 
 export const FIRST_SYNCHRONIZATION_MESSAGE =
-  'First synchronization in progress. This may take a few minutes, depending on your history.';
+  'Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running.';
 
 export function firstSynchronizationInProgress(status) {
   return Boolean(status?.connected && status?.syncing && !status?.lastSyncAt && !status?.lastError);
