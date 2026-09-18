@@ -32,6 +32,8 @@ pub struct AppStatus {
     pub syncing: bool,
     pub last_sync_at: Option<String>,
     pub last_error: Option<String>,
+    pub last_error_code: Option<String>,
+    pub last_error_at: Option<String>,
     pub sync_progress: Option<SyncProgress>,
     pub profiles: usize,
     pub shots: usize,

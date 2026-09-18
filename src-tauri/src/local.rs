@@ -27,14 +27,36 @@ pub enum LocalError {
     Unreachable,
     #[error("The GaggiMate returned invalid data")]
     InvalidData,
+    #[error("The GaggiMate returned invalid data while reading the history index")]
+    InvalidHistoryIndex,
+    #[error("The GaggiMate returned invalid data while reading shot {0}")]
+    InvalidShot(u32),
+    #[error("The GaggiMate returned invalid data while reading Notes for shot {0}")]
+    InvalidNotes(u32),
+    #[error("The GaggiMate returned invalid data while listing profiles")]
+    InvalidProfileList,
+    #[error("The GaggiMate returned invalid data while reading profile {0}")]
+    InvalidProfile(String),
+    #[error("The GaggiMate returned invalid data while updating profile {0}")]
+    InvalidProfileUpdate(String),
     #[error("GaggiMate shot format version {0} is not supported by this MyBrewFolio Sync version")]
     UnsupportedShotFormat(u8),
 }
 
-fn shot_parse_error(error: BinaryError) -> LocalError {
+impl LocalError {
+    fn with_context(self, context: Self) -> Self {
+        if matches!(self, Self::InvalidData) {
+            context
+        } else {
+            self
+        }
+    }
+}
+
+fn shot_parse_error(id: u32, error: BinaryError) -> LocalError {
     match error {
         BinaryError::UnsupportedVersion(version) => LocalError::UnsupportedShotFormat(version),
-        _ => LocalError::InvalidData,
+        _ => LocalError::InvalidShot(id),
     }
 }
 
@@ -201,13 +223,20 @@ impl GaggiMateClient {
     }
 
     pub async fn shot_index(&self) -> Result<Vec<IndexEntry>, LocalError> {
-        parse_index(&self.bytes("/api/history/index.bin").await?)
-            .map_err(|_| LocalError::InvalidData)
+        let bytes = self
+            .bytes("/api/history/index.bin")
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidHistoryIndex))?;
+        parse_index(&bytes).map_err(|_| LocalError::InvalidHistoryIndex)
     }
 
     pub async fn shot(&self, id: u32) -> Result<Value, LocalError> {
         let path = format!("/api/history/{id:06}.slog");
-        parse_shot(&self.bytes(&path).await?, id).map_err(shot_parse_error)
+        let bytes = self
+            .bytes(&path)
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidShot(id)))?;
+        parse_shot(&bytes, id).map_err(|error| shot_parse_error(id, error))
     }
 
     pub async fn notes(&self, id: u32) -> Result<Option<Value>, LocalError> {
@@ -216,7 +245,8 @@ impl GaggiMateClient {
                 "req:history:notes:get",
                 json!({ "id": id.to_string() }),
             )
-            .await?;
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidNotes(id)))?;
         // Real GaggiMate versions may report a missing notes record as a
         // protocol-level error instead of returning an empty object.
         if response.get("error").is_some() {
@@ -228,16 +258,16 @@ impl GaggiMateClient {
         if notes.is_null() {
             return Ok(None);
         }
-        let object = notes.as_object().ok_or(LocalError::InvalidData)?;
+        let object = notes.as_object().ok_or(LocalError::InvalidNotes(id))?;
         if object.is_empty() {
             return Ok(None);
         }
         if serde_json::to_vec(&notes)
-            .map_err(|_| LocalError::InvalidData)?
+            .map_err(|_| LocalError::InvalidNotes(id))?
             .len()
             > 64 * 1024
         {
-            return Err(LocalError::InvalidData);
+            return Err(LocalError::InvalidNotes(id));
         }
         Ok(Some(notes))
     }
@@ -247,19 +277,20 @@ impl GaggiMateClient {
     /// with their requested content; GaggiMate acknowledges the WebSocket
     /// command before a filesystem write can be observed by a later request.
     pub async fn write_notes(&self, id: u32, notes: &Value) -> Result<(), LocalError> {
-        let object = notes.as_object().ok_or(LocalError::InvalidData)?;
+        let object = notes.as_object().ok_or(LocalError::InvalidNotes(id))?;
         if serde_json::to_vec(notes)
-            .map_err(|_| LocalError::InvalidData)?
+            .map_err(|_| LocalError::InvalidNotes(id))?
             .len()
             > 64 * 1024
         {
-            return Err(LocalError::InvalidData);
+            return Err(LocalError::InvalidNotes(id));
         }
         self.websocket_request(
             "req:history:notes:save",
             json!({ "id": id.to_string(), "notes": object }),
         )
-        .await?;
+        .await
+        .map_err(|error| error.with_context(LocalError::InvalidNotes(id)))?;
         Ok(())
     }
 
@@ -343,22 +374,29 @@ impl GaggiMateClient {
     pub async fn profiles(&self) -> Result<Vec<(String, Result<Value, LocalError>)>, LocalError> {
         let listing = self
             .websocket_request("req:profiles:list", json!({ "minimal": true }))
-            .await?;
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidProfileList))?;
         let profiles = listing
             .get("profiles")
             .and_then(Value::as_array)
-            .ok_or(LocalError::InvalidData)?;
+            .ok_or(LocalError::InvalidProfileList)?;
         let mut result = Vec::with_capacity(profiles.len());
         for profile in profiles {
             let id = profile
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or(LocalError::InvalidData)?
+                .ok_or(LocalError::InvalidProfileList)?
                 .to_string();
             let loaded = self
                 .websocket_request("req:profiles:load", json!({ "id": id }))
                 .await
-                .and_then(|value| value.get("profile").cloned().ok_or(LocalError::InvalidData));
+                .map_err(|error| error.with_context(LocalError::InvalidProfile(id.clone())))
+                .and_then(|value| {
+                    value
+                        .get("profile")
+                        .cloned()
+                        .ok_or_else(|| LocalError::InvalidProfile(id.clone()))
+                });
             result.push((id, loaded));
         }
         Ok(result)
@@ -367,11 +405,12 @@ impl GaggiMateClient {
     pub async fn profile_inventory(&self) -> Result<Vec<Value>, LocalError> {
         let listing = self
             .websocket_request("req:profiles:list", json!({ "minimal": true }))
-            .await?;
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidProfileList))?;
         let profiles = listing
             .get("profiles")
             .and_then(Value::as_array)
-            .ok_or(LocalError::InvalidData)?;
+            .ok_or(LocalError::InvalidProfileList)?;
         profiles
             .iter()
             .map(|profile| {
@@ -379,12 +418,12 @@ impl GaggiMateClient {
                     .get("id")
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty() && id.len() <= 128)
-                    .ok_or(LocalError::InvalidData)?;
+                    .ok_or(LocalError::InvalidProfileList)?;
                 let label = profile
                     .get("label")
                     .and_then(Value::as_str)
                     .filter(|label| !label.is_empty() && label.len() <= 240)
-                    .ok_or(LocalError::InvalidData)?;
+                    .ok_or(LocalError::InvalidProfileList)?;
                 Ok(json!({
                     "id": id,
                     "label": label,
@@ -397,22 +436,23 @@ impl GaggiMateClient {
 
     pub async fn load_profile(&self, id: &str) -> Result<Value, LocalError> {
         if id.is_empty() || id.len() > 128 {
-            return Err(LocalError::InvalidData);
+            return Err(LocalError::InvalidProfile(id.to_string()));
         }
         let response = self
             .websocket_request("req:profiles:load", json!({ "id": id }))
-            .await?;
+            .await
+            .map_err(|error| error.with_context(LocalError::InvalidProfile(id.to_string())))?;
         let profile = response
             .get("profile")
             .cloned()
-            .ok_or(LocalError::InvalidData)?;
+            .ok_or_else(|| LocalError::InvalidProfile(id.to_string()))?;
         if !profile.is_object()
             || serde_json::to_vec(&profile)
-                .map_err(|_| LocalError::InvalidData)?
+                .map_err(|_| LocalError::InvalidProfile(id.to_string()))?
                 .len()
                 > 1024 * 1024
         {
-            return Err(LocalError::InvalidData);
+            return Err(LocalError::InvalidProfile(id.to_string()));
         }
         Ok(profile)
     }
@@ -439,7 +479,10 @@ impl GaggiMateClient {
             .to_string();
         let response = self
             .websocket_request("req:profiles:save", json!({ "profile": safe }))
-            .await?;
+            .await
+            .map_err(|error| {
+                error.with_context(LocalError::InvalidProfileUpdate(requested_id.clone()))
+            })?;
         // IDs are firmware-managed: when the machine assigns a fresh ID, all
         // following load/favorite/select operations must use that ID rather
         // than the Store draft's requested one.
@@ -448,13 +491,19 @@ impl GaggiMateClient {
 
     pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {
         self.websocket_request("req:profiles:favorite", json!({ "id": id }))
-            .await?;
+            .await
+            .map_err(|error| {
+                error.with_context(LocalError::InvalidProfileUpdate(id.to_string()))
+            })?;
         Ok(())
     }
 
     pub async fn select_profile(&self, id: &str) -> Result<(), LocalError> {
         self.websocket_request("req:profiles:select", json!({ "id": id }))
-            .await?;
+            .await
+            .map_err(|error| {
+                error.with_context(LocalError::InvalidProfileUpdate(id.to_string()))
+            })?;
         Ok(())
     }
 }
@@ -466,13 +515,29 @@ mod tests {
     #[test]
     fn unsupported_shot_format_is_reported_separately() {
         assert!(matches!(
-            shot_parse_error(BinaryError::UnsupportedVersion(7)),
+            shot_parse_error(42, BinaryError::UnsupportedVersion(7)),
             LocalError::UnsupportedShotFormat(7)
         ));
         assert!(matches!(
-            shot_parse_error(BinaryError::Truncated),
-            LocalError::InvalidData
+            shot_parse_error(42, BinaryError::Truncated),
+            LocalError::InvalidShot(42)
         ));
+    }
+
+    #[test]
+    fn invalid_data_context_names_only_the_affected_local_record() {
+        assert_eq!(
+            LocalError::InvalidHistoryIndex.to_string(),
+            "The GaggiMate returned invalid data while reading the history index"
+        );
+        assert_eq!(
+            LocalError::InvalidNotes(123).to_string(),
+            "The GaggiMate returned invalid data while reading Notes for shot 123"
+        );
+        assert_eq!(
+            LocalError::InvalidProfile("profile-abc".into()).to_string(),
+            "The GaggiMate returned invalid data while reading profile profile-abc"
+        );
     }
 
     #[test]

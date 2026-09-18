@@ -139,6 +139,19 @@ Change the machine's address in the container environment, then recreate the con
 `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` local; it is never sent to MyBrewFolio. If the environment variable
 is omitted, the local `host set` command can persist the address in the data directory.
 
+### Reading connection errors
+
+Each failed automatic attempt is written with a UTC timestamp and is retried after 30 seconds. For
+example:
+
+```text
+2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.
+```
+
+Errors that mention a Shot, Notes, or Profile include the local GaggiMate ID so you can identify the
+affected record. They never include Notes contents or credentials. Run `mybrewfolio-syncd diagnose`
+inside the container for the most recent error code, timestamp, and recovery guidance.
+
 ### Updating Docker
 
 Use your NAS's image update/recreate action while preserving the `/data` mount. For Compose:

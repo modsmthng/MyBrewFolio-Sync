@@ -188,9 +188,11 @@ fn should_refresh_notes(
 fn shot_read_failure(error: &LocalError) -> String {
     match error {
         LocalError::UnsupportedShotFormat(version) => {
-            format!("GaggiMate shot format v{version} is not supported by this MyBrewFolio Sync version")
+            format!(
+                "GaggiMate shot format v{version} is not supported by this MyBrewFolio Sync version. Update MyBrewFolio Sync before retrying this shot."
+            )
         }
-        _ => "Shot could not be read from the GaggiMate".into(),
+        _ => error.to_string(),
     }
 }
 
@@ -242,6 +244,55 @@ fn requested_profile(payload: &Value) -> ProfileStoreResult<(&Value, &str)> {
         "The Store profile ID is missing".into(),
     ))?;
     Ok((profile, profile_id))
+}
+
+fn profile_store_issue_source_key(payload: &Value) -> String {
+    payload
+        .get("profile")
+        .and_then(|profile| profile.get("id"))
+        .or_else(|| {
+            payload
+                .get("profileIds")
+                .and_then(Value::as_array)
+                .and_then(|ids| ids.first())
+        })
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty() && id.len() <= 128)
+        .unwrap_or("profile-store")
+        .to_string()
+}
+
+fn profile_store_public_error_message(code: &str, message: &str) -> String {
+    match code {
+        "GAGGIMATE_UNREACHABLE" => {
+            "GaggiMate could not be reached while completing this profile operation. Check local Sync diagnostics and try again.".into()
+        }
+        "GAGGIMATE_DATA_INVALID"
+        | "GAGGIMATE_HOST_INVALID"
+        | "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"
+        | "PROFILE_LOAD_FAILED"
+        | "PROFILE_SAVE_FAILED" => {
+            "GaggiMate could not complete this profile operation. Check local Sync diagnostics and try again.".into()
+        }
+        _ => message.to_string(),
+    }
+}
+
+fn profile_store_local_error(error: LocalError) -> (&'static str, String) {
+    let message = error.to_string();
+    let code = match &error {
+        LocalError::Unreachable => "GAGGIMATE_UNREACHABLE",
+        LocalError::InvalidHost => "GAGGIMATE_HOST_INVALID",
+        LocalError::UnsupportedShotFormat(_) => "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED",
+        LocalError::InvalidData
+        | LocalError::InvalidHistoryIndex
+        | LocalError::InvalidShot(_)
+        | LocalError::InvalidNotes(_)
+        | LocalError::InvalidProfileList
+        | LocalError::InvalidProfile(_)
+        | LocalError::InvalidProfileUpdate(_) => "GAGGIMATE_DATA_INVALID",
+    };
+    (code, message)
 }
 
 fn profile_install_request(payload: &Value) -> ProfileStoreResult<ProfileInstallRequest<'_>> {
@@ -380,7 +431,7 @@ async fn profile_inventory_operation(local: &GaggiMateClient) -> ProfileStoreRes
     let profiles = local
         .profile_inventory()
         .await
-        .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+        .map_err(profile_store_local_error)?;
     Ok(json!({ "profiles": profiles }))
 }
 
@@ -422,7 +473,7 @@ async fn profile_install_preview_operation(
     let inventory = local
         .profile_inventory()
         .await
-        .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+        .map_err(profile_store_local_error)?;
     let collision = profile_collision(local, &inventory, profile_id, profile).await?;
     Ok(json!({
         "collision": collision,
@@ -439,7 +490,7 @@ async fn profile_install_operation(
     let inventory = local
         .profile_inventory()
         .await
-        .map_err(|error| ("GAGGIMATE_UNREACHABLE", error.to_string()))?;
+        .map_err(profile_store_local_error)?;
     let collision =
         profile_collision(local, &inventory, request.profile_id, request.profile).await?;
     let already_installed = validate_profile_install(&request, collision)?;
@@ -491,7 +542,15 @@ impl EngineError {
             Self::Cloud(CloudError::Rejected) => "SYNC_DATA_REJECTED",
             Self::Local(LocalError::InvalidHost) => "GAGGIMATE_HOST_INVALID",
             Self::Local(LocalError::Unreachable) => "GAGGIMATE_UNREACHABLE",
-            Self::Local(LocalError::InvalidData) => "GAGGIMATE_DATA_INVALID",
+            Self::Local(
+                LocalError::InvalidData
+                | LocalError::InvalidHistoryIndex
+                | LocalError::InvalidShot(_)
+                | LocalError::InvalidNotes(_)
+                | LocalError::InvalidProfileList
+                | LocalError::InvalidProfile(_)
+                | LocalError::InvalidProfileUpdate(_),
+            ) => "GAGGIMATE_DATA_INVALID",
             Self::Local(LocalError::UnsupportedShotFormat(_)) => {
                 "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"
             }
@@ -501,6 +560,13 @@ impl EngineError {
             Self::OAuthState => "SYNC_OAUTH_STATE_INVALID",
             Self::Busy => "SYNC_ALREADY_RUNNING",
         }
+    }
+
+    fn machine_reachable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Local(LocalError::InvalidHost | LocalError::Unreachable)
+        )
     }
 }
 
@@ -659,6 +725,8 @@ impl SyncEngine {
                 syncing: false,
                 last_sync_at: None,
                 last_error: None,
+                last_error_code: None,
+                last_error_at: None,
                 sync_progress: None,
                 profiles: 0,
                 shots: 0,
@@ -732,6 +800,7 @@ impl SyncEngine {
         let status = self.status().await;
         let pending = self.store.pending_count()?;
         let failures = self.store.failure_count()?;
+        let issues = self.store.failures()?;
         Ok(json!({
             "connection": {
                 "connected": status.connected,
@@ -740,8 +809,11 @@ impl SyncEngine {
                 "syncing": status.syncing,
                 "lastSyncAt": status.last_sync_at,
                 "lastError": status.last_error,
+                "lastErrorCode": status.last_error_code,
+                "lastErrorAt": status.last_error_at,
                 "syncProgress": status.sync_progress,
             },
+            "issues": issues,
             "items": {
                 "profiles": status.profiles,
                 "shots": status.shots,
@@ -1221,6 +1293,8 @@ impl SyncEngine {
         status.connected = true;
         status.this_device_id = Some(device.id);
         status.last_error = None;
+        status.last_error_code = None;
+        status.last_error_at = None;
         Ok(())
     }
 
@@ -1471,16 +1545,19 @@ impl SyncEngine {
                                 })?;
                             }
                         }
-                        Err(_) => {
-                            let reason = "Notes could not be read from the GaggiMate";
+                        Err(error) => {
+                            let reason = error.to_string();
                             self.store.record_failure(
                                 None,
                                 "notes",
                                 &source_key,
                                 "read",
-                                reason,
+                                &reason,
                             )?;
-                            skipped.push(format!("Notes for shot {} could not be read", entry.id))
+                            skipped.push(format!(
+                                "Notes for shot {} could not be read: {reason}",
+                                entry.id
+                            ))
                         }
                     }
                 }
@@ -1534,15 +1611,11 @@ impl SyncEngine {
             }
             let data = match loaded {
                 Ok(data) => data,
-                Err(_) => {
-                    self.store.record_failure(
-                        None,
-                        "profile",
-                        &id,
-                        "read",
-                        "Profile could not be read from the GaggiMate",
-                    )?;
-                    skipped.push(format!("Profile {id} could not be read"));
+                Err(error) => {
+                    let reason = error.to_string();
+                    self.store
+                        .record_failure(None, "profile", &id, "read", &reason)?;
+                    skipped.push(format!("Profile {id} could not be read: {reason}"));
                     continue;
                 }
             };
@@ -1754,9 +1827,9 @@ impl SyncEngine {
             let current = match local.notes(machine_id).await {
                 Ok(notes) => normalized_notes(notes.unwrap_or_else(|| serde_json::json!({}))),
                 Err(error) => {
-                    let reason = "GaggiMate could not be reached to verify the Notes update. Sync will retry automatically.";
+                    let reason = error.to_string();
                     self.store
-                        .record_failure(None, "notes", source_key, "write", reason)?;
+                        .record_failure(None, "notes", source_key, "write", &reason)?;
                     self.cloud
                         .complete_outbound_note(
                             device_id,
@@ -1860,9 +1933,9 @@ impl SyncEngine {
                         .await?;
                 }
                 Err(error) => {
-                    let reason = "GaggiMate could not confirm the Notes update. Sync will retry automatically.";
+                    let reason = error.to_string();
                     self.store
-                        .record_failure(None, "notes", source_key, "write", reason)?;
+                        .record_failure(None, "notes", source_key, "write", &reason)?;
                     self.cloud
                         .complete_outbound_note(
                             device_id,
@@ -2047,12 +2120,32 @@ impl SyncEngine {
                     "status": "completed",
                     "result": result,
                 }),
-                Err((code, message)) => json!({
-                    "leaseToken": lease_token,
-                    "status": "failed",
-                    "errorCode": code,
-                    "errorMessage": message,
-                }),
+                Err((code, message)) => {
+                    if matches!(
+                        code,
+                        "GAGGIMATE_UNREACHABLE"
+                            | "GAGGIMATE_DATA_INVALID"
+                            | "GAGGIMATE_HOST_INVALID"
+                            | "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"
+                            | "PROFILE_LOAD_FAILED"
+                            | "PROFILE_SAVE_FAILED"
+                    ) {
+                        let source_key = profile_store_issue_source_key(&payload);
+                        self.store.record_failure(
+                            None,
+                            "profile",
+                            &source_key,
+                            "store",
+                            &message,
+                        )?;
+                    }
+                    json!({
+                        "leaseToken": lease_token,
+                        "status": "failed",
+                        "errorCode": code,
+                        "errorMessage": profile_store_public_error_message(code, &message),
+                    })
+                }
             };
             let completion = if completion.get("errorCode").and_then(Value::as_str)
                 == Some("SAVE_CONFIRMATION_PENDING")
@@ -2097,7 +2190,6 @@ impl SyncEngine {
         {
             let mut status = self.status.write().await;
             status.syncing = true;
-            status.last_error = None;
         }
         let host = self
             .store
@@ -2222,6 +2314,8 @@ impl SyncEngine {
                     skipped.len() + invalid
                 )
             });
+            status.last_error_code = warning_code.map(str::to_string);
+            status.last_error_at = warning_code.map(|_| api_timestamp(Utc::now()));
             status.issues = self.store.failures().unwrap_or_default();
             Ok::<(), EngineError>(())
         }
@@ -2245,6 +2339,8 @@ impl SyncEngine {
                     syncing: false,
                     last_sync_at: None,
                     last_error: Some(error.to_string()),
+                    last_error_code: Some(error.heartbeat_code().to_string()),
+                    last_error_at: Some(api_timestamp(Utc::now())),
                     sync_progress: None,
                     profiles: 0,
                     shots: 0,
@@ -2266,10 +2362,14 @@ impl SyncEngine {
                 return result;
             }
             let message = error.to_string();
+            let error_code = error.heartbeat_code();
+            let error_at = api_timestamp(Utc::now());
             let (machine_reachable, last_sync_at) = {
                 let mut status = self.status.write().await;
-                status.machine_reachable = !matches!(error, EngineError::Local(_));
+                status.machine_reachable = error.machine_reachable();
                 status.last_error = Some(message.clone());
+                status.last_error_code = Some(error_code.to_string());
+                status.last_error_at = Some(error_at);
                 status.sync_progress = None;
                 (status.machine_reachable, status.last_sync_at.clone())
             };
@@ -2279,7 +2379,7 @@ impl SyncEngine {
                     &device_id,
                     machine_reachable,
                     last_sync_at.as_deref(),
-                    Some(error.heartbeat_code()),
+                    Some(error_code),
                     None,
                 )
                 .await;
@@ -2314,6 +2414,8 @@ impl SyncEngine {
             syncing: false,
             last_sync_at: None,
             last_error: None,
+            last_error_code: None,
+            last_error_at: None,
             sync_progress: None,
             profiles: 0,
             shots: 0,
@@ -2338,6 +2440,41 @@ impl SyncEngine {
     }
 }
 
+fn gaggimate_unreachable_guidance(host: &str) -> Value {
+    let message = if host.eq_ignore_ascii_case("gaggimate.local") {
+        "GaggiMate could not be reached. Docker and NAS containers may not resolve gaggimate.local. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
+    } else {
+        "GaggiMate could not be reached through the configured private LAN address. Check that GaggiMate is online and reachable from the Docker or NAS network."
+    };
+    json!({
+        "code": "GAGGIMATE_UNREACHABLE",
+        "message": message,
+        "nextCommand": format!("host set {host}"),
+    })
+}
+
+fn local_error_guidance(status: &AppStatus) -> Option<Value> {
+    let code = status.last_error_code.as_deref()?;
+    match code {
+        "GAGGIMATE_UNREACHABLE" => Some(gaggimate_unreachable_guidance(&status.machine_host)),
+        "GAGGIMATE_HOST_INVALID" => Some(json!({
+            "code": code,
+            "message": "The configured GaggiMate address is invalid. Use gaggimate.local or a private LAN IP address.",
+            "nextCommand": "host set <private-lan-ip>",
+        })),
+        "GAGGIMATE_DATA_INVALID" => Some(json!({
+            "code": code,
+            "message": status.last_error.as_deref().unwrap_or("GaggiMate returned invalid data. Retry the synchronization."),
+            "nextCommand": "sync-once",
+        })),
+        "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED" => Some(json!({
+            "code": code,
+            "message": status.last_error.as_deref().unwrap_or("This GaggiMate shot format needs a newer MyBrewFolio Sync version."),
+        })),
+        _ => None,
+    }
+}
+
 fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> Vec<Value> {
     let mut guidance = Vec::new();
     if !status.connected {
@@ -2347,12 +2484,12 @@ fn diagnostic_guidance(status: &AppStatus, pending: usize, failures: usize) -> V
             "nextCommand": "auth begin",
         }));
     }
-    if status.connected && !status.machine_reachable {
-        guidance.push(json!({
-            "code": "GAGGIMATE_UNREACHABLE",
-            "message": format!("GaggiMate at {} is not currently reachable. Check the hostname, IP address, and Docker network.", status.machine_host),
-            "nextCommand": format!("host set {}", status.machine_host),
-        }));
+    if status.connected {
+        if let Some(local_error) = local_error_guidance(status) {
+            guidance.push(local_error);
+        } else if !status.machine_reachable {
+            guidance.push(gaggimate_unreachable_guidance(&status.machine_host));
+        }
     }
     if pending > 0 {
         guidance.push(json!({
@@ -2396,10 +2533,11 @@ mod tests {
 
     use super::{
         api_timestamp, batch_result_status, diagnostic_guidance, hash_value,
-        is_terminal_batch_status, normalized_notes, notes_are_semantically_empty, profiles_equal,
-        scan_due, select_sync_batch, serialized_batch_bytes, shot_fingerprint, shot_read_failure,
+        is_terminal_batch_status, normalized_notes, notes_are_semantically_empty,
+        profile_store_local_error, profile_store_public_error_message, profiles_equal, scan_due,
+        select_sync_batch, serialized_batch_bytes, shot_fingerprint, shot_read_failure,
         shot_source_key, should_refresh_notes, suppressed_items, sync_progress_log_line,
-        NotesWriteOutcome, SyncEngine, MAX_SYNC_BATCH_BYTES, NOTES_WRITE_ATTEMPTS,
+        EngineError, NotesWriteOutcome, SyncEngine, MAX_SYNC_BATCH_BYTES, NOTES_WRITE_ATTEMPTS,
     };
     use crate::model::{
         AppStatus, IndexEntry, OAuthTokens, SyncObject, SyncProgress, SyncProgressPhase,
@@ -2510,6 +2648,8 @@ mod tests {
             syncing: false,
             last_sync_at: None,
             last_error: None,
+            last_error_code: None,
+            last_error_at: None,
             sync_progress: None,
             profiles: 0,
             shots: 10,
@@ -2800,11 +2940,11 @@ mod tests {
     fn unsupported_shot_format_has_an_actionable_failure_message() {
         assert_eq!(
             shot_read_failure(&LocalError::UnsupportedShotFormat(7)),
-            "GaggiMate shot format v7 is not supported by this MyBrewFolio Sync version"
+            "GaggiMate shot format v7 is not supported by this MyBrewFolio Sync version. Update MyBrewFolio Sync before retrying this shot."
         );
         assert_eq!(
-            shot_read_failure(&LocalError::InvalidData),
-            "Shot could not be read from the GaggiMate"
+            shot_read_failure(&LocalError::InvalidShot(123)),
+            "The GaggiMate returned invalid data while reading shot 123"
         );
     }
 
@@ -2865,6 +3005,56 @@ mod tests {
             .as_str()
             .expect("diagnostic message")
             .contains("Nothing was restored or imported automatically"));
+    }
+
+    #[test]
+    fn diagnostics_keep_invalid_data_context_and_do_not_treat_it_as_unreachable() {
+        let mut status = status();
+        status.last_error =
+            Some("The GaggiMate returned invalid data while reading Notes for shot 123".into());
+        status.last_error_code = Some("GAGGIMATE_DATA_INVALID".into());
+        status.last_error_at = Some("2026-09-18T14:30:00Z".into());
+        status.machine_reachable = true;
+
+        let report = diagnostic_guidance(&status, 0, 0);
+        assert_eq!(report[0]["code"], "GAGGIMATE_DATA_INVALID");
+        assert_eq!(
+            report[0]["message"],
+            "The GaggiMate returned invalid data while reading Notes for shot 123"
+        );
+        assert!(EngineError::Local(LocalError::InvalidNotes(123)).machine_reachable());
+    }
+
+    #[test]
+    fn diagnostics_explain_docker_local_hostname_recovery_without_exposing_an_ip() {
+        let mut status = status();
+        status.last_error_code = Some("GAGGIMATE_UNREACHABLE".into());
+        status.last_error_at = Some("2026-09-18T14:30:00Z".into());
+        status.machine_reachable = false;
+
+        let report = diagnostic_guidance(&status, 0, 0);
+        let message = report[0]["message"].as_str().expect("message");
+        assert!(message.contains("MYBREWFOLIO_SYNC_GAGGIMATE_HOST"));
+        assert!(message.contains("private LAN IP"));
+        assert!(!message.contains("192.168."));
+    }
+
+    #[test]
+    fn profile_store_errors_keep_local_profile_ids_out_of_remote_messages() {
+        let local_message =
+            "The GaggiMate returned invalid data while updating profile profile-abc";
+        let public_message =
+            profile_store_public_error_message("PROFILE_SAVE_FAILED", local_message);
+        assert_eq!(
+            public_message,
+            "GaggiMate could not complete this profile operation. Check local Sync diagnostics and try again."
+        );
+        assert!(!public_message.contains("profile-abc"));
+
+        let (code, message) =
+            profile_store_local_error(LocalError::InvalidProfileUpdate("profile-abc".into()));
+        assert_eq!(code, "GAGGIMATE_DATA_INVALID");
+        assert_eq!(message, local_message);
     }
 
     fn sync_object(key: &str, bytes: usize) -> SyncObject {
@@ -3209,6 +3399,8 @@ mod tests {
 
         assert_eq!(report["queue"]["pending"], 1);
         assert_eq!(report["queue"]["failures"], 1);
+        assert_eq!(report["issues"][0]["sourceKey"], "failed");
+        assert_eq!(report["issues"][0]["reason"], "not available");
         let codes = report["guidance"]
             .as_array()
             .expect("guidance list")
@@ -3218,6 +3410,35 @@ mod tests {
         assert!(codes.contains(&"ACCOUNT_NOT_CONNECTED"));
         assert!(codes.contains(&"PENDING_UPLOADS"));
         assert!(codes.contains(&"SYNC_FAILURES"));
+    }
+
+    #[tokio::test]
+    async fn diagnose_reports_the_latest_local_error_without_sensitive_data() {
+        let (engine, _directory) = test_engine();
+        {
+            let mut status = engine.status.write().await;
+            status.connected = true;
+            status.machine_reachable = true;
+            status.last_error =
+                Some("The GaggiMate returned invalid data while reading Notes for shot 123".into());
+            status.last_error_code = Some("GAGGIMATE_DATA_INVALID".into());
+            status.last_error_at = Some("2026-09-18T14:30:00Z".into());
+        }
+
+        let report = engine.diagnose().await.expect("diagnostics");
+
+        assert_eq!(
+            report["connection"]["lastError"],
+            "The GaggiMate returned invalid data while reading Notes for shot 123"
+        );
+        assert_eq!(
+            report["connection"]["lastErrorCode"],
+            "GAGGIMATE_DATA_INVALID"
+        );
+        assert_eq!(report["connection"]["lastErrorAt"], "2026-09-18T14:30:00Z");
+        assert!(report["connection"]["machineReachable"]
+            .as_bool()
+            .expect("machine reachability"));
     }
 
     #[tokio::test]
@@ -3266,6 +3487,12 @@ mod tests {
             .store
             .set_setting("machine_host", &host)
             .expect("host saved");
+        {
+            let mut status = engine.status.write().await;
+            status.last_error = Some("An earlier local error".into());
+            status.last_error_code = Some("GAGGIMATE_DATA_INVALID".into());
+            status.last_error_at = Some("2026-09-18T14:30:00Z".into());
+        }
 
         let skipped = engine
             .queue_local_changes(&local, &json!({ "items": [] }))
@@ -3284,6 +3511,9 @@ mod tests {
         let status = engine.status().await;
         assert!(status.machine_reachable);
         assert!(status.last_sync_at.is_some());
+        assert!(status.last_error.is_none());
+        assert!(status.last_error_code.is_none());
+        assert!(status.last_error_at.is_none());
         assert_eq!((status.profiles, status.shots, status.notes), (1, 1, 1));
         assert_eq!(engine.store.pending_count().expect("empty queue"), 0);
         assert_eq!(engine.store.failure_count().expect("no failures"), 0);

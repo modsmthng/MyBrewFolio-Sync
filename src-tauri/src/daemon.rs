@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::{env, fs, path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, env, fs, path::PathBuf, process::ExitCode, sync::Arc, time::Duration,
+};
 
+use chrono::{SecondsFormat, Utc};
 use mybrewfolio_sync_lib::{
     credentials::{CredentialStore, EncryptedFileCredentialStore},
     engine::{EngineError, SyncEngine},
+    local::LocalError,
+    model::SyncIssue,
     store::AppStore,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +34,58 @@ fn first_sync_notice_due(
 
 fn should_log_sync_error(error: &EngineError) -> bool {
     !matches!(error, EngineError::Busy)
+}
+
+fn timestamped_log_line(timestamp: &str, message: &str) -> String {
+    format!("{timestamp} {message}")
+}
+
+fn daemon_error(message: &str) {
+    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+    eprintln!("{}", timestamped_log_line(&timestamp, message));
+}
+
+fn sync_attempt_message(error: &EngineError, machine_host: &str) -> String {
+    match error {
+        EngineError::Local(LocalError::Unreachable) if machine_host == "gaggimate.local" => {
+            "Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.".into()
+        }
+        EngineError::Local(LocalError::Unreachable) => {
+            "Sync attempt failed: GaggiMate could not be reached through the configured private LAN address. Retrying in 30 seconds. Check that GaggiMate is online and reachable from the Docker or NAS network.".into()
+        }
+        EngineError::Local(LocalError::InvalidHost) => format!(
+            "Sync configuration needs attention: {error}. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to gaggimate.local or GaggiMate's private LAN IP, then recreate the Sync container."
+        ),
+        EngineError::Local(LocalError::UnsupportedShotFormat(_)) => format!(
+            "Sync needs an update: {error}. Update MyBrewFolio Sync before retrying this shot."
+        ),
+        _ => format!("Sync attempt failed: {error}. Retrying in 30 seconds."),
+    }
+}
+
+fn sync_issue_message(issue: &SyncIssue, machine_host: &str) -> String {
+    let reason = issue.reason.trim_end();
+    let punctuation = if reason.ends_with(['.', '!', '?']) {
+        ""
+    } else {
+        "."
+    };
+    let retry = if issue.reason.contains("retry automatically") {
+        String::new()
+    } else {
+        " Retrying automatically.".into()
+    };
+    let docker_advice = if machine_host.eq_ignore_ascii_case("gaggimate.local")
+        && issue.reason.contains("could not be reached")
+    {
+        " Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
+    } else {
+        ""
+    };
+    format!(
+        "Sync item needs another attempt: {}{}{}{}",
+        reason, punctuation, retry, docker_advice
+    )
 }
 
 fn data_dir() -> PathBuf {
@@ -506,7 +563,9 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                     }
                 }
                 Err(error) => {
-                    eprintln!("Account connection unavailable: {error}. Retrying automatically.");
+                    daemon_error(&format!(
+                        "Account connection unavailable: {error}. Retrying automatically."
+                    ));
                     tokio::time::sleep(Duration::from_secs(60)).await;
                 }
             }
@@ -522,7 +581,7 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
         let control_engine = engine.clone();
         tokio::spawn(async move {
             if let Err(error) = serve_control(control_engine, socket).await {
-                eprintln!("control socket error: {error}");
+                daemon_error(&format!("Control socket error: {error}"));
             }
         });
     }
@@ -543,6 +602,7 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
         }
     });
     let mut first_sync_notice_printed = false;
+    let mut logged_issues = HashMap::new();
     loop {
         let status = engine.status().await;
         if status.connected {
@@ -556,8 +616,19 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                 first_sync_notice_printed = true;
             }
             match engine.sync_once().await {
-                Ok(()) => {}
-                Err(error) if should_log_sync_error(&error) => eprintln!("sync error: {error}"),
+                Ok(()) => {
+                    for issue in engine.status().await.issues {
+                        let key = format!("{}:{}:{}", issue.kind, issue.source_key, issue.stage);
+                        let marker = (issue.updated_at, issue.attempts);
+                        if logged_issues.get(&key) != Some(&marker) {
+                            daemon_error(&sync_issue_message(&issue, &status.machine_host));
+                            logged_issues.insert(key, marker);
+                        }
+                    }
+                }
+                Err(error) if should_log_sync_error(&error) => {
+                    daemon_error(&sync_attempt_message(&error, &status.machine_host))
+                }
                 Err(_) => {}
             }
         }
@@ -613,12 +684,16 @@ mod tests {
 
     use super::{
         confirmed, execute, execute_control, first_sync_notice_due, help_text, is_help_request,
-        json_file, should_log_sync_error, ControlRequest, EngineError, SyncEngine,
+        json_file, should_log_sync_error, sync_attempt_message, sync_issue_message,
+        timestamped_log_line, ControlRequest, EngineError, SyncEngine,
         FIRST_SYNCHRONIZATION_MESSAGE,
     };
     #[cfg(unix)]
     use super::{proxy_control, serve_control, ControlResponse};
-    use mybrewfolio_sync_lib::{credentials::EncryptedFileCredentialStore, store::AppStore};
+    use mybrewfolio_sync_lib::{
+        credentials::EncryptedFileCredentialStore, local::LocalError, model::SyncIssue,
+        store::AppStore,
+    };
 
     fn test_engine() -> (Arc<SyncEngine>, tempfile::TempDir) {
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -663,6 +738,51 @@ mod tests {
     #[test]
     fn expected_busy_syncs_are_not_written_as_errors() {
         assert!(!should_log_sync_error(&EngineError::Busy));
+    }
+
+    #[test]
+    fn retry_logs_are_timestamped_and_include_docker_guidance() {
+        let message = sync_attempt_message(
+            &EngineError::Local(LocalError::Unreachable),
+            "gaggimate.local",
+        );
+        assert_eq!(
+            timestamped_log_line("2026-09-18T14:30:00Z", &message),
+            "2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
+        );
+    }
+
+    #[test]
+    fn retry_logs_keep_private_ips_out_of_messages_and_name_invalid_data_context() {
+        let unreachable =
+            sync_attempt_message(&EngineError::Local(LocalError::Unreachable), "192.168.1.42");
+        assert!(unreachable.contains("configured private LAN address"));
+        assert!(!unreachable.contains("192.168.1.42"));
+
+        let notes = sync_attempt_message(
+            &EngineError::Local(LocalError::InvalidNotes(123)),
+            "gaggimate.local",
+        );
+        assert_eq!(
+            notes,
+            "Sync attempt failed: The GaggiMate returned invalid data while reading Notes for shot 123. Retrying in 30 seconds."
+        );
+
+        assert_eq!(
+            sync_issue_message(
+                &SyncIssue {
+                    kind: "notes".into(),
+                    source_key: "123:456".into(),
+                    stage: "read".into(),
+                    reason: "The GaggiMate returned invalid data while reading Notes for shot 123"
+                        .into(),
+                    attempts: 1,
+                    updated_at: 0,
+                },
+                "gaggimate.local",
+            ),
+            "Sync item needs another attempt: The GaggiMate returned invalid data while reading Notes for shot 123. Retrying automatically."
+        );
     }
 
     #[test]
