@@ -36,7 +36,15 @@ Sync. The persistent volume retains the key, account connection and queue across
 
 ### Unraid
 
-Use the supplied [Unraid user template](../unraid/mybrewfolio-sync.xml), or choose **Add Container**
+From an Unraid terminal, install the supplied [Unraid user template](../unraid/mybrewfolio-sync.xml) using the following command:
+
+```sh
+wget -P /boot/config/plugins/dockerMan/templates-user https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/refs/heads/main/unraid/mybrewfolio-sync.xml
+```
+
+From the Docker tab of Unraid, choose ***Add Container*** and select the ***MyBrewFolio-Sync*** template from the ***Templates*** drop-down. Enter your GaggiMate's LAN IP in the appropriate field and click ***Apply***.
+
+Or, without using the supplied user template, choose **Add Container**
 and enter the following settings. The template is provided in this repository; a Community Apps
 listing is not required.
 
