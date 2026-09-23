@@ -546,6 +546,8 @@ impl EngineError {
                 "SYNC_DEVICE_AUTH_EXCHANGE_FAILED"
             }
             Self::Cloud(CloudError::Revoked) => "SYNC_DEVICE_REVOKED",
+            Self::Cloud(CloudError::ReauthRequired) => "SYNC_REAUTH_REQUIRED",
+            Self::Cloud(CloudError::AuthenticationRejected) => "SYNC_AUTH_REJECTED",
             Self::Cloud(CloudError::Unreachable) => "MYBREWFOLIO_UNREACHABLE",
             Self::Cloud(CloudError::Rejected) => "SYNC_DATA_REJECTED",
             Self::Local(LocalError::InvalidHost) => "GAGGIMATE_HOST_INVALID",

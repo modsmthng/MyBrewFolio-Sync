@@ -5,6 +5,153 @@ use super::{
 };
 use crate::{local::GaggiMateClient, model::OAuthTokens};
 use serde_json::json;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
+
+async fn one_cloud_response(status: &str, body: &str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("cloud listener");
+    let address = listener.local_addr().expect("cloud address");
+    let status = status.to_string();
+    let body = body.to_string();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("cloud request");
+        let mut request = [0_u8; 8_192];
+        let _ = stream.read(&mut request).await.expect("cloud request read");
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("cloud response");
+    });
+    format!("http://{address}")
+}
+
+#[tokio::test]
+async fn confirmed_auth_loss_clears_account_data_and_records_reconnect_reason() {
+    for (response, expired, refresh_token, expected_code) in [
+        (
+            Some((
+                "401 Unauthorized",
+                r#"{"details":{"code":"SYNC_DEVICE_REVOKED"}}"#,
+            )),
+            false,
+            Some("refresh"),
+            "SYNC_DEVICE_REVOKED",
+        ),
+        (
+            Some(("400 Bad Request", r#"{"error":"invalid_grant"}"#)),
+            true,
+            Some("refresh"),
+            "SYNC_REAUTH_REQUIRED",
+        ),
+        (None, true, None, "SYNC_REAUTH_REQUIRED"),
+    ] {
+        let (mut engine, _directory) = test_engine();
+        connect_test_engine(&engine);
+        engine.status.write().await.connected = true;
+        engine
+            .store
+            .queue(&sync_object("pending", 10))
+            .expect("queued item");
+        if let Some((status, body)) = response {
+            let url = one_cloud_response(status, body).await;
+            configure_test_cloud(&mut engine, &url);
+        }
+        if expired {
+            engine
+                .credentials
+                .save_tokens(&OAuthTokens {
+                    access_token: "expired".into(),
+                    refresh_token: refresh_token.map(str::to_string),
+                    expires_at: 0,
+                })
+                .expect("expired credentials");
+        }
+
+        assert!(engine.sync_once().await.is_err());
+        assert_eq!(
+            engine.status().await.last_error_code.as_deref(),
+            Some(expected_code)
+        );
+        assert!(!engine.status().await.connected);
+        assert_eq!(engine.store.pending_count().expect("queue count"), 0);
+        assert!(engine.credentials.tokens().expect("tokens read").is_none());
+        assert_eq!(
+            engine
+                .store
+                .setting("reconnect_required_reason")
+                .expect("reason read")
+                .as_deref(),
+            Some(expected_code)
+        );
+        let reopened =
+            super::super::SyncEngine::open(engine.store.clone(), engine.credentials.clone())
+                .expect("engine reopens");
+        assert_eq!(
+            reopened.status().await.last_error_code.as_deref(),
+            Some(expected_code)
+        );
+    }
+}
+
+#[tokio::test]
+async fn temporary_cloud_failure_keeps_account_data_and_credentials() {
+    let (mut engine, _directory) = test_engine();
+    connect_test_engine(&engine);
+    engine.status.write().await.connected = true;
+    engine
+        .store
+        .queue(&sync_object("pending", 10))
+        .expect("queued item");
+    let url = one_cloud_response(
+        "503 Service Unavailable",
+        r#"{"error":"temporarily unavailable"}"#,
+    )
+    .await;
+    configure_test_cloud(&mut engine, &url);
+
+    assert!(engine.sync_once().await.is_err());
+    assert!(engine.status().await.connected);
+    assert_eq!(engine.store.pending_count().expect("queue count"), 1);
+    assert!(engine.credentials.tokens().expect("tokens read").is_some());
+    assert!(engine
+        .store
+        .setting("reconnect_required_reason")
+        .expect("reason read")
+        .is_none());
+}
+
+#[tokio::test]
+async fn missing_tokens_on_restart_require_reconnection_without_retaining_old_queue() {
+    let (engine, _directory) = test_engine();
+    connect_test_engine(&engine);
+    engine
+        .store
+        .queue(&sync_object("pending", 10))
+        .expect("queued item");
+    engine.credentials.delete_tokens().expect("tokens removed");
+
+    let reopened = super::super::SyncEngine::open(engine.store.clone(), engine.credentials.clone())
+        .expect("engine reopens");
+    assert!(!reopened.status().await.connected);
+    assert_eq!(
+        reopened.status().await.last_error_code.as_deref(),
+        Some("SYNC_REAUTH_REQUIRED")
+    );
+    assert_eq!(engine.store.pending_count().expect("queue count"), 0);
+    assert!(engine
+        .store
+        .setting("device_id")
+        .expect("device read")
+        .is_none());
+}
 
 #[tokio::test]
 async fn updates_status_counts_and_notes_metadata_from_cloud_state() {
@@ -189,6 +336,10 @@ async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch()
 #[tokio::test]
 async fn browser_and_device_pairing_register_the_same_connected_installation() {
     let (mut engine, _directory) = test_engine();
+    engine
+        .store
+        .set_setting("reconnect_required_reason", "SYNC_REAUTH_REQUIRED")
+        .expect("reconnect reason saved");
     let api_url = cloud_server(vec![
             r#"{"access_token":"browser-access","refresh_token":"browser-refresh","expires_in":3600}"#,
             r#"{"device":{"id":"desktop-device","sourceId":"desktop-source"}}"#,
@@ -216,6 +367,11 @@ async fn browser_and_device_pairing_register_the_same_connected_installation() {
         engine.status().await.this_device_id.as_deref(),
         Some("desktop-device")
     );
+    assert!(engine
+        .store
+        .setting("reconnect_required_reason")
+        .expect("reason read")
+        .is_none());
 
     let pairing = engine.begin_device_oauth().await.expect("pairing starts");
     assert_eq!(pairing.user_code, "ABCD-1234");

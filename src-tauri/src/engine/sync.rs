@@ -701,12 +701,17 @@ impl SyncEngine {
         }
         .await;
         if let Err(error) = &result {
-            if matches!(error, EngineError::Cloud(CloudError::Revoked)) {
+            if matches!(
+                error,
+                EngineError::Cloud(CloudError::Revoked | CloudError::ReauthRequired)
+            ) {
                 // Device revocation is checked by the API for every request.
                 // Clear credentials and queued account data immediately so a
                 // revoked installation cannot keep presenting itself as linked.
                 self.credentials.delete_tokens()?;
                 self.store.clear_account_data()?;
+                self.store
+                    .set_setting("reconnect_required_reason", error.heartbeat_code())?;
                 self.store.set_setting("headless_pairing_disabled", "1")?;
                 let host = self
                     .store

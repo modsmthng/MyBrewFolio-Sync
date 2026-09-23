@@ -57,6 +57,11 @@ mod desktop {
         requested: AtomicBool,
     }
 
+    #[derive(Default)]
+    struct ReconnectPromptState {
+        shown: AtomicBool,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum RestartSchedule {
         Now,
@@ -88,8 +93,24 @@ mod desktop {
         NotConfigured,
     }
 
+    fn should_show_reconnect_prompt(status: &AppStatus, shown: &AtomicBool) -> bool {
+        if status.connected {
+            shown.store(false, Ordering::SeqCst);
+            return false;
+        }
+        matches!(
+            status.last_error_code.as_deref(),
+            Some("SYNC_REAUTH_REQUIRED" | "SYNC_DEVICE_REVOKED")
+        ) && !shown.swap(true, Ordering::SeqCst)
+    }
+
     async fn emit_status(app: &tauri::AppHandle, engine: &SyncEngine) {
         let status = engine.status().await;
+        if let Some(prompt) = app.try_state::<ReconnectPromptState>() {
+            if should_show_reconnect_prompt(&status, &prompt.shown) {
+                show_main_window(app);
+            }
+        }
         if let Some(item) = app.try_state::<TrayStatusItem>() {
             let text = if status.syncing {
                 "Syncing…"
@@ -1048,6 +1069,7 @@ mod desktop {
         let store = Arc::new(AppStore::open(&data_dir.join("sync.sqlite"))?);
         app.manage(store.clone());
         app.manage(Arc::new(UpdateRestartState::default()));
+        app.manage(ReconnectPromptState::default());
         let engine = Arc::new(SyncEngine::open(
             store.clone(),
             Arc::new(KeyringCredentialStore),
@@ -1154,6 +1176,11 @@ mod desktop {
         store: Arc<AppStore>,
         startup_diagnostics: Arc<StartupDiagnostics>,
     ) {
+        let initial_handle = app.handle().clone();
+        let initial_engine = engine.clone();
+        tauri::async_runtime::spawn(async move {
+            emit_status(&initial_handle, &initial_engine).await;
+        });
         let autostart_handle = app.handle().clone();
         tauri::async_runtime::spawn(async move {
             if let Ok(status) = autostart_status(&autostart_handle).await {
@@ -1326,10 +1353,54 @@ mod desktop {
     mod tests {
         use super::{
             autostart_status_from_state, has_autostart_argument, is_store_managed_build,
-            restart_schedule, update_check_required, update_due, RestartSchedule,
-            StoreStartupTaskState, UpdateStatus,
+            restart_schedule, should_show_reconnect_prompt, update_check_required, update_due,
+            RestartSchedule, StoreStartupTaskState, UpdateStatus,
         };
         use chrono::{Duration, TimeZone, Utc};
+        use std::sync::atomic::AtomicBool;
+
+        #[test]
+        fn reconnect_prompt_opens_once_for_confirmed_auth_loss_only() {
+            let shown = AtomicBool::new(false);
+            let mut status = crate::model::AppStatus {
+                connected: true,
+                machine_host: String::new(),
+                machine_reachable: false,
+                syncing: false,
+                last_sync_at: None,
+                last_error: None,
+                last_error_code: None,
+                last_error_at: None,
+                sync_progress: None,
+                profiles: 0,
+                shots: 0,
+                notes: 0,
+                conflicts: 0,
+                suppressed: 0,
+                initial_sync_configured: false,
+                duplicate_policy: String::new(),
+                notes_sync_status: String::new(),
+                notes_sync_target_device_id: None,
+                notes_sync_writer_device_id: None,
+                this_device_id: None,
+                notes_sync_intro_seen: false,
+                note_backups: Vec::new(),
+                issues: Vec::new(),
+            };
+            status.connected = false;
+            status.last_error_code = Some("MYBREWFOLIO_UNREACHABLE".into());
+            assert!(!should_show_reconnect_prompt(&status, &shown));
+            status.last_error_code = Some("SYNC_REAUTH_REQUIRED".into());
+            assert!(should_show_reconnect_prompt(&status, &shown));
+            assert!(!should_show_reconnect_prompt(&status, &shown));
+            status.connected = true;
+            assert!(!should_show_reconnect_prompt(&status, &shown));
+            status.connected = false;
+            status.last_error_code = Some("SYNC_DEVICE_REVOKED".into());
+            assert!(should_show_reconnect_prompt(&status, &shown));
+            status.last_error_code = None;
+            assert!(!should_show_reconnect_prompt(&status, &shown));
+        }
 
         #[test]
         fn store_build_is_limited_to_windows_store_packages() {

@@ -22,8 +22,26 @@ impl SyncEngine {
         let host = store
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".to_string());
-        let connected = credentials.tokens()?.is_some() && store.setting("device_id")?.is_some();
-        let device_id = store.setting("device_id")?;
+        let has_tokens = credentials.tokens()?.is_some();
+        let mut device_id = store.setting("device_id")?;
+        if !has_tokens && device_id.is_some() {
+            // A missing keychain entry after an earlier connection cannot be
+            // paired safely with queued data from a different future account.
+            store.clear_account_data()?;
+            store.set_setting("reconnect_required_reason", "SYNC_REAUTH_REQUIRED")?;
+            device_id = None;
+        }
+        let connected = has_tokens && device_id.is_some();
+        let reconnect_reason = store.setting("reconnect_required_reason")?;
+        let reconnect_error = match reconnect_reason.as_deref() {
+            Some("SYNC_REAUTH_REQUIRED") => {
+                Some("Your MyBrewFolio connection needs to be renewed".into())
+            }
+            Some("SYNC_DEVICE_REVOKED") => {
+                Some("This Sync installation is no longer authorized".into())
+            }
+            _ => None,
+        };
         let notes_sync_intro_seen = store.setting("notes_sync_intro_seen")?.as_deref() == Some("1");
         let issues = store.failures().unwrap_or_default();
         Ok(Self {
@@ -37,8 +55,8 @@ impl SyncEngine {
                 machine_reachable: false,
                 syncing: false,
                 last_sync_at: None,
-                last_error: None,
-                last_error_code: None,
+                last_error: reconnect_error,
+                last_error_code: reconnect_reason,
                 last_error_at: None,
                 sync_progress: None,
                 profiles: 0,
@@ -367,6 +385,7 @@ impl SyncEngine {
         };
         let credentials_removed = self.credentials.delete_tokens().is_ok();
         self.store.clear_account_data()?;
+        self.store.remove_setting("reconnect_required_reason")?;
         self.credentials.delete_pending_device_authorization()?;
         self.store.set_setting("headless_pairing_disabled", "1")?;
         let host = self

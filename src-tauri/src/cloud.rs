@@ -5,11 +5,12 @@ use std::{sync::Arc, time::Duration};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use rand::{rngs::OsRng, RngCore};
-use reqwest::{redirect::Policy, Response, StatusCode};
+use reqwest::{header::AUTHORIZATION, redirect::Policy, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use tokio::sync::Mutex;
 use url::Url;
 
 use crate::{
@@ -29,7 +30,11 @@ pub enum CloudError {
     DeviceAuthorizationExchangeFailed,
     #[error("This Sync installation is no longer authorized")]
     Revoked,
-    #[error("MyBrewFolio could not be reached")]
+    #[error("Your MyBrewFolio connection needs to be renewed")]
+    ReauthRequired,
+    #[error("MyBrewFolio could not verify this Sync installation")]
+    AuthenticationRejected,
+    #[error("MyBrewFolio could not be reached. Sync will retry automatically when the connection is available.")]
     Unreachable,
     #[error("MyBrewFolio rejected the synchronized data")]
     Rejected,
@@ -146,6 +151,7 @@ pub struct CloudClient {
     pub config: CloudConfig,
     http: reqwest::Client,
     credentials: Arc<dyn CredentialStore>,
+    refresh_lock: Mutex<()>,
 }
 
 impl CloudClient {
@@ -159,6 +165,7 @@ impl CloudClient {
             config: CloudConfig::bundled(),
             http,
             credentials,
+            refresh_lock: Mutex::new(()),
         })
     }
 
@@ -322,15 +329,30 @@ impl CloudClient {
     }
 
     async fn access_token(&self) -> Result<String, CloudError> {
+        self.refresh_access_token(None).await
+    }
+
+    async fn refresh_access_token(
+        &self,
+        rejected_token: Option<&str>,
+    ) -> Result<String, CloudError> {
+        // All background workers share this client. Re-read the keychain after
+        // acquiring the lock so only one worker refreshes a given token.
+        let _guard = self.refresh_lock.lock().await;
         let mut tokens = self
             .credentials
             .tokens()
             .map_err(|_| CloudError::OAuth)?
-            .ok_or(CloudError::Revoked)?;
-        if tokens.expires_at > Utc::now().timestamp() + 60 {
+            .ok_or(CloudError::ReauthRequired)?;
+        if rejected_token.is_some_and(|token| token != tokens.access_token)
+            || (rejected_token.is_none() && tokens.expires_at > Utc::now().timestamp() + 60)
+        {
             return Ok(tokens.access_token);
         }
-        let refresh = tokens.refresh_token.clone().ok_or(CloudError::Revoked)?;
+        let refresh = tokens
+            .refresh_token
+            .clone()
+            .ok_or(CloudError::ReauthRequired)?;
         let response = self
             .http
             .post(&self.config.token_url)
@@ -343,8 +365,27 @@ impl CloudClient {
             .await
             .map_err(|_| CloudError::Unreachable)?;
         if !response.status().is_success() {
-            log_http_failure("token refresh", response).await;
-            return Err(CloudError::Revoked);
+            let status = response.status();
+            let error = response.json::<Value>().await.ok().and_then(|body| {
+                body.get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            eprintln!(
+                "token refresh: HTTP {status} oauth_error={}",
+                if error.as_deref() == Some("invalid_grant") {
+                    "invalid_grant"
+                } else {
+                    "other"
+                }
+            );
+            return Err(if error.as_deref() == Some("invalid_grant") {
+                CloudError::ReauthRequired
+            } else if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                CloudError::Unreachable
+            } else {
+                CloudError::OAuth
+            });
         }
         let refreshed: TokenResponse = response.json().await.map_err(|_| CloudError::OAuth)?;
         tokens.access_token = refreshed.access_token;
@@ -368,6 +409,57 @@ impl CloudClient {
             .bearer_auth(token))
     }
 
+    async fn send_authorized(&self, request: RequestBuilder) -> Result<Response, CloudError> {
+        let retry = request.try_clone().ok_or(CloudError::Rejected)?;
+        let attempted_token = retry
+            .try_clone()
+            .ok_or(CloudError::Rejected)?
+            .build()
+            .map_err(|_| CloudError::Rejected)?
+            .headers()
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or(CloudError::OAuth)?
+            .to_string();
+        let response = request.send().await.map_err(|_| CloudError::Unreachable)?;
+        if response.status() != StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        let code = response.json::<Value>().await.ok().and_then(|body| {
+            body.pointer("/details/code")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+        if code.as_deref() == Some("SYNC_DEVICE_REVOKED") {
+            return Err(CloudError::Revoked);
+        }
+        if code.as_deref() != Some("SYNC_ACCESS_TOKEN_INVALID") {
+            return Err(CloudError::AuthenticationRejected);
+        }
+        // A stale access token can be rejected before its local expiry. One
+        // forced refresh and retry distinguishes that from a revoked device.
+        let token = self.refresh_access_token(Some(&attempted_token)).await?;
+        let response = retry
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|_| CloudError::Unreachable)?;
+        if response.status() == StatusCode::UNAUTHORIZED {
+            let code = response.json::<Value>().await.ok().and_then(|body| {
+                body.pointer("/details/code")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            return Err(if code.as_deref() == Some("SYNC_DEVICE_REVOKED") {
+                CloudError::Revoked
+            } else {
+                CloudError::AuthenticationRejected
+            });
+        }
+        Ok(response)
+    }
+
     pub async fn register_device(
         &self,
         installation_id: &str,
@@ -375,7 +467,7 @@ impl CloudClient {
         platform: &str,
         app_version: &str,
     ) -> Result<DeviceRegistration, CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::POST, "/v1/sync/devices")
             .await?
             .json(&json!({
@@ -384,13 +476,8 @@ impl CloudClient {
                 "platform": platform,
                 "appVersion": app_version,
                 "capabilities": companion_capabilities()
-            }))
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            }));
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             log_http_failure("device registration", response).await;
             return Err(CloudError::Rejected);
@@ -413,16 +500,11 @@ impl CloudClient {
     }
 
     pub async fn state(&self, device_id: &str) -> Result<Value, CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::GET, "/v1/sync/state")
             .await?
-            .header("X-MyBrewFolio-Sync-Device", device_id)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .header("X-MyBrewFolio-Sync-Device", device_id);
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             return Err(CloudError::Rejected);
         }
@@ -430,17 +512,12 @@ impl CloudClient {
     }
 
     pub async fn batch(&self, device_id: &str, items: &[SyncObject]) -> Result<Value, CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::POST, "/v1/sync/batches")
             .await?
             .header("X-MyBrewFolio-Sync-Device", device_id)
-            .json(&json!({ "items": items }))
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .json(&json!({ "items": items }));
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             log_http_failure("sync batch", response).await;
             return Err(CloudError::Rejected);
@@ -455,17 +532,12 @@ impl CloudClient {
         device_id: &str,
         body: Value,
     ) -> Result<Value, CloudError> {
-        let response = self
+        let request = self
             .authorized(method, path)
             .await?
             .header("X-MyBrewFolio-Sync-Device", device_id)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .json(&body);
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             return Err(CloudError::Rejected);
         }
@@ -473,16 +545,11 @@ impl CloudClient {
     }
 
     async fn device_get_json(&self, path: &str, device_id: &str) -> Result<Value, CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::GET, path)
             .await?
-            .header("X-MyBrewFolio-Sync-Device", device_id)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .header("X-MyBrewFolio-Sync-Device", device_id);
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             return Err(CloudError::Rejected);
         }
@@ -495,16 +562,11 @@ impl CloudClient {
         path: &str,
         device_id: &str,
     ) -> Result<(), CloudError> {
-        let response = self
+        let request = self
             .authorized(method, path)
             .await?
-            .header("X-MyBrewFolio-Sync-Device", device_id)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .header("X-MyBrewFolio-Sync-Device", device_id);
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             return Err(CloudError::Rejected);
         }
@@ -712,7 +774,7 @@ impl CloudClient {
         error: Option<&str>,
         sync_progress: Option<&SyncProgress>,
     ) -> Result<(), CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::POST, "/v1/sync/heartbeat")
             .await?
             .header("X-MyBrewFolio-Sync-Device", device_id)
@@ -721,13 +783,8 @@ impl CloudClient {
                 "lastSyncAt": last_sync_at, "lastErrorCode": error,
                 "syncProgress": sync_progress,
                 "capabilities": companion_capabilities()
-            }))
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            }));
+        let response = self.send_authorized(request).await?;
         if !response.status().is_success() {
             return Err(CloudError::Rejected);
         }
@@ -769,17 +826,12 @@ impl CloudClient {
         path: &str,
         body: Value,
     ) -> Result<Value, CloudError> {
-        let response = self
+        let request = self
             .authorized(reqwest::Method::POST, &format!("/v1/sync/control/{path}"))
             .await?
             .header("X-MyBrewFolio-Sync-Device", device_id)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Revoked);
-        }
+            .json(&body);
+        let response = self.send_authorized(request).await?;
         // A dismissed or expired operation no longer needs a saved acknowledgement.
         if path.ends_with("/complete")
             && matches!(
@@ -796,20 +848,19 @@ impl CloudClient {
     }
 
     pub async fn revoke(&self, device_id: &str) -> Result<(), CloudError> {
-        let response = self
+        let request = self
             .authorized(
                 reqwest::Method::DELETE,
                 &format!("/v1/sync/devices/{device_id}"),
             )
             .await?
-            .header("X-MyBrewFolio-Sync-Device", device_id)
-            .send()
-            .await
-            .map_err(|_| CloudError::Unreachable)?;
-        if !response.status().is_success() && response.status() != StatusCode::UNAUTHORIZED {
-            return Err(CloudError::Rejected);
+            .header("X-MyBrewFolio-Sync-Device", device_id);
+        match self.send_authorized(request).await {
+            Ok(response) if response.status().is_success() => Ok(()),
+            Err(CloudError::Revoked) => Ok(()),
+            Err(error) => Err(error),
+            Ok(_) => Err(CloudError::Rejected),
         }
-        Ok(())
     }
 }
 
@@ -1116,6 +1167,174 @@ mod tests {
                 .access_token,
             "new-access"
         );
+    }
+
+    #[tokio::test]
+    async fn simultaneous_requests_share_one_token_refresh() {
+        let (url, observed) = contract_server(vec![
+            (
+                "POST / HTTP/1.1",
+                "200 OK",
+                r#"{"access_token":"new-access","expires_in":3600}"#,
+            ),
+            ("GET /v1/sync/state HTTP/1.1", "200 OK", r#"{"items":[]}"#),
+            ("GET /v1/sync/state HTTP/1.1", "200 OK", r#"{"items":[]}"#),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "expired".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: 0,
+            })
+            .expect("tokens stored");
+        let client = client(credentials, &url);
+        let (first, second) = tokio::join!(client.state("device-1"), client.state("device-1"));
+        assert!(first.is_ok() && second.is_ok());
+        let requests = observed.lock().expect("requests");
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.starts_with("POST /"))
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_access_token_refreshes_and_retries_once() {
+        let (url, observed) = contract_server(vec![
+            (
+                "GET /v1/sync/state HTTP/1.1",
+                "401 Unauthorized",
+                r#"{"details":{"code":"SYNC_ACCESS_TOKEN_INVALID"}}"#,
+            ),
+            (
+                "POST / HTTP/1.1",
+                "200 OK",
+                r#"{"access_token":"new-access","expires_in":3600}"#,
+            ),
+            ("GET /v1/sync/state HTTP/1.1", "200 OK", r#"{"items":[]}"#),
+        ])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "stale".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .expect("tokens stored");
+        let client = client(credentials, &url);
+        assert!(client.state("device-1").await.is_ok());
+        let requests = observed.lock().expect("requests");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].contains("Bearer new-access"));
+    }
+
+    #[tokio::test]
+    async fn revoked_device_does_not_trigger_a_refresh() {
+        let url = response_server(vec![(
+            "401 Unauthorized",
+            r#"{"details":{"code":"SYNC_DEVICE_REVOKED"}}"#,
+        )])
+        .await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "valid".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .expect("tokens stored");
+        let client = client(credentials, &url);
+        assert!(matches!(
+            client.state("device-1").await,
+            Err(CloudError::Revoked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_unauthorized_response_keeps_the_installation_credentials() {
+        let url = response_server(vec![("401 Unauthorized", r#"{"error":"unknown"}"#)]).await;
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "valid".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: i64::MAX,
+            })
+            .expect("tokens stored");
+        let client = client(credentials.clone(), &url);
+        assert!(matches!(
+            client.state("device-1").await,
+            Err(CloudError::AuthenticationRejected)
+        ));
+        assert!(credentials.tokens().expect("tokens read").is_some());
+    }
+
+    #[tokio::test]
+    async fn refresh_errors_distinguish_reauthentication_from_transient_failures() {
+        for (status, body, reauth_required) in [
+            ("400 Bad Request", r#"{"error":"invalid_grant"}"#, true),
+            (
+                "429 Too Many Requests",
+                r#"{"error":"rate_limited"}"#,
+                false,
+            ),
+            (
+                "503 Service Unavailable",
+                r#"{"error":"temporarily_unavailable"}"#,
+                false,
+            ),
+        ] {
+            let url = response_server(vec![(status, body)]).await;
+            let credentials = Arc::new(TestCredentials::default());
+            credentials
+                .save_tokens(&OAuthTokens {
+                    access_token: "expired".into(),
+                    refresh_token: Some("refresh".into()),
+                    expires_at: 0,
+                })
+                .expect("tokens stored");
+            let client = client(credentials.clone(), &url);
+            let result = client.state("device-1").await;
+            assert_eq!(
+                matches!(result, Err(CloudError::ReauthRequired)),
+                reauth_required,
+                "{status}"
+            );
+            assert!(credentials.tokens().expect("tokens read").is_some());
+        }
+
+        let credentials = Arc::new(TestCredentials::default());
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "expired".into(),
+                refresh_token: None,
+                expires_at: 0,
+            })
+            .expect("tokens stored");
+        let client = client(credentials.clone(), "http://127.0.0.1:1");
+        assert!(matches!(
+            client.state("device-1").await,
+            Err(CloudError::ReauthRequired)
+        ));
+        assert!(credentials.tokens().expect("tokens read").is_some());
+
+        credentials
+            .save_tokens(&OAuthTokens {
+                access_token: "expired".into(),
+                refresh_token: Some("refresh".into()),
+                expires_at: 0,
+            })
+            .expect("tokens stored");
+        assert!(matches!(
+            client.state("device-1").await,
+            Err(CloudError::Unreachable)
+        ));
+        assert!(credentials.tokens().expect("tokens read").is_some());
     }
 
     #[tokio::test]

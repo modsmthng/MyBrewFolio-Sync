@@ -151,6 +151,11 @@ export function Setup({ status, refresh, externalNotice }) {
   const [host, setHost] = useState(status.machineHost || 'gaggimate.local');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
+  const reconnectMessage = status.lastErrorCode === 'SYNC_REAUTH_REQUIRED'
+    ? 'Your MyBrewFolio connection needs to be renewed. Sign in again to resume syncing.'
+    : status.lastErrorCode === 'SYNC_DEVICE_REVOKED'
+      ? 'This Sync installation was disconnected in MyBrewFolio. Sign in again to reconnect it.'
+      : '';
 
   const connect = async () => {
     setBusy(true);
@@ -173,6 +178,7 @@ export function Setup({ status, refresh, externalNotice }) {
         <div className="mark">my<br />brew<br />folio</div>
         <span className="alpha-label">ALPHA</span>
       </header>
+      {reconnectMessage ? <section className="card reconnect-notice" role="alert"><h2>Sign in again</h2><p>{reconnectMessage}</p></section> : null}
       <section className="hero">
         <p className="eyebrow">MYBREWFOLIO SYNC</p>
         <h1>Your smart coffee machine library, available everywhere.</h1>
@@ -188,7 +194,7 @@ export function Setup({ status, refresh, externalNotice }) {
         <span>GaggiMate hostname or local IP</span>
         <input value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" />
       </label>
-      <button type="button" className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : 'Connect MyBrewFolio'}</button>
+      <button type="button" className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : reconnectMessage ? 'Sign in again' : 'Connect MyBrewFolio'}</button>
       {message ? <p className="message" aria-live="polite">{message}</p> : null}
       {!message && externalNotice ? (
         <div className="message disconnect-notice" aria-live="polite">
@@ -300,13 +306,15 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
       const result = await invoke('set_autostart_enabled', { enabled: checked });
       setAutostartStatus(result);
       setAutostart(result.enabled);
-      if (!result.enabled) {
-        if (result.requiresWindowsSettings) {
+      if (result.enabled !== checked) {
+        if (checked && result.requiresWindowsSettings) {
           showStatusMessage('Windows has disabled startup for Sync. Re-enable it in Settings > Apps > Startup.');
-        } else if (result.blockedByPolicy) {
+        } else if (checked && result.blockedByPolicy) {
           showStatusMessage('Windows or your organization has blocked startup for Sync.', 'error');
         } else {
-          showStatusMessage('Windows did not enable startup for Sync.', 'error');
+          showStatusMessage(checked
+            ? 'Could not enable startup for Sync.'
+            : 'Could not disable startup for Sync.', 'error');
         }
       }
     } catch (error) {

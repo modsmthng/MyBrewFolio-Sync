@@ -96,6 +96,7 @@ impl SyncEngine {
             .await?;
         self.store.set_setting("device_id", &device.id)?;
         self.store.set_setting("source_id", &device.source_id)?;
+        self.store.remove_setting("reconnect_required_reason")?;
         self.store.set_setting(
             TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
             TWO_WAY_NOTES_PROTOCOL_VERSION,

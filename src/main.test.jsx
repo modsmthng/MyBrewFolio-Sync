@@ -125,12 +125,79 @@ describe('Sync interface', () => {
     await vi.waitFor(() => expect(screen.getByText('Error: GaggiMate is unreachable')).toBeTruthy());
   });
 
+  it.each([
+    { code: 'SYNC_REAUTH_REQUIRED', message: 'Your MyBrewFolio connection needs to be renewed. Sign in again to resume syncing.' },
+    { code: 'SYNC_DEVICE_REVOKED', message: 'This Sync installation was disconnected in MyBrewFolio. Sign in again to reconnect it.' },
+  ])('offers a clear reconnect action for $code', ({ code, message }) => {
+    render(<Setup status={{ ...status, connected: false, lastErrorCode: code }} refresh={vi.fn()} externalNotice={null} />);
+    expect(screen.getByRole('alert').textContent).toContain(message);
+    expect(screen.getByRole('button', { name: 'Sign in again' })).toBeTruthy();
+  });
+
+  it('does not suggest signing in again for a network error', () => {
+    render(<Setup status={{ ...status, connected: false, lastErrorCode: 'MYBREWFOLIO_UNREACHABLE' }} refresh={vi.fn()} externalNotice={null} />);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Connect MyBrewFolio' })).toBeTruthy();
+  });
+
   it('renders normal controls and asks before disconnecting', () => {
     render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
     expect(screen.getByText('10')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Open Sync settings' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Disconnect account' }));
     expect(screen.getByText('Disconnect this computer?')).toBeTruthy();
+  });
+
+  it('turns off startup without showing an error when the returned state is disabled', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'set_autostart_enabled') return Promise.resolve({ enabled: false, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    const toggle = screen.getByRole('checkbox', { name: 'Start Sync with this computer' });
+    await vi.waitFor(() => expect(toggle.checked).toBe(true));
+    fireEvent.click(toggle);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('set_autostart_enabled', { enabled: false }));
+    await vi.waitFor(() => expect(toggle.disabled).toBe(false));
+    expect(toggle.checked).toBe(false);
+    expect(screen.queryByText(/could not (enable|disable) startup|Windows did not enable startup/i)).toBeNull();
+  });
+
+  it.each([
+    { initialEnabled: true, returnedEnabled: true, message: 'Could not disable startup for Sync.' },
+    { initialEnabled: false, returnedEnabled: false, message: 'Could not enable startup for Sync.' },
+  ])('shows an action-specific error when startup stays $returnedEnabled after a toggle', async ({ initialEnabled, returnedEnabled, message }) => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: initialEnabled, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'set_autostart_enabled') return Promise.resolve({ enabled: returnedEnabled, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    const toggle = screen.getByRole('checkbox', { name: 'Start Sync with this computer' });
+    await vi.waitFor(() => expect(toggle.checked).toBe(initialEnabled));
+    fireEvent.click(toggle);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('set_autostart_enabled', { enabled: !initialEnabled }));
+    await vi.waitFor(() => expect(screen.getByText(message)).toBeTruthy());
+    expect(toggle.checked).toBe(returnedEnabled);
+  });
+
+  it.each([
+    { requiresWindowsSettings: true, blockedByPolicy: false, message: 'Windows has disabled startup for Sync. Re-enable it in Settings > Apps > Startup.' },
+    { requiresWindowsSettings: false, blockedByPolicy: true, message: 'Windows or your organization has blocked startup for Sync.' },
+  ])('retains Windows-specific startup feedback when enabling is blocked', async ({ requiresWindowsSettings, blockedByPolicy, message }) => {
+    invoke.mockImplementation(command => {
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: false, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'set_autostart_enabled') return Promise.resolve({ enabled: false, requiresWindowsSettings, blockedByPolicy, migrationAvailable: false });
+      return Promise.resolve(undefined);
+    });
+    render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    const toggle = screen.getByRole('checkbox', { name: 'Start Sync with this computer' });
+    await vi.waitFor(() => expect(toggle.checked).toBe(false));
+    fireEvent.click(toggle);
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('set_autostart_enabled', { enabled: true }));
+    await vi.waitFor(() => expect(screen.getAllByText(message).length).toBeGreaterThan(0));
+    expect(toggle.checked).toBe(false);
   });
 
   it('keeps Notes activation in MyBrewFolio even when requested remotely', async () => {
