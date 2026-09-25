@@ -563,6 +563,7 @@ impl SyncEngine {
 
     pub async fn sync_once(&self) -> Result<(), EngineError> {
         let guard = self.sync_lock.try_lock().map_err(|_| EngineError::Busy)?;
+        let _full_sync_slot = self.cloud.full_sync_slot().await;
         let device_id = self
             .store
             .setting("device_id")?

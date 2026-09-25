@@ -42,6 +42,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .text-link:hover { color: #224f6b; }
 .text-link:focus-visible { outline: 3px solid rgba(50,107,142,.24); outline-offset: 3px; border-radius: 4px; }
 .setup-help { margin-top: 2px; }
+.setup-machine-name { margin-top: 16px; }
 .app-footer { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 34px; color: #718399; font-size: 12px; }
 .disconnect-notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
 .dashboard-header h1 { margin: 0; font-size: 28px; }
@@ -55,6 +56,31 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .central-status-success { color: #1f684d; border-color: rgba(49,115,90,.35); background: rgba(229,242,235,.97); }
 .central-status-info, .central-status-working { color: #275e80; }
 .card { border: 1px solid rgba(154,171,187,.48); border-radius: 24px; background: rgba(255,255,255,.62); box-shadow: 0 18px 45px rgba(61,79,96,.08); }
+.machine-manager { margin-top: 32px; }
+.machine-manager-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.machine-manager-title h2 { margin: 0 0 5px; }
+.machine-manager-title p { margin: 0; font-size: 13px; line-height: 1.5; }
+.machine-manager-title .secondary { flex: 0 0 auto; }
+.machine-list { display: grid; gap: 8px; margin-top: 18px; }
+.machine-choice { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 15px; border: 1px solid #bdcad6; border-radius: 16px; color: inherit; background: rgba(255,255,255,.38); text-align: left; }
+.machine-choice.selected { border-color: #326b8e; box-shadow: 0 0 0 2px rgba(50,107,142,.14); }
+.machine-choice > span:first-child { min-width: 0; display: grid; gap: 3px; }
+.machine-choice strong, .machine-choice small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.machine-choice small { color: #718399; }
+.machine-state { flex: 0 0 auto; font-size: 11px; font-weight: 800; }
+.machine-state.ok { color: #1f684d; }
+.machine-state.working { color: #275e80; }
+.machine-state.error { color: #9d3038; }
+.machine-edit { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin-top: 18px; }
+.machine-edit .field { flex: 1 1 220px; }
+.machine-edit > .text-link { align-self: center; }
+.machine-add-form, .remove-machine-confirm { display: grid; gap: 14px; margin-top: 20px; padding: 18px; border: 1px solid #bdcad6; border-radius: 18px; }
+.machine-add-form h3, .remove-machine-confirm p { margin: 0; }
+.machine-add-form select { width: 100%; min-height: 46px; padding: 10px 14px; border: 1px solid #bdcad6; border-radius: 14px; color: inherit; background: rgba(255,255,255,.68); }
+.machine-add-form .button-row .primary { margin: 0; }
+.machine-add-modes { display: flex; flex-wrap: wrap; gap: 18px; font-size: 14px; font-weight: 700; }
+.machine-add-modes label { display: flex; align-items: center; gap: 7px; }
+.machine-add-modes input { width: 17px; height: 17px; }
 .overview { margin-top: 36px; padding: 22px; display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .overview div { display: grid; gap: 5px; }
 .overview small { color: #718399; }
@@ -135,6 +161,8 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
   .mark { color: #dce8f2; }
   .hero p:not(.eyebrow), .message, .privacy, .muted, .steps small, .counts span, .overview small { color: #9fb0c2; }
   .steps li, .card, input { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
+  .machine-choice, .machine-add-form, .remove-machine-confirm, .machine-add-form select { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
+  .machine-choice small { color: #9fb0c2; }
   .secondary { color: #d7e2ed; border-color: #425365; background: rgba(34,46,58,.72); }
   .text-link { color: #9fc8df; }
   .text-link:hover { color: #c4e3f3; }
@@ -156,6 +184,8 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 }
 @media (max-width: 560px) {
   .shell { padding: 24px 18px; }
+  .machine-manager-title { flex-direction: column; }
+  .machine-choice { align-items: flex-start; flex-direction: column; gap: 7px; }
   .overview { align-items: stretch; flex-direction: column; }
   .counts { grid-template-columns: 1fr; }
   .counts article { grid-template-columns: auto 1fr; align-items: baseline; }

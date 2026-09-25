@@ -778,7 +778,9 @@ async fn gaggimate_server_with_notes(notes: Value) -> String {
 }
 
 pub(super) fn configure_test_cloud(engine: &mut SyncEngine, api_url: &str) {
-    engine.cloud.config = CloudConfig {
+    Arc::get_mut(&mut engine.cloud)
+        .expect("exclusive test cloud")
+        .config = CloudConfig {
         api_url: api_url.into(),
         client_id: "test-client".into(),
         authorize_url: format!("{api_url}/authorize"),

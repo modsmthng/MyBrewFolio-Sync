@@ -5,6 +5,7 @@ use super::{
 };
 use crate::{local::GaggiMateClient, model::OAuthTokens};
 use serde_json::json;
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -388,6 +389,191 @@ async fn browser_and_device_pairing_register_the_same_connected_installation() {
 }
 
 #[tokio::test]
+async fn session_only_oauth_leaves_machine_selection_to_the_manager() {
+    let (mut browser, _browser_directory) = test_engine();
+    let browser_url = cloud_server(vec![
+        r#"{"access_token":"browser-access","refresh_token":"browser-refresh","expires_in":3600}"#,
+    ])
+    .await;
+    configure_test_cloud(&mut browser, &browser_url);
+    let login_url = browser.begin_oauth().await.expect("browser OAuth starts");
+    let state = login_url
+        .query_pairs()
+        .find(|(key, _)| key == "state")
+        .map(|(_, value)| value.into_owned())
+        .expect("OAuth state");
+    browser
+        .complete_oauth_session(&format!(
+            "mybrewfolio-sync://oauth/callback?code=browser-code&state={state}"
+        ))
+        .await
+        .expect("browser account authorization completes");
+    assert!(browser.credentials.tokens().expect("tokens read").is_some());
+    assert!(browser
+        .store
+        .setting("source_id")
+        .expect("source read")
+        .is_none());
+    assert!(browser
+        .store
+        .setting("device_id")
+        .expect("device read")
+        .is_none());
+    assert!(!browser.status().await.connected);
+
+    let (mut headless, _headless_directory) = test_engine();
+    let headless_url = cloud_server(vec![
+        r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://example.test/pair","pollToken":"poll-token","expiresIn":600}"#,
+        r#"{"status":"authorized","authorizationCode":"device-code"}"#,
+        r#"{"access_token":"device-access","refresh_token":"device-refresh","expires_in":3600}"#,
+    ]).await;
+    configure_test_cloud(&mut headless, &headless_url);
+    headless
+        .begin_device_oauth()
+        .await
+        .expect("device OAuth starts");
+    assert!(headless
+        .poll_device_oauth_session()
+        .await
+        .expect("account authorization completes"));
+    assert!(headless
+        .credentials
+        .tokens()
+        .expect("tokens read")
+        .is_some());
+    assert!(headless
+        .store
+        .setting("source_id")
+        .expect("source read")
+        .is_none());
+    assert!(headless
+        .store
+        .setting("device_id")
+        .expect("device read")
+        .is_none());
+    assert!(!headless.status().await.connected);
+}
+
+#[tokio::test]
+async fn oauth_registration_clears_old_account_uploads_but_preserves_same_account_uploads() {
+    for (registered_source, expected_pending) in [("account-b-source", 0), ("account-a-source", 1)]
+    {
+        let (mut engine, _directory) = test_engine();
+        let api_url = cloud_server(vec![
+            r#"{"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600}"#,
+            &format!(r#"{{"device":{{"id":"new-device","sourceId":"{registered_source}"}}}}"#),
+        ])
+        .await;
+        configure_test_cloud(&mut engine, &api_url);
+        engine
+            .store
+            .set_setting("installation_id", "existing-installation")
+            .expect("installation ID saved");
+        engine
+            .store
+            .set_setting("source_id", "account-a-source")
+            .expect("previous account source saved");
+        engine
+            .store
+            .set_setting("device_id", "old-device")
+            .expect("previous device saved");
+        engine
+            .store
+            .set_setting("machine_host", "gaggimate.local")
+            .expect("local host saved");
+        engine
+            .store
+            .set_setting("last_profile_scan", "old-scan")
+            .expect("old scan state saved");
+        let old_upload = sync_object("old-account-shot", 10);
+        engine.store.queue(&old_upload).expect("old upload queued");
+        engine
+            .store
+            .record_failure(
+                Some(&old_upload),
+                "shot",
+                "old-account-shot",
+                "upload",
+                "offline",
+            )
+            .expect("old retry saved");
+
+        let browser_url = engine.begin_oauth().await.expect("OAuth starts");
+        let state = browser_url
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.into_owned())
+            .expect("OAuth state");
+        engine
+            .complete_oauth(&format!(
+                "mybrewfolio-sync://oauth/callback?code=new-code&state={state}"
+            ))
+            .await
+            .expect("new OAuth registration completes");
+
+        // These checks run before any sync call. Account B must never receive
+        // account A's queued shot or retry metadata.
+        assert_eq!(
+            engine.store.pending_count().expect("queue count"),
+            expected_pending
+        );
+        assert_eq!(
+            engine.store.failure_count().expect("retry count"),
+            expected_pending
+        );
+        assert_eq!(
+            engine
+                .store
+                .setting("last_profile_scan")
+                .expect("scan state read")
+                .as_deref(),
+            (expected_pending == 1).then_some("old-scan")
+        );
+        assert_eq!(
+            engine
+                .store
+                .setting("source_id")
+                .expect("source read")
+                .as_deref(),
+            Some(registered_source)
+        );
+        assert_eq!(
+            engine
+                .store
+                .setting("device_id")
+                .expect("device read")
+                .as_deref(),
+            Some("new-device")
+        );
+        assert_eq!(
+            engine
+                .store
+                .setting("installation_id")
+                .expect("installation read")
+                .as_deref(),
+            Some("existing-installation")
+        );
+        assert_eq!(
+            engine
+                .store
+                .setting("machine_host")
+                .expect("local host read")
+                .as_deref(),
+            Some("gaggimate.local")
+        );
+        assert_eq!(
+            engine
+                .credentials
+                .tokens()
+                .expect("new account tokens read")
+                .expect("new account tokens present")
+                .access_token,
+            "new-access"
+        );
+    }
+}
+
+#[tokio::test]
 async fn settings_and_resync_refresh_cloud_state_and_reset_stale_queue_data() {
     let (mut engine, _directory) = test_engine();
     let api_url = cloud_server(vec![
@@ -619,7 +805,10 @@ async fn outbound_notes_report_conflicts_and_successful_machine_writes() {
 #[tokio::test]
 async fn disconnect_always_clears_local_account_data_when_the_server_is_unavailable() {
     let (mut engine, _directory) = test_engine();
-    engine.cloud.config.api_url = "http://127.0.0.1:1".into();
+    Arc::get_mut(&mut engine.cloud)
+        .expect("exclusive test cloud")
+        .config
+        .api_url = "http://127.0.0.1:1".into();
     engine
         .store
         .set_setting("device_id", "device-1")

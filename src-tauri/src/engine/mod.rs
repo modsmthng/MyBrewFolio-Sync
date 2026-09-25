@@ -582,7 +582,7 @@ impl EngineError {
 
 pub struct SyncEngine {
     store: Arc<AppStore>,
-    cloud: CloudClient,
+    cloud: Arc<CloudClient>,
     credentials: Arc<dyn CredentialStore>,
     pending_oauth: Mutex<Option<PendingOAuth>>,
     status: RwLock<AppStatus>,

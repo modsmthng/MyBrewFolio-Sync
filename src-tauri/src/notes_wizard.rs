@@ -85,6 +85,7 @@ fn export_custom(
     decisions: &Value,
     backup_id: &str,
     install_dir: Option<&str>,
+    machine_id: Option<&str>,
     output: &mut impl Write,
 ) -> Result<(), String> {
     let id = uuid::Uuid::new_v4();
@@ -113,7 +114,10 @@ fn export_custom(
     let compose = format!("docker compose --project-directory {install} -f {install}/compose.yaml");
     let local = format!("notes-decisions-{id}.json");
     let target = path.to_string_lossy();
-    writeln!(output, "Custom decisions saved. MyBrewFolio is preselected for every difference.\nBackup ID: {backup_id}\nNotes Sync has NOT been enabled.\n\n1. Copy the file to your host:\n{compose} cp {} {local}\n\n2. Edit {local}: keep mybrewfolio or choose gaggimate for each sourceKey.\n\n3. Copy the reviewed file back as the container user (preserves private file permissions):\n{compose} exec -T sync sh -c 'cat > \"$1\"' sh {} < {local}\n\n4. Enable using your reviewed decisions:\n{install}/sync notes activate {} {} --confirm\n\nKeep the decision file private. Delete the host file and container decision directory when no longer needed.", shell_quote(&format!("sync:{target}")), shell_quote(&target), shell_quote(backup_id), shell_quote(&target)).map_err(|e| e.to_string())
+    let machine_flag = machine_id
+        .map(|id| format!(" --machine {}", shell_quote(id)))
+        .unwrap_or_default();
+    writeln!(output, "Custom decisions saved. MyBrewFolio is preselected for every difference.\nBackup ID: {backup_id}\nNotes Sync has NOT been enabled.\n\n1. Copy the file to your host:\n{compose} cp {} {local}\n\n2. Edit {local}: keep mybrewfolio or choose gaggimate for each sourceKey.\n\n3. Copy the reviewed file back as the container user (preserves private file permissions):\n{compose} exec -T sync sh -c 'cat > \"$1\"' sh {} < {local}\n\n4. Enable using your reviewed decisions:\n{install}/sync notes activate {} {} --confirm{machine_flag}\n\nKeep the decision file private. Delete the host file and container decision directory when no longer needed.", shell_quote(&format!("sync:{target}")), shell_quote(&target), shell_quote(backup_id), shell_quote(&target)).map_err(|e| e.to_string())
 }
 
 async fn wizard<R, W, F, Fut>(
@@ -122,6 +126,7 @@ async fn wizard<R, W, F, Fut>(
     output: &mut W,
     data_dir: &Path,
     install_dir: Option<&str>,
+    machine_id: Option<&str>,
     mut call: F,
 ) -> Result<(), String>
 where
@@ -182,6 +187,7 @@ where
                         &decisions,
                         &preview.backup_id,
                         install_dir,
+                        machine_id,
                         output,
                     )
                 }
@@ -237,7 +243,10 @@ where
     Ok(())
 }
 
-pub(super) async fn run(socket: &std::path::PathBuf) -> Result<(), String> {
+pub(super) async fn run(
+    socket: &std::path::PathBuf,
+    machine_id: Option<&str>,
+) -> Result<(), String> {
     let interactive = io::stdin().is_terminal() && io::stderr().is_terminal();
     if !interactive {
         return Err(NO_TERMINAL.into());
@@ -245,8 +254,16 @@ pub(super) async fn run(socket: &std::path::PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         let install_dir = std::env::var("MYBREWFOLIO_SYNC_CLI_INSTALL_DIR").ok();
-        wizard(true, &mut io::stdin().lock(), &mut io::stderr().lock(), &super::data_dir(), install_dir.as_deref(), |request| async move {
-            super::proxy_control(socket, &request).await?.ok_or_else(|| "The Sync daemon is not running. Start the Docker service before running notes enable.".into())
+        let selected = machine_id.map(str::to_owned);
+        wizard(true, &mut io::stdin().lock(), &mut io::stderr().lock(), &super::data_dir(), install_dir.as_deref(), machine_id, move |mut request| {
+            let selected = selected.clone();
+            async move {
+                if let Some(id) = selected {
+                    request.args.push("--machine".into());
+                    request.args.push(id);
+                }
+                super::proxy_control(socket, &request).await?.ok_or_else(|| "The Sync daemon is not running. Start the Docker service before running notes enable.".into())
+            }
         }).await
     }
     #[cfg(not(unix))]
@@ -284,6 +301,7 @@ mod tests {
             &mut output,
             directory.path(),
             Some("/host/with space"),
+            None,
             |request| {
                 let result = if requests.is_empty() {
                     response.clone()
@@ -404,6 +422,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn custom_export_keeps_the_selected_machine_for_the_follow_up_command() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let mut output = Vec::new();
+        let machine_id = "22222222-2222-4222-8222-222222222222";
+        export_custom(
+            directory.path(),
+            &json!([{"sourceKey":"1:2", "resolution":"mybrewfolio"}]),
+            BACKUP,
+            Some("/host/with space"),
+            Some(machine_id),
+            &mut output,
+        )
+        .expect("custom instructions exported");
+
+        let instructions = String::from_utf8(output).expect("UTF-8 instructions");
+        assert!(instructions.contains(&format!("--confirm --machine '{machine_id}'")));
+        assert!(instructions.contains("'/host/with space'/sync notes activate"));
+    }
+
     #[tokio::test]
     async fn failed_or_unconfirmed_activation_is_not_reported_as_success() {
         for response in [Err("Activation failed".to_string()), Ok(json!({}))] {
@@ -415,6 +453,7 @@ mod tests {
                 &mut Cursor::new("1\ny\n"),
                 &mut output,
                 directory.path(),
+                None,
                 None,
                 |_| {
                     calls += 1;
@@ -470,6 +509,7 @@ mod tests {
             &mut Cursor::new("2\ny\n"),
             &mut Vec::new(),
             directory.path(),
+            None,
             None,
             |request| {
                 let socket = socket.clone();

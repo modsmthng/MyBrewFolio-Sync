@@ -1,7 +1,7 @@
 # MyBrewFolio Sync
 
 MyBrewFolio Sync is the open-source desktop and Docker companion for copying shots, profiles, and notes from
-one local GaggiMate to a private MyBrewFolio library. Automatic shot and profile synchronization is
+one or more local GaggiMate machines to a private MyBrewFolio library. Automatic shot and profile synchronization is
 one-way. Users may separately enable two-way Notes synchronization after a full machine-Notes backup
 and review. A separately confirmed Profile Store installation may save, favorite and select only the
 chosen Store profile; the companion never edits/deletes shots on the machine.
@@ -15,8 +15,12 @@ Track and share brews, quickly complete brew notes with smart suggestions from y
 
 1. Install MyBrewFolio Sync.
 2. Choose **Connect MyBrewFolio** and confirm sign-in in the normal browser.
-3. Confirm the detected `gaggimate.local` address, or enter a private local IP.
+3. If this account has no machines yet, name the first one and confirm its `gaggimate.local`
+   address, or enter a private local IP. Otherwise choose **Add machine** after sign-in, then
+   select an existing account machine or create a new one and enter its local address.
 4. Open **Account → MyBrewFolio Sync** to choose matching preferences and start the first import.
+5. To connect another GaggiMate later, choose **Add machine** in Sync. The same account machine
+   can be connected from another Sync installation, such as a NAS.
 
 For Docker, start the container and open the connection link in its logs; see
 [the Docker and NAS guide](docs/headless.md).
@@ -27,6 +31,19 @@ or internet was offline. Profile Store requests use their own outgoing wake-up c
 not wait for that normal 30-second cycle. Open Sync from its menu bar or tray icon; manually launched and first-run
 windows still open normally. One fixed status line reports the current operation and retains
 actionable failures without replacing the separate connection indicator.
+
+Each connected machine has its own status, **Sync now**, and Sync settings in MyBrewFolio.
+Machine names contain 1–24 characters and must be unique in the account without regard to case;
+they can be changed in Sync or MyBrewFolio. **Remove machine** disconnects only this installation
+from that machine. Its MyBrewFolio Brews, profiles, backups and name remain available, and it can be
+added again as an existing machine. Disconnecting the account is a separate action that affects
+all machines on this installation. Existing single-machine installations retain their history
+under the first machine, named **GaggiMate** by default.
+
+In MyBrewFolio, private Brews show the machine name after the Shot ID. Brews and the Analyzer
+Library can be filtered to one machine or **All**, and Statistics can combine several machines.
+Manual imports without a machine remain under **All** and **Unassigned**. Public shares do not
+include private machine names or IDs.
 
 The optional **Hide app icon from Dock or taskbar** setting keeps the menu bar or tray icon as the
 permanent entry point. On macOS it uses accessory-app mode to hide Sync from the Dock and app

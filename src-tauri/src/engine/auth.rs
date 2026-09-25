@@ -19,6 +19,14 @@ impl SyncEngine {
     }
 
     pub async fn complete_oauth(&self, callback: &str) -> Result<(), EngineError> {
+        self.complete_oauth_session(callback).await?;
+        self.register_connected_device().await
+    }
+
+    /// Finish account authorization without choosing a machine. New desktop
+    /// installations select or create a machine only after seeing this account's
+    /// existing machine list.
+    pub async fn complete_oauth_session(&self, callback: &str) -> Result<(), EngineError> {
         let pending = self
             .pending_oauth
             .lock()
@@ -26,7 +34,7 @@ impl SyncEngine {
             .take()
             .ok_or(EngineError::OAuthState)?;
         self.cloud.complete_authorization(callback, pending).await?;
-        self.register_connected_device().await
+        Ok(())
     }
 
     pub async fn begin_device_oauth(&self) -> Result<DeviceAuthorizationInfo, EngineError> {
@@ -45,10 +53,21 @@ impl SyncEngine {
     }
 
     pub async fn poll_device_oauth(&self) -> Result<bool, EngineError> {
+        self.poll_device_oauth_inner(true).await
+    }
+
+    /// Authorize a headless installation without silently binding its local
+    /// address to the account's historical default machine. The manager
+    /// reattaches known machines or waits for an explicit choice afterward.
+    pub async fn poll_device_oauth_session(&self) -> Result<bool, EngineError> {
+        self.poll_device_oauth_inner(false).await
+    }
+
+    async fn poll_device_oauth_inner(&self, register_device: bool) -> Result<bool, EngineError> {
         let _auth = self.pending_oauth.lock().await;
         let value = match self.credentials.pending_device_authorization()? {
             Some(value) => value,
-            None if self.status().await.connected => return Ok(true),
+            None if self.credentials.tokens()?.is_some() => return Ok(true),
             None => return Err(EngineError::OAuthState),
         };
         let pending = serde_json::from_str::<PendingDeviceAuthorization>(&value)
@@ -60,7 +79,9 @@ impl SyncEngine {
             .is_some()
         {
             self.credentials.delete_pending_device_authorization()?;
-            self.register_connected_device().await?;
+            if register_device {
+                self.register_connected_device().await?;
+            }
             return Ok(true);
         }
         Ok(false)
@@ -94,6 +115,15 @@ impl SyncEngine {
                 env!("CARGO_PKG_VERSION"),
             )
             .await?;
+        if self
+            .store
+            .setting("source_id")?
+            .is_some_and(|source| source != device.source_id)
+        {
+            // The OAuth account changed. Never upload a previous account's
+            // queued objects through the newly registered default machine.
+            self.store.clear_account_data()?;
+        }
         self.store.set_setting("device_id", &device.id)?;
         self.store.set_setting("source_id", &device.source_id)?;
         self.store.remove_setting("reconnect_required_reason")?;

@@ -99,6 +99,7 @@ fn companion_capabilities() -> Value {
         "syncControl": 1,
         "initialNotesActivation": 1,
         "syncProgress": 1,
+        "multiMachine": 1,
     })
 }
 
@@ -152,6 +153,9 @@ pub struct CloudClient {
     http: reqwest::Client,
     credentials: Arc<dyn CredentialStore>,
     refresh_lock: Mutex<()>,
+    // Every engine belonging to one installation shares this client. Keep the
+    // limit here so control actions and direct UI syncs count too.
+    full_sync_slots: tokio::sync::Semaphore,
 }
 
 impl CloudClient {
@@ -166,7 +170,15 @@ impl CloudClient {
             http,
             credentials,
             refresh_lock: Mutex::new(()),
+            full_sync_slots: tokio::sync::Semaphore::new(2),
         })
+    }
+
+    pub(crate) async fn full_sync_slot(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.full_sync_slots
+            .acquire()
+            .await
+            .expect("sync slots stay open")
     }
 
     fn authorization_for_redirect(
@@ -497,6 +509,166 @@ impl CloudClient {
                 .ok_or(CloudError::Rejected)?
                 .to_string(),
         })
+    }
+
+    pub async fn register_installation(&self, installation_id: &str) -> Result<(), CloudError> {
+        let request = self
+            .authorized(reqwest::Method::POST, "/v1/sync/installations")
+            .await?
+            .json(&json!({
+                "installationId": installation_id,
+                "name": crate::engine::installation_name(),
+                "platform": crate::engine::platform(),
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "capabilities": companion_capabilities(),
+            }));
+        let response = self.send_authorized(request).await?;
+        if !response.status().is_success() {
+            log_http_failure("installation registration", response).await;
+            return Err(CloudError::Rejected);
+        }
+        Ok(())
+    }
+
+    pub async fn list_machines(&self, installation_id: &str) -> Result<Vec<Value>, CloudError> {
+        let mut url = Url::parse(&format!("{}/v1/sync/machines", self.config.api_url))
+            .map_err(|_| CloudError::NotConfigured)?;
+        url.query_pairs_mut()
+            .append_pair("installationId", installation_id);
+        let request = self
+            .authorized(
+                reqwest::Method::GET,
+                url.as_str().trim_start_matches(&self.config.api_url),
+            )
+            .await?;
+        let response = self.send_authorized(request).await?;
+        if !response.status().is_success() {
+            log_http_failure("machine list", response).await;
+            return Err(CloudError::Rejected);
+        }
+        let body: Value = response.json().await.map_err(|_| CloudError::Rejected)?;
+        body.get("machines")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or(CloudError::Rejected)
+    }
+
+    pub async fn create_machine(
+        &self,
+        machine_id: &str,
+        machine_name: &str,
+        installation_id: &str,
+    ) -> Result<(DeviceRegistration, bool), CloudError> {
+        let request = self
+            .authorized(reqwest::Method::POST, "/v1/sync/machines")
+            .await?
+            .json(&json!({
+                "machineId": machine_id,
+                "machineName": machine_name,
+                "installationId": installation_id,
+                "name": crate::engine::installation_name(),
+                "platform": crate::engine::platform(),
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "capabilities": companion_capabilities(),
+            }));
+        let (device, body) = self
+            .machine_device_response("create machine", request)
+            .await?;
+        let legacy_default = body
+            .pointer("/machine/legacyDefault")
+            .and_then(Value::as_bool)
+            .ok_or(CloudError::Rejected)?;
+        Ok((device, legacy_default))
+    }
+
+    pub async fn attach_machine(
+        &self,
+        machine_id: &str,
+        installation_id: &str,
+    ) -> Result<DeviceRegistration, CloudError> {
+        let request = self
+            .authorized(
+                reqwest::Method::POST,
+                &format!("/v1/sync/machines/{machine_id}/attach"),
+            )
+            .await?
+            .json(&json!({
+                "installationId": installation_id,
+                "name": crate::engine::installation_name(),
+                "platform": crate::engine::platform(),
+                "appVersion": env!("CARGO_PKG_VERSION"),
+                "capabilities": companion_capabilities(),
+            }));
+        self.machine_device_response("attach machine", request)
+            .await
+            .map(|(device, _)| device)
+    }
+
+    async fn machine_device_response(
+        &self,
+        context: &str,
+        request: RequestBuilder,
+    ) -> Result<(DeviceRegistration, Value), CloudError> {
+        let response = self.send_authorized(request).await?;
+        if !response.status().is_success() {
+            log_http_failure(context, response).await;
+            return Err(CloudError::Rejected);
+        }
+        let body: Value = response.json().await.map_err(|_| CloudError::Rejected)?;
+        let device = body.get("device").ok_or(CloudError::Rejected)?;
+        let registration = DeviceRegistration {
+            id: device
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?
+                .to_string(),
+            source_id: device
+                .get("sourceId")
+                .and_then(Value::as_str)
+                .ok_or(CloudError::Rejected)?
+                .to_string(),
+        };
+        Ok((registration, body))
+    }
+
+    pub async fn rename_machine(
+        &self,
+        machine_id: &str,
+        installation_id: &str,
+        name: &str,
+    ) -> Result<(), CloudError> {
+        let request = self
+            .authorized(
+                reqwest::Method::PATCH,
+                &format!("/v1/sync/machines/{machine_id}"),
+            )
+            .await?
+            .json(&json!({"installationId": installation_id, "name": name}));
+        let response = self.send_authorized(request).await?;
+        if !response.status().is_success() {
+            log_http_failure("rename machine", response).await;
+            return Err(CloudError::Rejected);
+        }
+        Ok(())
+    }
+
+    pub async fn detach_machine(
+        &self,
+        machine_id: &str,
+        installation_id: &str,
+    ) -> Result<(), CloudError> {
+        let request = self
+            .authorized(
+                reqwest::Method::DELETE,
+                &format!("/v1/sync/machines/{machine_id}/attachments/{installation_id}"),
+            )
+            .await?;
+        let response = self.send_authorized(request).await?;
+        if !response.status().is_success() {
+            log_http_failure("detach machine", response).await;
+            return Err(CloudError::Rejected);
+        }
+        Ok(())
     }
 
     pub async fn state(&self, device_id: &str) -> Result<Value, CloudError> {
@@ -1023,6 +1195,24 @@ mod tests {
                 .into(),
         };
         client
+    }
+
+    #[tokio::test]
+    async fn full_sync_slots_allow_only_two_concurrent_runs() {
+        let client = client(Arc::new(TestCredentials::default()), "http://127.0.0.1:1");
+        let first = client.full_sync_slot().await;
+        let second = client.full_sync_slot().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), client.full_sync_slot())
+                .await
+                .is_err()
+        );
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_secs(1), client.full_sync_slot())
+            .await
+            .expect("slot released");
+        drop(second);
+        drop(third);
     }
 
     #[test]

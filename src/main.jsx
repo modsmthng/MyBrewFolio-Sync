@@ -76,12 +76,12 @@ function ActionLabel({ active, activeText, children }) {
   );
 }
 
-function ExternalLink({ page, children, className = '' }) {
+function ExternalLink({ page, machineId, children, className = '' }) {
   return (
     <button
       type="button"
       className={`text-link ${className}`.trim()}
-      onClick={() => invoke('open_mybrewfolio_page', { page }).catch(() => {})}
+      onClick={() => invoke('open_mybrewfolio_page', machineId ? { page, machineId } : { page }).catch(() => {})}
     >
       {children}
     </button>
@@ -149,6 +149,7 @@ function UpdateSettings({ updateStatus, showUpdateDialog, busy, checkForUpdates,
 
 export function Setup({ status, refresh, externalNotice }) {
   const [host, setHost] = useState(status.machineHost || 'gaggimate.local');
+  const [machineName, setMachineName] = useState(status.machineName || 'GaggiMate');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const reconnectMessage = status.lastErrorCode === 'SYNC_REAUTH_REQUIRED'
@@ -158,11 +159,17 @@ export function Setup({ status, refresh, externalNotice }) {
       : '';
 
   const connect = async () => {
+    const cleanName = machineName.trim();
+    if (!reconnectMessage && (Array.from(cleanName).length < 1 || Array.from(cleanName).length > 24)) {
+      setMessage('Enter a machine name with 1–24 characters.');
+      return;
+    }
     setBusy(true);
     setMessage('');
     try {
-      await invoke('set_machine_host', { host });
-      await invoke('begin_oauth');
+      if (!reconnectMessage) await invoke('set_machine_host', { host });
+      if (reconnectMessage) await invoke('begin_oauth');
+      else await invoke('begin_oauth', { machineName: cleanName });
       setMessage('Confirm the connection in your browser. This window will continue automatically.');
     } catch (error) {
       setMessage(String(error));
@@ -188,12 +195,13 @@ export function Setup({ status, refresh, externalNotice }) {
       <ol className="steps">
         <li className="done"><span>1</span><div><strong>Install Sync</strong><small>Done on this computer</small></div></li>
         <li><span>2</span><div><strong>Connect MyBrewFolio</strong><small>Confirm sign-in in your browser</small></div></li>
-        <li><span>3</span><div><strong>Confirm GaggiMate</strong><small>Usually found as gaggimate.local</small></div></li>
+        {!reconnectMessage ? <li><span>3</span><div><strong>Choose GaggiMate</strong><small>Add or select a machine after sign-in</small></div></li> : null}
       </ol>
-      <label className="field">
+      {!reconnectMessage ? <label className="field">
         <span>GaggiMate hostname or local IP</span>
         <input value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" />
-      </label>
+      </label> : null}
+      {!reconnectMessage ? <label className="field setup-machine-name"><span>Machine name in MyBrewFolio</span><input value={machineName} onInput={event => setMachineName(event.currentTarget.value)} aria-label="Machine name in MyBrewFolio" /></label> : null}
       <button type="button" className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : reconnectMessage ? 'Sign in again' : 'Connect MyBrewFolio'}</button>
       {message ? <p className="message" aria-live="polite">{message}</p> : null}
       {!message && externalNotice ? (
@@ -208,7 +216,164 @@ export function Setup({ status, refresh, externalNotice }) {
   );
 }
 
+function machineIdOf(machine) {
+  return machine?.machineId || machine?.id || '';
+}
+
+export function MachineManager({ machines, selectedMachineId, onSelectMachine, refresh, disabled }) {
+  const [adding, setAdding] = useState(false);
+  const [mode, setMode] = useState('new');
+  const [availableMachines, setAvailableMachines] = useState([]);
+  const [name, setName] = useState('');
+  const [existingId, setExistingId] = useState('');
+  const [host, setHost] = useState('gaggimate.local');
+  const [rename, setRename] = useState('');
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  const selectedMachine = machines.find(machine => machineIdOf(machine) === selectedMachineId) || machines[0];
+  const selectedId = machineIdOf(selectedMachine);
+  const available = availableMachines.filter(machine => !machines.some(connected => machineIdOf(connected) === machineIdOf(machine)));
+
+  useEffect(() => {
+    setRename(selectedMachine?.name || '');
+    setConfirmRemove(false);
+  }, [selectedId, selectedMachine?.name]);
+
+  const openAdd = async () => {
+    setAdding(true);
+    setNotice('');
+    setBusy(true);
+    try {
+      const result = await invoke('list_account_machines');
+      setAvailableMachines(Array.isArray(result) ? result : result?.machines || []);
+    } catch (error) {
+      setNotice(`Could not load account machines: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addMachine = async () => {
+    const cleanName = name.trim();
+    if (mode === 'new' && (Array.from(cleanName).length < 1 || Array.from(cleanName).length > 24)) {
+      setNotice('Enter a machine name with 1–24 characters.');
+      return;
+    }
+    if (mode === 'existing' && !existingId) {
+      setNotice('Choose a machine from your account.');
+      return;
+    }
+    setBusy(true);
+    setNotice('');
+    try {
+      const result = mode === 'new'
+        ? await invoke('add_machine', { name: cleanName, host: host.trim() })
+        : await invoke('connect_machine', { machineId: existingId, host: host.trim() });
+      setAdding(false);
+      setName('');
+      await refresh();
+      const nextId = machineIdOf(result) || (mode === 'existing' ? existingId : '');
+      if (nextId) onSelectMachine(nextId);
+      setNotice(mode === 'new' ? 'Machine added.' : 'Machine connected.');
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renameMachine = async () => {
+    const cleanName = rename.trim();
+    if (Array.from(cleanName).length < 1 || Array.from(cleanName).length > 24) {
+      setNotice('Enter a machine name with 1–24 characters.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await invoke('rename_machine', { machineId: selectedId, name: cleanName });
+      await refresh();
+      setNotice('Machine renamed.');
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeMachine = async () => {
+    setBusy(true);
+    try {
+      await invoke('remove_machine', { machineId: selectedId });
+      setConfirmRemove(false);
+      onSelectMachine(machineIdOf(machines.find(machine => machineIdOf(machine) !== selectedId)));
+      await refresh();
+      setNotice('Machine removed from this installation. Its library remains in MyBrewFolio.');
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <section className="card settings machine-manager" aria-label="Machines">
+      <div className="machine-manager-title">
+        <div><h2>Machines</h2><p className="muted">Choose a GaggiMate to view its Sync status and settings.</p></div>
+        <button type="button" className="secondary compact-button" disabled={disabled || busy} onClick={openAdd}>Add machine</button>
+      </div>
+      {machines.length ? (
+        <div className="machine-list" role="group" aria-label="Connected machines">
+          {machines.map(machine => {
+            const id = machineIdOf(machine);
+            return (
+              <button type="button" key={id} className={`machine-choice ${selectedId === id ? 'selected' : ''}`} aria-pressed={selectedId === id} onClick={() => onSelectMachine(id)}>
+                <span><strong>{machine.name || 'GaggiMate'}</strong><small>{machine.machineHost || 'Address not set'}</small></span>
+                <span className={`machine-state ${machine.syncing ? 'working' : machine.lastError || machine.machineReachable === false ? 'error' : 'ok'}`}>{machine.syncing ? 'Syncing' : machine.lastError ? 'Needs attention' : machine.machineReachable === false ? 'Offline' : 'Connected'}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : <p className="muted">No machine is connected to this installation yet.</p>}
+      {selectedMachine ? (
+        <div className="machine-edit">
+          <label className="field"><span>Machine name</span><input aria-label="Machine name" value={rename} onInput={event => setRename(event.currentTarget.value)} /></label>
+          <button type="button" className="secondary compact-button" disabled={disabled || busy || rename.trim() === selectedMachine.name} onClick={renameMachine}>Save name</button>
+          {confirmRemove ? (
+            <div className="remove-machine-confirm" role="alertdialog" aria-label="Remove machine">
+              <p>Remove {selectedMachine.name} from this installation? Its data stays in MyBrewFolio.</p>
+              <div className="button-row"><button type="button" className="secondary compact-button" disabled={busy} onClick={() => setConfirmRemove(false)}>Cancel</button><button type="button" className="secondary compact-button danger-action" disabled={busy} onClick={removeMachine}>Remove machine</button></div>
+            </div>
+          ) : <button type="button" className="text-link danger-action" disabled={disabled || busy} onClick={() => setConfirmRemove(true)}>Remove machine</button>}
+        </div>
+      ) : null}
+      {adding ? (
+        <div className="machine-add-form">
+          <h3>Add a machine</h3>
+          <div className="machine-add-modes" role="group" aria-label="Machine type">
+            <label><input type="radio" name="machine-mode" checked={mode === 'new'} onChange={() => setMode('new')} /> New machine</label>
+            <label><input type="radio" name="machine-mode" checked={mode === 'existing'} onChange={() => setMode('existing')} /> Existing machine</label>
+          </div>
+          {mode === 'new' ? <label className="field"><span>Name in MyBrewFolio</span><input aria-label="New machine name" value={name} onInput={event => setName(event.currentTarget.value)} placeholder="Kitchen GaggiMate" /></label> : (
+            <label className="field"><span>Machine in your account</span><select aria-label="Existing machine" value={existingId} onChange={event => setExistingId(event.currentTarget.value)}><option value="">Choose a machine</option>{available.map(machine => <option key={machineIdOf(machine)} value={machineIdOf(machine)}>{machine.name}</option>)}</select>{!available.length ? <small>No other machines are available in this account.</small> : null}</label>
+          )}
+          <label className="field"><span>GaggiMate hostname or local IP</span><input aria-label="New machine address" value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" /></label>
+          <div className="button-row"><button type="button" className="secondary compact-button" disabled={busy} onClick={() => setAdding(false)}>Cancel</button><button type="button" className="primary compact-button" disabled={busy} onClick={addMachine}>{busy ? 'Connecting…' : mode === 'new' ? 'Create machine' : 'Connect machine'}</button></div>
+          <p className="muted">The local address stays on this computer.</p>
+        </div>
+      ) : null}
+      {notice ? <p className="message" role="status">{notice}</p> : null}
+    </section>
+  );
+}
+
 export function Dashboard({ status, refresh, onDisconnected, disconnectRequestToken }) {
+  const machines = Array.isArray(status.machines) ? status.machines : null;
+  const [selectedMachineId, setSelectedMachineId] = useState(machineIdOf(machines?.[0]));
+  const selectedMachine = machines?.find(machine => machineIdOf(machine) === selectedMachineId) || machines?.[0];
+  const machineId = machineIdOf(selectedMachine);
+  const machineStatus = selectedMachine ? { ...status, ...selectedMachine, connected: true } : machines ? null : status;
+  const hasMachine = Boolean(machineStatus);
   const [autostart, setAutostart] = useState(true);
   const [autostartStatus, setAutostartStatus] = useState({
     enabled: true,
@@ -217,7 +382,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
     migrationAvailable: false,
   });
   const [hideAppIcon, setHideAppIconState] = useState(false);
-  const [host, setHost] = useState(status.machineHost);
+  const [host, setHost] = useState(machineStatus?.machineHost || 'gaggimate.local');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [messageTone, setMessageTone] = useState('success');
@@ -228,8 +393,18 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
 
+  useEffect(() => {
+    if (machines && !machines.some(machine => machineIdOf(machine) === selectedMachineId)) {
+      setSelectedMachineId(machineIdOf(machines[0]));
+    }
+  }, [machines, selectedMachineId]);
+
+  useEffect(() => {
+    setHost(machineStatus?.machineHost || 'gaggimate.local');
+  }, [machineId, machineStatus?.machineHost]);
+
   const showStatusMessage = (text, tone = 'success') => {
-    if (tone === 'success' && status.lastError) setAcknowledgedLastError(status.lastError);
+    if (tone === 'success' && machineStatus?.lastError) setAcknowledgedLastError(machineStatus.lastError);
     setMessageTone(tone);
     setMessage(text);
   };
@@ -241,8 +416,8 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   }, [message, messageTone]);
 
   useEffect(() => {
-    if (!status.lastError) setAcknowledgedLastError('');
-  }, [status.lastError]);
+    if (!machineStatus?.lastError) setAcknowledgedLastError('');
+  }, [machineStatus?.lastError, machineId]);
 
   useEffect(() => {
     invoke('get_autostart_status')
@@ -274,7 +449,8 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
     setSyncActivity('sync');
     setMessage('');
     try {
-      await invoke('sync_now');
+      if (machineId) await invoke('sync_now', { machineId });
+      else await invoke('sync_now');
       showStatusMessage('Synchronization completed.');
     } catch (error) {
       showStatusMessage(String(error), 'error');
@@ -288,7 +464,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   const saveHost = async () => {
     setBusy(true);
     try {
-      await invoke('set_machine_host', { host });
+      await invoke('set_machine_host', machineId ? { machineId, host } : { host });
       showStatusMessage('Machine address saved.');
       refresh();
     } catch (error) {
@@ -435,15 +611,20 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
     }
   };
 
-  const activeSyncActivity = syncActivity || (status.syncing ? 'sync' : '');
-  const engineError = status.lastError && status.lastError !== acknowledgedLastError
-    ? status.lastError
+  const activeSyncActivity = syncActivity || (machineStatus?.syncing ? 'sync' : '');
+  const engineError = machineStatus?.lastError && machineStatus.lastError !== acknowledgedLastError
+    ? machineStatus.lastError
     : '';
-  const visibleStatusMessage = visibleDashboardStatus(activeSyncActivity, status, message, engineError);
+  const visibleStatusMessage = visibleDashboardStatus(activeSyncActivity, machineStatus, message, engineError);
   const visibleStatusTone = statusTone(activeSyncActivity, message, messageTone, engineError);
   return (
     <DashboardContent
-      status={status}
+      status={machineStatus || status}
+      hasMachine={hasMachine}
+      machines={machines}
+      selectedMachineId={machineId}
+      onSelectMachine={setSelectedMachineId}
+      refresh={refresh}
       visibleStatusMessage={visibleStatusMessage}
       visibleStatusTone={visibleStatusTone}
       busy={busy}
@@ -472,7 +653,8 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
 }
 
 function DashboardContent({
-  status, visibleStatusMessage, visibleStatusTone, busy, activeSyncActivity, syncNow,
+  status, hasMachine, machines, selectedMachineId, onSelectMachine, refresh,
+  visibleStatusMessage, visibleStatusTone, busy, activeSyncActivity, syncNow,
   host, setHost, saveHost, updateStatus, showUpdateDialog, checkForUpdates,
   restartAfterUpdate, appVersion, autostart, autostartStatus, hideAppIcon,
   toggleAutostart, toggleAppIcon, confirmDisconnect, setConfirmDisconnect,
@@ -489,6 +671,8 @@ function DashboardContent({
           <strong>{visibleStatusMessage}</strong>
         </output>
       ) : null}
+      {machines ? <MachineManager machines={machines} selectedMachineId={selectedMachineId} onSelectMachine={onSelectMachine} refresh={refresh} disabled={busy} /> : null}
+      {hasMachine ? <>
       <section className="overview card">
         <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
         <button type="button" className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
@@ -504,7 +688,7 @@ function DashboardContent({
         <h3>Manage Sync in MyBrewFolio</h3>
         <p className="muted">Manage matching preferences, Notes, backups, conflicts and complete resync in your account.</p>
         {!status.initialSyncConfigured ? <p>Finish choosing your Sync preferences in MyBrewFolio to start importing.</p> : null}
-        <ExternalLink page="accountSync" className="primary">Open Sync settings</ExternalLink>
+        <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary">Open Sync settings</ExternalLink>
       </section>
       <section className="card settings">
         <h3>Local connection</h3>
@@ -512,6 +696,7 @@ function DashboardContent({
         <p className="muted">The machine address stays on this computer.</p>
         {status.issues?.length ? <p className="muted">{status.issues.length} local items need attention. Review and retry them in MyBrewFolio.</p> : null}
       </section>
+      </> : null}
       <h2 className="section-title">App settings</h2>
       <UpdateSettings updateStatus={updateStatus} showUpdateDialog={showUpdateDialog} busy={busy} checkForUpdates={checkForUpdates} restartAfterUpdate={restartAfterUpdate} appVersion={appVersion} />
       <section className="card settings background-app-settings">

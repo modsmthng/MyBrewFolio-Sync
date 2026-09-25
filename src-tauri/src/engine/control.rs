@@ -15,7 +15,7 @@ use super::{
 impl SyncEngine {
     #[cfg(feature = "headless")]
     pub async fn headless_pairing(&self) -> Result<Option<String>, EngineError> {
-        if self.status().await.connected
+        if self.credentials.tokens()?.is_some()
             || self.store.setting("headless_pairing_disabled")?.as_deref() == Some("1")
         {
             return Ok(None);
@@ -31,7 +31,7 @@ impl SyncEngine {
             let info = self.begin_device_oauth().await?;
             return Ok(Some(info.verification_uri));
         }
-        match self.poll_device_oauth().await {
+        match self.poll_device_oauth_session().await {
             Ok(true) => {
                 eprintln!(
                     "MyBrewFolio connected. Manage Sync at https://mybrewfolio.com/account/sync"

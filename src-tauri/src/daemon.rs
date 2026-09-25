@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::{
-    collections::HashMap, env, fs, path::PathBuf, process::ExitCode, sync::Arc, time::Duration,
+    collections::{HashMap, HashSet},
+    env, fs,
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+    time::Duration,
 };
 
 use chrono::{SecondsFormat, Utc};
@@ -9,6 +14,7 @@ use mybrewfolio_sync_lib::{
     credentials::{CredentialStore, EncryptedFileCredentialStore},
     engine::{EngineError, SyncEngine},
     local::LocalError,
+    machines::MachineManager,
     model::SyncIssue,
     store::AppStore,
 };
@@ -123,6 +129,10 @@ fn help_text(args: &[String]) -> &'static str {
              auth wait   Wait for that request to be approved."
         }
         Some("host") => "Usage: mybrewfolio-syncd host set <hostname-or-ip>",
+        Some("machines") => {
+            "Usage: mybrewfolio-syncd machines <list|add <name> <host>|add --existing <id> <host>|rename <id> <name>|remove <id>>\n\n\
+             Machine names contain 1–24 characters. Removing a machine disconnects only this installation; its MyBrewFolio history remains."
+        }
         Some("configure") => {
             "Usage: mybrewfolio-syncd configure <reuse-matching|import-all>\n\n\
              reuse-matching protects matching library entries from duplicate import."
@@ -143,11 +153,15 @@ fn help_text(args: &[String]) -> &'static str {
              Everyday commands:\n\
                help, --help, -h       Show this help without starting the daemon\n\
                status                  Show the current synchronization status as JSON\n\
+               machines list           List machines in this account\n\
                diagnose                Show read-only JSON diagnostics and next steps\n\
                sync-once               Run one synchronization cycle\n\
                health                  Report container health\n\n\
              Setup and maintenance:\n\
                auth begin|wait         Pair this installation in a browser\n\
+               machines add <name> <host>  Add a new named GaggiMate machine\n\
+               machines add --existing <id> <host>  Connect an existing machine\n\
+               machines rename|remove <id> ...  Manage a connected machine\n\
                host set <host>         Set the GaggiMate hostname, IP, or host:port\n\
                configure <policy>      Set reuse-matching or import-all\n\
                retry                   Retry failed local items\n\
@@ -159,6 +173,8 @@ fn help_text(args: &[String]) -> &'static str {
              Service:\n\
                daemon                  Run the continuous local synchronization service\n\n\
              Successful data commands write JSON to stdout. Logs and errors use stderr.\n\
+             Use --machine <id> for machine-specific commands when several are connected.\n\
+             sync-once without --machine synchronizes all connected machines.\n\
              Configure MYBREWFOLIO_SYNC_DATA_DIR and MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE."
         }
     }
@@ -212,7 +228,7 @@ fn confirmed(value: Option<String>) -> Result<(), String> {
     }
 }
 
-async fn open_engine() -> Result<Arc<SyncEngine>, String> {
+async fn open_manager() -> Result<Arc<MachineManager>, String> {
     let data = data_dir();
     let store =
         Arc::new(AppStore::open(&data.join("sync.sqlite")).map_err(|error| error.to_string())?);
@@ -226,7 +242,7 @@ async fn open_engine() -> Result<Arc<SyncEngine>, String> {
             .map_err(|error| error.to_string())?,
     );
     Ok(Arc::new(
-        SyncEngine::open(store, credentials).map_err(|error| error.to_string())?,
+        MachineManager::open(&data, store, credentials).map_err(|error| error.to_string())?,
     ))
 }
 
@@ -245,7 +261,7 @@ async fn execute_auth(
         Some("wait") => {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
             loop {
-                match engine.poll_device_oauth().await {
+                match engine.poll_device_oauth_session().await {
                     Ok(true) => break Ok(json!({"ok": true, "connected": true})),
                     Ok(false) if tokio::time::Instant::now() < deadline => {
                         tokio::time::sleep(Duration::from_secs(5)).await
@@ -254,6 +270,42 @@ async fn execute_auth(
                         break Err("Device authorization timed out; run auth begin again".into())
                     }
                     Err(error) => break Err(error.to_string()),
+                }
+            }
+        }
+        _ => Err("Usage: mybrewfolio-syncd auth <begin|wait>".into()),
+    }
+}
+
+async fn execute_auth_multi(
+    manager: &MachineManager,
+    mut args: impl Iterator<Item = String>,
+) -> Result<Value, String> {
+    match args.next().as_deref() {
+        Some("begin") => {
+            let _account = manager.account_operation().await;
+            let info = manager
+                .primary()
+                .begin_device_oauth()
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(info).map_err(|error| error.to_string())
+        }
+        Some("wait") => {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+            loop {
+                match manager
+                    .poll_device_oauth_and_authorize(Some("GaggiMate".into()))
+                    .await
+                {
+                    Ok(true) => break Ok(json!({"ok": true, "connected": true})),
+                    Ok(false) if tokio::time::Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_secs(5)).await
+                    }
+                    Ok(false) => {
+                        break Err("Device authorization timed out; run auth begin again".into())
+                    }
+                    Err(error) => break Err(error),
                 }
             }
         }
@@ -405,6 +457,126 @@ async fn execute(
     }
 }
 
+fn take_machine_selector(arguments: Vec<String>) -> Result<(Vec<String>, Option<String>), String> {
+    let mut args = Vec::new();
+    let mut selected = None;
+    let mut iter = arguments.into_iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--machine" {
+            if selected.is_some() {
+                return Err("--machine may be specified only once".into());
+            }
+            selected = Some(iter.next().ok_or("--machine requires a machine ID")?);
+        } else {
+            args.push(arg);
+        }
+    }
+    Ok((args, selected))
+}
+
+async fn execute_multi(
+    manager: &Arc<MachineManager>,
+    command: &str,
+    arguments: Vec<String>,
+) -> Result<Value, String> {
+    let (arguments, machine_id) = take_machine_selector(arguments)?;
+    match command {
+        "status" if machine_id.is_none() => Ok(manager.status_json().await),
+        "machines" => {
+            if machine_id.is_some() {
+                return Err("Use the machine ID as an argument to machines".into());
+            }
+            match arguments.as_slice() {
+                [action] if action == "list" => {
+                    Ok(json!({"machines": manager.list_account_machines().await?}))
+                }
+                [action, name, host] if action == "add" => {
+                    let id = manager.add_machine(name, host).await?;
+                    Ok(json!({"ok": true, "machineId": id}))
+                }
+                [action, flag, id, host] if action == "add" && flag == "--existing" => {
+                    manager.connect_machine(id, host).await?;
+                    Ok(json!({"ok": true, "machineId": id}))
+                }
+                [action, id, name] if action == "rename" => {
+                    manager.rename_machine(id, name).await?;
+                    Ok(json!({"ok": true, "machineId": id, "name": name}))
+                }
+                [action, id] if action == "remove" => {
+                    manager.remove_machine(id).await?;
+                    Ok(json!({"ok": true, "machineId": id}))
+                }
+                _ => Err("Usage: machines <list|add <name> <host>|add --existing <id> <host>|rename <id> <name>|remove <id>>".into()),
+            }
+        }
+        "auth" => execute_auth_multi(manager, arguments.into_iter()).await,
+        "disconnect" => manager.disconnect_all().await,
+        "sync-once" if machine_id.is_none() => {
+            let outcomes = manager.sync_all().await;
+            let failed: Vec<_> = outcomes
+                .into_iter()
+                .filter_map(|(id, result)| {
+                    result
+                        .err()
+                        .map(|error| json!({"machineId": id, "error": error}))
+                })
+                .collect();
+            if failed.is_empty() {
+                Ok(json!({"ok": true}))
+            } else {
+                Err(format!(
+                    "One or more machines could not synchronize: {}",
+                    Value::Array(failed)
+                ))
+            }
+        }
+        "sync-once" => {
+            manager.sync_selected(machine_id.as_deref()).await?;
+            Ok(json!({"ok": true}))
+        }
+        "health" => Ok(json!({"ok": true})),
+        _ => {
+            let _account = manager.account_operation().await;
+            let engine = manager.selected_engine(machine_id.as_deref()).await?;
+            execute(&engine, command, arguments).await
+        }
+    }
+}
+
+async fn execute_control_multi(
+    manager: &Arc<MachineManager>,
+    mut request: ControlRequest,
+) -> Result<Value, String> {
+    let (arguments, machine_id) = take_machine_selector(request.args)?;
+    request.args = arguments;
+    if let Some(decisions) = request.decisions {
+        if request.command != "notes"
+            || request.args.len() != 3
+            || request.args[0] != "activate"
+            || request.args[2] != "--confirm"
+        {
+            return Err("Inline decisions require notes activate <backup-id> --confirm.".into());
+        }
+        notes_wizard::validate_decisions(&decisions)?;
+        let _account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
+        return engine
+            .activate_headless_notes(&request.args[1], decisions)
+            .await;
+    }
+    if request.command == "notes" && request.args == ["enable-preview"] {
+        let _account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
+        return engine.prepare_headless_notes_activation().await;
+    }
+    let mut args = request.args;
+    if let Some(machine_id) = machine_id {
+        args.push("--machine".into());
+        args.push(machine_id);
+    }
+    execute_multi(manager, &request.command, args).await
+}
+
 async fn execute_control(engine: &SyncEngine, request: ControlRequest) -> Result<Value, String> {
     if let Some(decisions) = request.decisions {
         if request.command != "notes"
@@ -478,6 +650,58 @@ async fn serve_control(engine: Arc<SyncEngine>, socket: PathBuf) -> Result<(), S
 }
 
 #[cfg(unix)]
+async fn serve_control_multi(manager: Arc<MachineManager>, socket: PathBuf) -> Result<(), String> {
+    if socket.exists() {
+        if UnixStream::connect(&socket).await.is_ok() {
+            return Err("another MyBrewFolio Sync daemon is already running".into());
+        }
+        let stale_socket = socket.clone();
+        tokio::task::spawn_blocking(move || fs::remove_file(stale_socket))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
+    }
+    let listener = UnixListener::bind(&socket).map_err(|error| error.to_string())?;
+    loop {
+        let (mut stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+        let manager = manager.clone();
+        tokio::spawn(async move {
+            let mut input = Vec::new();
+            let _ = stream.read_to_end(&mut input).await;
+            let response = match serde_json::from_slice::<ControlRequest>(&input) {
+                Ok(request) if request.command != "daemon" => {
+                    match execute_control_multi(&manager, request).await {
+                        Ok(value) => ControlResponse {
+                            ok: true,
+                            value: Some(value),
+                            error: None,
+                        },
+                        Err(error) => ControlResponse {
+                            ok: false,
+                            value: None,
+                            error: Some(error),
+                        },
+                    }
+                }
+                Ok(_) => ControlResponse {
+                    ok: false,
+                    value: None,
+                    error: Some("daemon cannot be nested".into()),
+                },
+                Err(_) => ControlResponse {
+                    ok: false,
+                    value: None,
+                    error: Some("invalid local control request".into()),
+                },
+            };
+            let _ = stream
+                .write_all(&serde_json::to_vec(&response).expect("control JSON"))
+                .await;
+        });
+    }
+}
+
+#[cfg(unix)]
 async fn proxy_control(
     socket: &PathBuf,
     request: &ControlRequest,
@@ -509,17 +733,26 @@ async fn proxy_control(
 
 async fn run_notes_wizard(command: &str, args: &[String], socket: &PathBuf) -> Option<ExitCode> {
     if command == "notes" && args.first().map(String::as_str) == Some("enable") {
-        if args.len() != 1 {
-            eprintln!("Usage: mybrewfolio-syncd notes enable");
-            return Some(ExitCode::from(64));
-        }
-        return Some(match notes_wizard::run(socket).await {
-            Ok(()) => ExitCode::SUCCESS,
+        let (selected_args, machine_id) = match take_machine_selector(args.to_vec()) {
+            Ok(value) => value,
             Err(error) => {
                 eprintln!("{error}");
-                ExitCode::from(1)
+                return Some(ExitCode::from(64));
             }
-        });
+        };
+        if selected_args != ["enable"] {
+            eprintln!("Usage: mybrewfolio-syncd notes enable [--machine <id>]");
+            return Some(ExitCode::from(64));
+        }
+        return Some(
+            match notes_wizard::run(socket, machine_id.as_deref()).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::from(1)
+                }
+            },
+        );
     }
     None
 }
@@ -548,19 +781,24 @@ async fn proxy_active_daemon(socket: &PathBuf, command: &str, args: &[String]) -
     }
 }
 
-async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
-    let pairing_engine = engine.clone();
+async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) -> ! {
+    let pairing_manager = manager.clone();
     tokio::spawn(async move {
         let mut last_url = None;
+        let mut account_initialized = false;
         loop {
-            match pairing_engine.headless_pairing().await {
-                Ok(url) => {
+            match pairing_manager
+                .headless_pairing_and_authorize(Some("GaggiMate".into()), account_initialized)
+                .await
+            {
+                Ok((url, connected)) => {
                     if url != last_url {
                         if let Some(url) = &url {
                             eprintln!("Connect MyBrewFolio: {url}\nOpen this link in your browser. It expires after 10 minutes.");
                         }
                         last_url = url;
                     }
+                    account_initialized = connected;
                 }
                 Err(error) => {
                     daemon_error(&format!(
@@ -572,53 +810,94 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
-    let control_engine = engine.clone();
-    tokio::spawn(async move {
-        control_engine.run_control_worker().await;
-    });
     #[cfg(unix)]
     {
-        let control_engine = engine.clone();
+        let control_manager = manager.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_control(control_engine, socket).await {
+            if let Err(error) = serve_control_multi(control_manager, socket).await {
                 daemon_error(&format!("Control socket error: {error}"));
             }
         });
     }
-    let bridge_engine = engine.clone();
-    tokio::spawn(async move {
-        loop {
-            if bridge_engine.status().await.connected {
-                if bridge_engine
-                    .wait_for_profile_store_operations()
-                    .await
-                    .is_err()
-                {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
-            } else {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        }
-    });
-    let mut first_sync_notice_printed = false;
+    let mut first_sync_notices = HashSet::new();
     let mut logged_issues = HashMap::new();
+    let mut workers: HashMap<String, (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> =
+        HashMap::new();
     loop {
-        let status = engine.status().await;
-        if status.connected {
+        let active = manager.active_engines().await;
+        let active_ids: HashSet<_> = active.iter().map(|(id, _)| id.clone()).collect();
+        workers.retain(|id, (control, bridge)| {
+            if active_ids.contains(id) && !control.is_finished() && !bridge.is_finished() {
+                true
+            } else {
+                control.abort();
+                bridge.abort();
+                false
+            }
+        });
+        for (id, engine) in &active {
+            if workers.contains_key(id) {
+                continue;
+            }
+            let control_engine = engine.clone();
+            let (control_start, control_ready) = tokio::sync::oneshot::channel();
+            let control = tokio::spawn(async move {
+                if control_ready.await.is_ok() {
+                    control_engine.run_control_worker().await;
+                }
+            });
+            let bridge_engine = engine.clone();
+            let (bridge_start, bridge_ready) = tokio::sync::oneshot::channel();
+            let bridge = tokio::spawn(async move {
+                if bridge_ready.await.is_err() {
+                    return;
+                }
+                loop {
+                    if bridge_engine.status().await.connected {
+                        if bridge_engine
+                            .wait_for_profile_store_operations()
+                            .await
+                            .is_err()
+                        {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    } else {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                }
+            });
+            if manager.register_worker(id, &control).await {
+                let _ = control_start.send(());
+            }
+            if manager.register_worker(id, &bridge).await {
+                let _ = bridge_start.send(());
+            }
+            workers.insert(id.clone(), (control, bridge));
+        }
+        for (id, engine) in &active {
+            let status = engine.status().await;
             if first_sync_notice_due(
-                first_sync_notice_printed,
+                first_sync_notices.contains(id),
                 status.connected,
                 status.last_sync_at.as_deref(),
                 status.last_error.as_deref(),
             ) {
                 eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
-                first_sync_notice_printed = true;
+                first_sync_notices.insert(id.clone());
             }
-            match engine.sync_once().await {
+        }
+        let _ = manager.flush_pending_detaches().await;
+        let _ = manager.list_account_machines().await;
+        for (id, result) in manager.sync_all().await {
+            let Some((_, engine)) = active.iter().find(|(active_id, _)| *active_id == id) else {
+                continue;
+            };
+            let status = engine.status().await;
+            match result {
                 Ok(()) => {
-                    for issue in engine.status().await.issues {
-                        let key = format!("{}:{}:{}", issue.kind, issue.source_key, issue.stage);
+                    for issue in status.issues {
+                        let key =
+                            format!("{id}:{}:{}:{}", issue.kind, issue.source_key, issue.stage);
                         let marker = (issue.updated_at, issue.attempts);
                         if logged_issues.get(&key) != Some(&marker) {
                             daemon_error(&sync_issue_message(&issue, &status.machine_host));
@@ -626,12 +905,12 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                         }
                     }
                 }
-                Err(error) if should_log_sync_error(&error) => {
-                    daemon_error(&sync_attempt_message(&error, &status.machine_host))
-                }
-                Err(_) => {}
+                Err(error) => daemon_error(&format!(
+                    "Sync attempt failed for machine {id}: {error}. Retrying in 30 seconds."
+                )),
             }
         }
+        let _ = manager.reconcile_auth_loss().await;
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
@@ -656,7 +935,7 @@ async fn main() -> ExitCode {
             return exit_code;
         }
     }
-    let engine = match open_engine().await {
+    let manager = match open_manager().await {
         Ok(engine) => engine,
         Err(error) => {
             eprintln!("{error}");
@@ -664,9 +943,9 @@ async fn main() -> ExitCode {
         }
     };
     if command == "daemon" {
-        run_daemon(engine, socket).await;
+        run_daemon(manager, socket).await;
     }
-    match execute(&engine, command, args.to_vec()).await {
+    match execute_multi(&manager, command, args.to_vec()).await {
         Ok(value) => {
             print_json(value);
             ExitCode::SUCCESS

@@ -3,11 +3,12 @@
 ## Data flow
 
 ```text
-GaggiMate on the private LAN
-  |  history index, shot logs, notes and profiles
+GaggiMate machines on the private LAN
+  |  separate history indexes, shot logs, notes and profiles
   v
-Shared Rust SyncEngine
-  |  private-host validation, independent parsing, SQLite state and retry queue
+Shared account session and machine manager
+  |  one SyncEngine per machine, shared OAuth and refresh lock
+  |  private-host validation, independent parsing, SQLite state and retry queues
   |\
   | \-- Desktop adapter: Tauri UI, tray, deep links and OS keychain
   |\
@@ -17,10 +18,23 @@ Shared Rust SyncEngine
 MyBrewFolio Sync API
 ```
 
-The desktop app and `mybrewfolio-syncd` use the same engine, local data model, GaggiMate protocol
+The desktop app and `mybrewfolio-syncd` use the same manager, engine, local data model, GaggiMate protocol
 client, queue behaviour, and MyBrewFolio Sync API. The adapters only provide their runtime-specific
 interfaces and credential storage; this prevents the headless variant from becoming a second sync
 implementation.
+
+The MyBrewFolio account owns durable machine IDs and names independently of local addresses and
+connected computers. One installation can attach several account machines, and several
+installations can attach the same machine. The previous `sync.sqlite` and its pending work remain
+with the upgraded first machine; each additional machine has its own local SQLite database for
+scan state, queue and actions. The common account session shares credentials across those engines.
+An upgraded single-machine account retains its existing source ID, device ID and history. The
+first machine is named **GaggiMate** by default. Historical content from previously mixed
+machines cannot be split automatically without reliable origin information.
+
+Machine IDs stay stable across renames, address changes and installations. Names are private
+account metadata and are not embedded in shot, Notes or profile synchronization payloads. A
+rename therefore does not change content hashes or trigger new shot analysis.
 
 Neither runtime sends the local hostname, IP address, or a GaggiMate hardware identifier to
 MyBrewFolio. Automatic synchronization never writes shots or profiles and never deletes anything on
@@ -50,8 +64,8 @@ open a network port.
 - The shot index is checked every 30 seconds.
 - New or changed shots are parsed from `.slog` files and queued with their notes.
 - Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
-- Profile Store operations are accepted only when addressed to this installation's authenticated
-  device ID. Capability `profileStoreBridge: 2` keeps a separate outgoing long poll for this
+- Profile Store operations are accepted only when addressed to the selected machine attachment's
+  authenticated device ID. Capability `profileStoreBridge: 2` keeps a separate outgoing long poll for this
   Store-only work and is woken immediately by the API; it never starts the normal shot, profile or
   Notes synchronization. Capability 1 remains compatible through the regular 30-second cycle.
   Inventory, fetch, preview and install results use short-lived leases; installation reloads the
@@ -62,13 +76,25 @@ open a network port.
   objects, null/missing notes payloads and the machine's protocol-level “not found” response mean
   that no notes exist.
 - Validated data remains in the local queue while the internet or MyBrewFolio is unavailable.
+- A fair scheduler gives connected machines turns and runs at most two complete Sync cycles at
+  once. A local machine failure does not block the others.
 
 Shots and profiles are one-way. Deleting a synchronized object in MyBrewFolio suppresses its
-automatic reimport but does not modify the GaggiMate.
+automatic reimport but does not modify the GaggiMate. Shot and profile mappings, Notes writers,
+backups, conflicts and resync decisions are scoped to the machine. Two machines can therefore
+have the same local Shot ID and recording time without sharing a Brew mapping.
+
+Removing a machine from Sync stops only this installation's work for it and detaches that
+installation's server binding. If the network is unavailable, the detach is persisted and
+retried. The account machine and its library history remain. A Notes writer bound to the removed
+installation is disabled for that machine without selecting a replacement automatically. An
+account disconnect or switch treats every local machine together and never transfers a queue or
+cloud mapping to another account.
 
 ## Two-way Notes synchronization
 
-Two-way Notes synchronization is off by default and is bound to one active writer installation.
+Two-way Notes synchronization is off by default and is bound to one active writer installation
+per machine.
 Activation starts with a complete, finalized machine-Notes backup, shown as **First Backup** in MyBrewFolio. The client then obtains an activation preview containing the differences and the
 proposed decisions; existing MyBrewFolio Notes are preselected. A user must review those decisions
 before writing is enabled. In the headless CLI, activation accepts only that reviewed JSON decision
@@ -108,6 +134,8 @@ and refreshes the authoritative server state before uploading the restored inven
 Tauri retains local pairing, host configuration, status, disconnect, updates and OS preferences.
 Advanced CLI commands delegate to the same engine. Capability `syncControl: 1` is announced on
 registration and heartbeat, including upgrades that keep their existing device ID.
+Capability `multiMachine: 1` identifies the machine-management protocol; older clients remain
+bound to the account's default source.
 
 The worker claims only enumerated actions for its authenticated account/device, using an outgoing
 25-second long poll and separate wake keys on the existing bridge notification broker. It opens no
@@ -124,12 +152,11 @@ write, and checks the writer authorization again before each write. Disabling No
 the device prevents further authorized writes. Web diagnostics include only counts and availability;
 local diagnostics remain available through the CLI.
 
-Roll out hosted API migration `038_sync_control.sql` and the API first. Coordinate the remaining
-releases: publish the new Docker image before the standalone installation guide, and make the web
-controls available before offering the new desktop packages. Existing clients keep their API paths and continue syncing; the web requests
-an update for clients without `syncControl`. The standalone Docker configuration requires the new
-image; retain original external-key mounts on existing installations. Source changes do not update
-already published `latest` images or installed desktop apps.
+For multi-machine rollout, apply the hosted database migration and API before the updated
+MyBrewFolio web interface, then release the new desktop and Docker companions. Existing v0.5.6
+clients continue to register and sync against the account's legacy default machine through the
+original device endpoint. Keep existing Docker `/data` volumes and optional external-key mounts
+during the upgrade. Source changes do not update already published images or installed apps.
 
 ## Public server contract
 
@@ -137,7 +164,13 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /v1/sync/devices` | Register an OAuth-authorized installation |
+| `POST /v1/sync/devices` | Register a legacy client against the account's default machine |
+| `POST /v1/sync/installations` | Register the account installation used by several machine attachments |
+| `GET /v1/sync/machines?installationId=…` | List account machines and this installation's attachments |
+| `POST /v1/sync/machines` | Create a named machine and attach this installation |
+| `POST /v1/sync/machines/:id/attach` | Attach this installation to an existing account machine |
+| `PATCH /v1/sync/machines/:id` | Rename an account machine |
+| `DELETE /v1/sync/machines/:id/attachments/:installationId` | Detach only this installation from one machine |
 | `GET /v1/sync/state` | Read known mappings, conflicts, and suppressions |
 | `PUT /v1/sync/settings` | Save duplicate policy and initialize first sync |
 | `POST /v1/sync/resync/preview` | Preview recoverable items and duplicate candidates |
@@ -152,7 +185,7 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 | `POST /v1/sync/control/operations/:id/restore-items`, `POST /:id/restore-results` | Read the selected restore snapshot and report verified results |
 | `POST /v1/sync/heartbeat` | Report app and machine availability without a local address |
 | `POST /v1/sync/conflicts/:itemId/resolve` | Resolve a synchronization conflict |
-| `DELETE /v1/sync/devices/:id` | Disconnect an installation |
+| `DELETE /v1/sync/devices/:id` | Disconnect the installation and all its machine attachments |
 
 The hosted API implementation, database schema, website, and infrastructure are intentionally not
 part of this repository.

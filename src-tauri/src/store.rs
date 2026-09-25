@@ -3,6 +3,7 @@
 use std::{path::Path, sync::Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -22,6 +23,19 @@ pub struct AppStore {
     connection: Mutex<Connection>,
 }
 
+/// Account-wide machine registry. The legacy sync.sqlite database retains the
+/// original machine's queue; newer machines use separate SQLite files.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineRecord {
+    pub id: String,
+    pub name: String,
+    pub device_id: Option<String>,
+    pub active: bool,
+    pub pending_detach: bool,
+    pub legacy_default: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct BridgeCompletion {
     pub operation_id: String,
@@ -35,8 +49,11 @@ impl AppStore {
             std::fs::create_dir_all(parent).map_err(|_| StoreError::InvalidCredentials)?;
         }
         let connection = Connection::open(path)?;
+        connection.execute_batch("pragma journal_mode = wal;")?;
+        // Keep schema creation and the legacy-source backfill atomic. A restart
+        // after interruption either sees the old store or the complete registry.
         connection.execute_batch(
-            "pragma journal_mode = wal;
+            "begin immediate;
              create table if not exists settings (
                key text primary key,
                value text not null
@@ -73,7 +90,20 @@ impl AppStore {
                lease_token text not null,
                payload text not null,
                updated_at integer not null
-             );",
+             );
+             create table if not exists machines (
+               id text primary key,
+               name text not null,
+               device_id text,
+               active integer not null default 1,
+               pending_detach integer not null default 0,
+               legacy_default integer not null default 0
+             );
+             insert or ignore into machines (id, name, device_id, active, legacy_default)
+             select value, 'GaggiMate',
+               (select value from settings where key = 'device_id'), 1, 1
+             from settings where key = 'source_id';
+             commit;",
         )?;
         Ok(Self {
             connection: Mutex::new(connection),
@@ -91,6 +121,60 @@ impl AppStore {
             })
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn machines(&self) -> Result<Vec<MachineRecord>, StoreError> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?;
+        let mut statement = connection.prepare(
+            "select id, name, device_id, active, pending_detach, legacy_default
+             from machines order by legacy_default desc, name collate nocase, id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(MachineRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                device_id: row.get(2)?,
+                active: row.get::<_, i64>(3)? != 0,
+                pending_detach: row.get::<_, i64>(4)? != 0,
+                legacy_default: row.get::<_, i64>(5)? != 0,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    pub fn save_machine(&self, machine: &MachineRecord) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute(
+                "insert into machines (id, name, device_id, active, pending_detach, legacy_default)
+                 values (?1, ?2, ?3, ?4, ?5, ?6)
+                 on conflict (id) do update set
+                   name = excluded.name, device_id = excluded.device_id,
+                   active = excluded.active, pending_detach = excluded.pending_detach,
+                   legacy_default = excluded.legacy_default",
+                params![
+                    machine.id,
+                    machine.name,
+                    machine.device_id,
+                    machine.active as i64,
+                    machine.pending_detach as i64,
+                    machine.legacy_default as i64,
+                ],
+            )?;
+        Ok(())
+    }
+
+    pub fn clear_machines(&self) -> Result<(), StoreError> {
+        self.connection
+            .lock()
+            .map_err(|_| StoreError::InvalidCredentials)?
+            .execute("delete from machines", [])?;
+        Ok(())
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
@@ -638,3 +722,7 @@ mod tests {
         assert!(store.failures().expect("empty failures").is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "store_multi_machine_tests.rs"]
+mod multi_machine_tests;

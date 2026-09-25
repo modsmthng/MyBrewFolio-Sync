@@ -34,6 +34,14 @@ const status = {
   thisDeviceId: 'this-device', notesSyncIntroSeen: true, noteBackups: [], issues: [],
 };
 
+const multiMachineStatus = {
+  ...status,
+  machines: [
+    { machineId: 'kitchen-id', name: 'Kitchen', machineHost: 'kitchen.local', syncing: false, lastSyncAt: null, lastError: null, profiles: 2, shots: 10, notes: 3, issues: [], initialSyncConfigured: true },
+    { machineId: 'office-id', name: 'Office', machineHost: 'office.local', syncing: false, lastSyncAt: null, lastError: null, profiles: 1, shots: 4, notes: 1, issues: [], initialSyncConfigured: true },
+  ],
+};
+
 beforeEach(() => {
   Object.keys(handlers).forEach(key => delete handlers[key]);
   getCurrent.mockReset();
@@ -107,13 +115,77 @@ describe('dashboard decisions', () => {
 });
 
 describe('Sync interface', () => {
+  it('switches machine details and scopes sync, address and web settings to the selected machine', async () => {
+    render(<Dashboard status={multiMachineStatus} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    fireEvent.click(screen.getByRole('button', { name: /Office office.local/ }));
+    expect(screen.getByText('4')).toBeTruthy();
+    expect(screen.getByRole('textbox', { name: 'GaggiMate hostname or local IP' }).value).toBe('office.local');
+    fireEvent.click(screen.getByRole('button', { name: 'Sync now' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_now', { machineId: 'office-id' }));
+    fireEvent.input(screen.getByRole('textbox', { name: 'GaggiMate hostname or local IP' }), { target: { value: '192.168.1.45' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('set_machine_host', { machineId: 'office-id', host: '192.168.1.45' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'accountSync', machineId: 'office-id' }));
+  });
+
+  it('creates a named machine and connects an existing account machine', async () => {
+    invoke.mockImplementation(command => {
+      if (command === 'list_account_machines') return Promise.resolve([{ machineId: 'office-id', name: 'Office' }, { machineId: 'garage-id', name: 'Garage' }]);
+      if (command === 'add_machine') return Promise.resolve({ machineId: 'new-id' });
+      if (command === 'connect_machine') return Promise.resolve({ machineId: 'garage-id' });
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'unknown' });
+      return Promise.resolve(undefined);
+    });
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<Dashboard status={multiMachineStatus} refresh={refresh} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add machine' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('list_account_machines'));
+    fireEvent.input(screen.getByRole('textbox', { name: 'New machine name' }), { target: { value: '  Patio  ' } });
+    fireEvent.input(screen.getByRole('textbox', { name: 'New machine address' }), { target: { value: 'patio.local' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create machine' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('add_machine', { name: 'Patio', host: 'patio.local' }));
+    await vi.waitFor(() => expect(screen.getByText('Machine added.')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'Add machine' }));
+    fireEvent.click(screen.getByRole('radio', { name: 'Existing machine' }));
+    await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Garage' })).toBeTruthy());
+    expect(screen.queryByRole('option', { name: 'Office' })).toBeNull();
+    fireEvent.change(screen.getByRole('combobox', { name: 'Existing machine' }), { target: { value: 'garage-id' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect machine' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('connect_machine', { machineId: 'garage-id', host: 'patio.local' }));
+  });
+
+  it('renames and removes only the selected machine', async () => {
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    render(<Dashboard status={multiMachineStatus} refresh={refresh} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    fireEvent.click(screen.getByRole('button', { name: /Office office.local/ }));
+    fireEvent.input(screen.getByRole('textbox', { name: 'Machine name' }), { target: { value: 'Office 2' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save name' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('rename_machine', { machineId: 'office-id', name: 'Office 2' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove machine' }));
+    expect(screen.getByRole('alertdialog', { name: 'Remove machine' }).textContent).toContain('Its data stays in MyBrewFolio.');
+    fireEvent.click(screen.getByRole('alertdialog', { name: 'Remove machine' }).querySelector('button.danger-action'));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('remove_machine', { machineId: 'office-id' }));
+    expect(invoke).not.toHaveBeenCalledWith('disconnect_account');
+  });
+
   it('connects with the selected machine address', async () => {
     const refresh = vi.fn();
     render(<Setup status={status} refresh={refresh} externalNotice={null} />);
     fireEvent.input(screen.getByPlaceholderText('gaggimate.local'), { target: { value: '192.168.1.42' } });
+    fireEvent.input(screen.getByRole('textbox', { name: 'Machine name in MyBrewFolio' }), { target: { value: ' Kitchen ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect MyBrewFolio' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenNthCalledWith(1, 'set_machine_host', { host: '192.168.1.42' }));
-    expect(invoke).toHaveBeenNthCalledWith(2, 'begin_oauth');
+    expect(invoke).toHaveBeenNthCalledWith(2, 'begin_oauth', { machineName: 'Kitchen' });
+  });
+
+  it('requires a machine name before starting a new account connection', () => {
+    render(<Setup status={status} refresh={vi.fn()} externalNotice={null} />);
+    fireEvent.input(screen.getByRole('textbox', { name: 'Machine name in MyBrewFolio' }), { target: { value: '  ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Connect MyBrewFolio' }));
+    expect(screen.getByText('Enter a machine name with 1–24 characters.')).toBeTruthy();
+    expect(invoke).not.toHaveBeenCalledWith('begin_oauth', expect.anything());
   });
 
   it('keeps the setup screen usable when connecting fails', async () => {
@@ -128,10 +200,12 @@ describe('Sync interface', () => {
   it.each([
     { code: 'SYNC_REAUTH_REQUIRED', message: 'Your MyBrewFolio connection needs to be renewed. Sign in again to resume syncing.' },
     { code: 'SYNC_DEVICE_REVOKED', message: 'This Sync installation was disconnected in MyBrewFolio. Sign in again to reconnect it.' },
-  ])('offers a clear reconnect action for $code', ({ code, message }) => {
+  ])('offers a clear reconnect action for $code', async ({ code, message }) => {
     render(<Setup status={{ ...status, connected: false, lastErrorCode: code }} refresh={vi.fn()} externalNotice={null} />);
     expect(screen.getByRole('alert').textContent).toContain(message);
-    expect(screen.getByRole('button', { name: 'Sign in again' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in again' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('begin_oauth'));
+    expect(invoke).not.toHaveBeenCalledWith('set_machine_host', expect.anything());
   });
 
   it('does not suggest signing in again for a network error', () => {

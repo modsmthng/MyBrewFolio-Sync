@@ -18,7 +18,15 @@ impl SyncEngine {
         store: Arc<AppStore>,
         credentials: Arc<dyn CredentialStore>,
     ) -> Result<Self, EngineError> {
-        let cloud = CloudClient::new(credentials.clone())?;
+        let cloud = Arc::new(CloudClient::new(credentials.clone())?);
+        Self::open_with_cloud(store, credentials, cloud)
+    }
+
+    pub fn open_with_cloud(
+        store: Arc<AppStore>,
+        credentials: Arc<dyn CredentialStore>,
+        cloud: Arc<CloudClient>,
+    ) -> Result<Self, EngineError> {
         let host = store
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".to_string());
@@ -78,6 +86,43 @@ impl SyncEngine {
             sync_lock: Mutex::new(()),
             profile_store_lock: Mutex::new(()),
         })
+    }
+
+    pub async fn set_machine_attachment(
+        &self,
+        machine_id: &str,
+        device_id: &str,
+    ) -> Result<(), EngineError> {
+        self.store.set_setting("source_id", machine_id)?;
+        self.store.set_setting("device_id", device_id)?;
+        self.store.remove_setting("reconnect_required_reason")?;
+        self.store.set_setting(
+            super::TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
+            super::TWO_WAY_NOTES_PROTOCOL_VERSION,
+        )?;
+        let mut status = self.status.write().await;
+        status.connected = true;
+        status.this_device_id = Some(device_id.to_owned());
+        status.last_error = None;
+        status.last_error_code = None;
+        status.last_error_at = None;
+        Ok(())
+    }
+
+    /// Clear this machine's account-bound queue without touching shared OAuth
+    /// credentials or machine address. Used when the whole account is removed.
+    pub async fn clear_local_account_data(&self) -> Result<(), EngineError> {
+        let _guards = self.pause_operations().await;
+        self.store.clear_account_data()?;
+        let mut status = self.status.write().await;
+        status.connected = false;
+        status.this_device_id = None;
+        status.sync_progress = None;
+        status.last_error = None;
+        status.last_error_code = None;
+        status.last_error_at = None;
+        status.issues.clear();
+        Ok(())
     }
 
     pub async fn status(&self) -> AppStatus {

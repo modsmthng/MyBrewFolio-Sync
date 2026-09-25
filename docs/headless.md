@@ -27,12 +27,58 @@ volumes:
 1. Use your machine's fixed private LAN IP instead of `gaggimate.local` if Docker cannot resolve it.
 2. Start the project: `docker compose up -d`.
 3. Open its logs: `docker compose logs -f sync`. Follow the MyBrewFolio connection link and sign in.
-4. Open **Account → MyBrewFolio Sync**, choose the matching preference and select **Save and start
-   first sync**. Subsequent synchronization runs automatically.
+4. If this account has no machines yet, Sync creates its first machine using the configured LAN
+   address. Open **Account → MyBrewFolio Sync**, choose its matching preference and select
+   **Save and start first sync**. If the account already has machines, first connect the intended
+   machine with `mybrewfolio-syncd machines list` and `machines add --existing MACHINE_ID HOST`,
+   or create another with `machines add NAME HOST`.
 
 The daemon polls for approval automatically. An unused link expires after ten minutes and is
 renewed while the container remains unconnected. Closing the log window does not stop pairing or
 Sync. The persistent volume retains the key, account connection and queue across container updates.
+
+### More than one machine
+
+`MYBREWFOLIO_SYNC_GAGGIMATE_HOST` remains the address of the first, upgraded machine. On a new
+installation, it is used automatically only when the account has no machines yet. Addresses
+for other machines are stored locally in `/data`; they are never sent to MyBrewFolio. Keep
+the container connected, then use the CLI inside it:
+
+```sh
+docker compose exec sync mybrewfolio-syncd machines list
+docker compose exec sync mybrewfolio-syncd machines add "Office GaggiMate" 192.168.1.43
+docker compose exec sync mybrewfolio-syncd machines add --existing MACHINE_ID 192.168.1.44
+docker compose exec sync mybrewfolio-syncd machines rename MACHINE_ID "Kitchen GaggiMate"
+docker compose exec sync mybrewfolio-syncd machines remove MACHINE_ID
+```
+
+`machines list` shows the account machines and their IDs, including machines already connected
+from another computer. Use `add --existing` with one of those IDs to connect that same machine
+to this installation. A new machine name must contain 1–24 characters and be unique in the
+account without regard to case. `remove` stops this installation's Sync for that machine and
+detaches it from the server; its MyBrewFolio history, name, profiles, Notes and backups remain.
+An offline detach is saved and retried when the service reconnects. Use `add --existing` to
+reconnect it later.
+
+The daemon synchronizes all connected machines and runs at most two complete Sync cycles at the
+same time. A machine that is offline does not stop another machine's Sync. `sync-once` without a
+machine selection also runs all connected machines. For machine-specific commands, append
+`--machine MACHINE_ID`:
+
+```sh
+docker compose exec sync mybrewfolio-syncd status
+docker compose exec sync mybrewfolio-syncd sync-once --machine MACHINE_ID
+docker compose exec sync mybrewfolio-syncd diagnose --machine MACHINE_ID
+docker compose exec sync mybrewfolio-syncd host set 192.168.1.45 --machine MACHINE_ID
+docker compose exec sync mybrewfolio-syncd resync preview --machine MACHINE_ID
+```
+
+`status` shows an array of connected machines. Other machine-specific commands require
+`--machine` when several machines are connected; with exactly one machine, existing commands
+without a selection continue to work. The `machines` subcommands take their machine ID as an
+argument and do not use `--machine`. In MyBrewFolio, select a machine on the Sync account page
+to manage its matching, Notes, backups, conflicts and resync settings. Account sign-in and
+`disconnect` apply to the entire installation.
 
 ### Unraid
 
@@ -76,12 +122,13 @@ container user; do not solve it by making the private data directory world-writa
 
 ## Two-way Notes Sync
 
-Open **Account → MyBrewFolio Sync → Notes Sync**, choose the installation connected to your machine,
-and select **Set up two-way Notes Sync**. Sync creates the complete **First Backup**. When the action
-finishes, select **Review Notes activation**, compare both copies and confirm your choices.
+Open **Account → MyBrewFolio Sync**, select the machine, open **Notes Sync**, choose the
+installation connected to it, and select **Set up two-way Notes Sync**. Sync creates the complete
+**First Backup**. When the action finishes, select **Review Notes activation**, compare both copies
+and confirm your choices.
 MyBrewFolio Notes are preselected. Choosing an empty Note clears the other copy.
 
-Only one installation writes Notes for a source. Another active writer is never taken over
+Only one installation writes Notes for each machine. Another active writer is never taken over
 automatically. You can turn the feature off in MyBrewFolio; ordinary GaggiMate-to-MyBrewFolio imports
 continue. Later conflicts are reviewed in the affected Brew.
 
@@ -143,9 +190,11 @@ imports and unambiguous duplicate copies. Review the selected restores, merges a
 Notes before confirming; ambiguous matches remain unchanged. Advanced CLI commands such as
 `resync preview` and `resync apply FILE --confirm` remain available for existing automation.
 
-Change the machine's address in the container environment, then recreate the container. Keep
-`MYBREWFOLIO_SYNC_GAGGIMATE_HOST` local; it is never sent to MyBrewFolio. If the environment variable
-is omitted, the local `host set` command can persist the address in the data directory.
+Change the first machine's address in the container environment, then recreate the container.
+Keep `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` local; it is never sent to MyBrewFolio. If the environment
+variable is omitted, the local `host set` command can persist the address in the data directory.
+For additional machines, use `host set <address> --machine MACHINE_ID`; their addresses stay in
+the local data directory.
 
 ### Reading connection errors
 

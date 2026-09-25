@@ -5,12 +5,14 @@ pub mod cloud;
 pub mod credentials;
 pub mod engine;
 pub mod local;
+pub mod machines;
 pub mod model;
 pub mod store;
 
 #[cfg(feature = "desktop")]
 mod desktop {
     use std::{
+        collections::{HashMap, HashSet},
         fs::{self, OpenOptions},
         io::Write,
         path::PathBuf,
@@ -22,7 +24,8 @@ mod desktop {
     };
 
     use crate::{
-        credentials::KeyringCredentialStore, engine::SyncEngine, model::AppStatus, store::AppStore,
+        credentials::KeyringCredentialStore, engine::SyncEngine, machines::MachineManager,
+        model::AppStatus, store::AppStore,
     };
     use serde::Serialize;
     use tauri::{
@@ -105,7 +108,14 @@ mod desktop {
     }
 
     async fn emit_status(app: &tauri::AppHandle, engine: &SyncEngine) {
-        let status = engine.status().await;
+        let snapshot = if let Some(manager) = app.try_state::<Arc<MachineManager>>() {
+            let _ = manager.reconcile_auth_loss().await;
+            manager.status_json().await
+        } else {
+            serde_json::to_value(engine.status().await).unwrap_or_default()
+        };
+        let status: AppStatus =
+            serde_json::from_value(snapshot.clone()).unwrap_or(engine.status().await);
         if let Some(prompt) = app.try_state::<ReconnectPromptState>() {
             if should_show_reconnect_prompt(&status, &prompt.shown) {
                 show_main_window(app);
@@ -134,7 +144,7 @@ mod desktop {
                 .unwrap_or_else(|| "No Sync errors".to_string());
             let _ = item.0.set_text(text);
         }
-        let _ = app.emit("sync-status-changed", status);
+        let _ = app.emit("sync-status-changed", snapshot);
     }
 
     #[cfg(target_os = "windows")]
@@ -432,21 +442,81 @@ mod desktop {
     }
 
     #[tauri::command]
-    async fn get_status(engine: State<'_, Arc<SyncEngine>>) -> Result<AppStatus, String> {
-        Ok(engine.status().await)
+    async fn get_status(
+        manager: State<'_, Arc<MachineManager>>,
+    ) -> Result<serde_json::Value, String> {
+        Ok(manager.status_json().await)
     }
 
     #[tauri::command]
     async fn set_machine_host(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         host: String,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .set_host(&host)
             .await
             .map_err(|error| error.to_string())?;
-        emit_status(&app, &engine).await;
+        drop(account);
+        emit_status(&app, &manager.primary()).await;
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn list_account_machines(
+        manager: State<'_, Arc<MachineManager>>,
+    ) -> Result<Vec<serde_json::Value>, String> {
+        manager.list_account_machines().await
+    }
+
+    #[tauri::command]
+    async fn add_machine(
+        app: tauri::AppHandle,
+        manager: State<'_, Arc<MachineManager>>,
+        name: String,
+        host: String,
+    ) -> Result<String, String> {
+        let machine_id = manager.add_machine(&name, &host).await?;
+        emit_status(&app, &manager.primary()).await;
+        Ok(machine_id)
+    }
+
+    #[tauri::command]
+    async fn connect_machine(
+        app: tauri::AppHandle,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: String,
+        host: String,
+    ) -> Result<(), String> {
+        manager.connect_machine(&machine_id, &host).await?;
+        emit_status(&app, &manager.primary()).await;
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn rename_machine(
+        app: tauri::AppHandle,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: String,
+        name: String,
+    ) -> Result<(), String> {
+        manager.rename_machine(&machine_id, &name).await?;
+        emit_status(&app, &manager.primary()).await;
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn remove_machine(
+        app: tauri::AppHandle,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: String,
+    ) -> Result<(), String> {
+        manager.remove_machine(&machine_id).await?;
+        emit_status(&app, &manager.primary()).await;
         Ok(())
     }
 
@@ -500,7 +570,21 @@ mod desktop {
     async fn begin_oauth(
         app: tauri::AppHandle,
         engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_name: Option<String>,
     ) -> Result<(), String> {
+        if let Some(machine_name) = machine_name {
+            let name = MachineManager::validate_name(&machine_name)?;
+            manager
+                .registry()
+                .set_setting("pending_machine_name", &name)
+                .map_err(|error| error.to_string())?;
+        } else {
+            manager
+                .registry()
+                .remove_setting("pending_machine_name")
+                .map_err(|error| error.to_string())?;
+        }
         let url = engine
             .begin_oauth()
             .await
@@ -514,11 +598,19 @@ mod desktop {
     async fn complete_oauth(
         app: tauri::AppHandle,
         engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         callback_url: String,
     ) -> Result<(), String> {
-        engine
-            .complete_oauth(&callback_url)
-            .await
+        let initial_name = manager
+            .registry()
+            .setting("pending_machine_name")
+            .map_err(|error| error.to_string())?;
+        manager
+            .complete_oauth_and_authorize(&callback_url, initial_name)
+            .await?;
+        manager
+            .registry()
+            .remove_setting("pending_machine_name")
             .map_err(|error| error.to_string())?;
         // Direct installs retain their existing onboarding behavior. Store builds
         // must ask Windows for explicit startup-task consent from the setting.
@@ -526,11 +618,11 @@ mod desktop {
             let _ = app.autolaunch().enable();
         }
         emit_status(&app, &engine).await;
-        let engine = engine.inner().clone();
+        let manager = manager.inner().clone();
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = engine.sync_once().await;
-            emit_status(&handle, &engine).await;
+            let _ = manager.sync_all().await;
+            emit_status(&handle, &manager.primary()).await;
         });
         Ok(())
     }
@@ -538,24 +630,29 @@ mod desktop {
     #[tauri::command]
     async fn sync_now(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
-        emit_status(&app, &engine).await;
+        let result = manager.sync_selected(machine_id.as_deref()).await;
+        emit_status(&app, &manager.primary()).await;
         result
     }
 
     #[tauri::command]
     async fn configure_sync(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         reuse_matching: bool,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .configure_sync(reuse_matching)
             .await
             .map_err(|error| error.to_string())?;
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
+        drop(account);
+        let result = manager.sync_selected(machine_id.as_deref()).await;
         emit_status(&app, &engine).await;
         result
     }
@@ -563,13 +660,17 @@ mod desktop {
     #[tauri::command]
     async fn retry_failed_items(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .retry_failures()
             .await
             .map_err(|error| error.to_string())?;
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
+        drop(account);
+        let result = manager.sync_selected(machine_id.as_deref()).await;
         emit_status(&app, &engine).await;
         result
     }
@@ -577,12 +678,16 @@ mod desktop {
     #[tauri::command]
     async fn dismiss_notes_sync_intro(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .dismiss_notes_sync_intro()
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(())
     }
@@ -590,12 +695,16 @@ mod desktop {
     #[tauri::command]
     async fn begin_two_way_notes_activation(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         let result = engine
             .begin_two_way_notes_activation()
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(result)
     }
@@ -603,14 +712,18 @@ mod desktop {
     #[tauri::command]
     async fn activate_two_way_notes(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         backup_id: String,
         decisions: serde_json::Value,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         let result = engine
             .activate_two_way_notes(&backup_id, decisions)
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(result)
     }
@@ -618,12 +731,16 @@ mod desktop {
     #[tauri::command]
     async fn disable_two_way_notes(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<(), String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .disable_two_way_notes()
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(())
     }
@@ -631,21 +748,28 @@ mod desktop {
     #[tauri::command]
     async fn create_latest_notes_backup(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<String, String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         let result = engine
             .create_latest_notes_backup()
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(result)
     }
 
     #[tauri::command]
     async fn preview_notes_restore(
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         backup_id: String,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let _account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .preview_notes_restore(&backup_id)
             .await
@@ -655,22 +779,29 @@ mod desktop {
     #[tauri::command]
     async fn restore_notes_backup(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         backup_id: String,
         source_keys: Vec<String>,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         let result = engine
             .restore_notes_backup(&backup_id, &source_keys)
             .await
             .map_err(|error| error.to_string())?;
+        drop(account);
         emit_status(&app, &engine).await;
         Ok(result)
     }
 
     #[tauri::command]
     async fn preview_complete_resync(
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let _account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         engine
             .resync_preview()
             .await
@@ -680,15 +811,19 @@ mod desktop {
     #[tauri::command]
     async fn apply_complete_resync(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
         decisions: serde_json::Value,
+        machine_id: Option<String>,
     ) -> Result<serde_json::Value, String> {
+        let account = manager.account_operation().await;
+        let engine = manager.selected_engine(machine_id.as_deref()).await?;
         let applied = engine
             .apply_resync(decisions)
             .await
             .map_err(|error| error.to_string())?;
-        let follow_up_error = engine
-            .sync_once()
+        drop(account);
+        let follow_up_error = manager
+            .sync_selected(machine_id.as_deref())
             .await
             .err()
             .map(|error| error.to_string());
@@ -703,26 +838,38 @@ mod desktop {
     #[tauri::command]
     async fn disconnect_account(
         app: tauri::AppHandle,
-        engine: State<'_, Arc<SyncEngine>>,
+        manager: State<'_, Arc<MachineManager>>,
     ) -> Result<serde_json::Value, String> {
-        let result = engine
-            .disconnect()
-            .await
-            .map_err(|error| error.to_string())?;
-        emit_status(&app, &engine).await;
+        let result = manager.disconnect_all().await?;
+        emit_status(&app, &manager.primary()).await;
         Ok(result)
     }
 
     #[tauri::command]
-    fn open_mybrewfolio_page(app: tauri::AppHandle, page: String) -> Result<(), String> {
+    fn open_mybrewfolio_page(
+        app: tauri::AppHandle,
+        page: String,
+        machine_id: Option<String>,
+    ) -> Result<(), String> {
         let url = match page.as_str() {
             "syncHelp" => "https://mybrewfolio.com/support/sync",
             "privacy" => "https://mybrewfolio.com/legal/privacy",
             "accountSync" => "https://mybrewfolio.com/account/sync",
             _ => return Err("Unknown MyBrewFolio page".into()),
         };
+        let url = if page == "accountSync" {
+            if let Some(machine_id) = machine_id {
+                let id = uuid::Uuid::parse_str(&machine_id)
+                    .map_err(|_| "Invalid machine ID".to_string())?;
+                format!("{url}?machineId={id}")
+            } else {
+                url.to_owned()
+            }
+        } else {
+            url.to_owned()
+        };
         app.opener()
-            .open_url(url, None::<&str>)
+            .open_url(&url, None::<&str>)
             .map_err(|error| error.to_string())
     }
 
@@ -1070,10 +1217,13 @@ mod desktop {
         app.manage(store.clone());
         app.manage(Arc::new(UpdateRestartState::default()));
         app.manage(ReconnectPromptState::default());
-        let engine = Arc::new(SyncEngine::open(
+        let manager = Arc::new(MachineManager::open(
+            &data_dir,
             store.clone(),
             Arc::new(KeyringCredentialStore),
         )?);
+        let engine = manager.primary();
+        app.manage(manager);
         app.manage(engine.clone());
         apply_app_icon_visibility(app.handle(), engine.hide_app_icon().unwrap_or(false))
             .map_err(std::io::Error::other)?;
@@ -1141,11 +1291,11 @@ mod desktop {
             .on_menu_event(|app, event| match event.id.as_ref() {
                 "show" => show_main_window(app),
                 "sync" => {
-                    let engine = app.state::<Arc<SyncEngine>>().inner().clone();
+                    let manager = app.state::<Arc<MachineManager>>().inner().clone();
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = engine.sync_once().await;
-                        emit_status(&handle, &engine).await;
+                        let _ = manager.sync_all().await;
+                        emit_status(&handle, &manager.primary()).await;
                     });
                 }
                 "autostart" => {
@@ -1172,12 +1322,12 @@ mod desktop {
 
     fn start_background_services(
         app: &tauri::App,
-        engine: Arc<SyncEngine>,
+        manager: Arc<MachineManager>,
         store: Arc<AppStore>,
         startup_diagnostics: Arc<StartupDiagnostics>,
     ) {
         let initial_handle = app.handle().clone();
-        let initial_engine = engine.clone();
+        let initial_engine = manager.primary();
         tauri::async_runtime::spawn(async move {
             emit_status(&initial_handle, &initial_engine).await;
         });
@@ -1188,15 +1338,72 @@ mod desktop {
             }
         });
 
-        let background_engine = engine.clone();
+        let background_manager = manager.clone();
         let background_handle = app.handle().clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(Duration::from_secs(8)).await;
+            let mut workers: HashMap<
+                String,
+                (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>),
+            > = HashMap::new();
             loop {
-                if background_engine.status().await.connected {
-                    let _ = background_engine.sync_once().await;
-                    emit_status(&background_handle, &background_engine).await;
+                let active = background_manager.active_engines().await;
+                let active_ids: HashSet<_> = active.iter().map(|(id, _)| id.clone()).collect();
+                workers.retain(|id, (control, bridge)| {
+                    if active_ids.contains(id) && !control.is_finished() && !bridge.is_finished() {
+                        true
+                    } else {
+                        control.abort();
+                        bridge.abort();
+                        false
+                    }
+                });
+                for (id, engine) in &active {
+                    if workers.contains_key(id) {
+                        continue;
+                    }
+                    let control_engine = engine.clone();
+                    let (control_start, control_ready) = tokio::sync::oneshot::channel();
+                    let control = tokio::spawn(async move {
+                        if control_ready.await.is_ok() {
+                            control_engine.run_control_worker().await;
+                        }
+                    });
+                    let bridge_engine = engine.clone();
+                    let bridge_handle = background_handle.clone();
+                    let (bridge_start, bridge_ready) = tokio::sync::oneshot::channel();
+                    let bridge = tokio::spawn(async move {
+                        if bridge_ready.await.is_err() {
+                            return;
+                        }
+                        loop {
+                            if bridge_engine.status().await.connected {
+                                if bridge_engine
+                                    .wait_for_profile_store_operations()
+                                    .await
+                                    .is_ok()
+                                {
+                                    emit_status(&bridge_handle, &bridge_engine).await;
+                                } else {
+                                    tokio::time::sleep(Duration::from_secs(2)).await;
+                                }
+                            } else {
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                            }
+                        }
+                    });
+                    if background_manager.register_worker(id, &control).await {
+                        let _ = control_start.send(());
+                    }
+                    if background_manager.register_worker(id, &bridge).await {
+                        let _ = bridge_start.send(());
+                    }
+                    workers.insert(id.clone(), (control, bridge));
                 }
+                let _ = background_manager.flush_pending_detaches().await;
+                let _ = background_manager.list_account_machines().await;
+                let _ = background_manager.sync_all().await;
+                emit_status(&background_handle, &background_manager.primary()).await;
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }
         });
@@ -1208,31 +1415,6 @@ mod desktop {
                 let _ =
                     run_update_check(&update_handle, &store, &update_restart_state, false).await;
                 tokio::time::sleep(Duration::from_secs(60 * 60)).await;
-            }
-        });
-
-        let control_engine = engine.clone();
-        tauri::async_runtime::spawn(async move {
-            control_engine.run_control_worker().await;
-        });
-
-        let bridge_engine = engine;
-        let bridge_handle = app.handle().clone();
-        tauri::async_runtime::spawn(async move {
-            loop {
-                if bridge_engine.status().await.connected {
-                    if bridge_engine
-                        .wait_for_profile_store_operations()
-                        .await
-                        .is_ok()
-                    {
-                        emit_status(&bridge_handle, &bridge_engine).await;
-                    } else {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                    }
-                } else {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                }
             }
         });
 
@@ -1265,13 +1447,14 @@ mod desktop {
         app: &mut tauri::App,
         launch_in_background: bool,
     ) -> DesktopSetupResult<()> {
-        let (store, engine, startup_diagnostics) = initialize_application(app)?;
+        let (store, _engine, startup_diagnostics) = initialize_application(app)?;
         configure_deep_links(app)?;
         configure_tray(app)?;
         if !launch_in_background {
             show_main_window(app.handle());
         }
-        start_background_services(app, engine, store, startup_diagnostics);
+        let manager = app.state::<Arc<MachineManager>>().inner().clone();
+        start_background_services(app, manager, store, startup_diagnostics);
         configure_main_window(app);
         Ok(())
     }
@@ -1306,6 +1489,11 @@ mod desktop {
                 frontend_ready,
                 get_status,
                 set_machine_host,
+                list_account_machines,
+                add_machine,
+                connect_machine,
+                rename_machine,
+                remove_machine,
                 get_hide_app_icon,
                 set_hide_app_icon,
                 get_autostart_status,
