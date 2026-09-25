@@ -48,10 +48,10 @@ fn daemon_error(message: &str) {
 fn sync_attempt_message(error: &EngineError, machine_host: &str) -> String {
     match error {
         EngineError::Local(LocalError::Unreachable) if machine_host == "gaggimate.local" => {
-            "Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.".into()
+            "Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.".into()
         }
         EngineError::Local(LocalError::Unreachable) => {
-            "Sync attempt failed: GaggiMate could not be reached through the configured private LAN address. Retrying in 30 seconds. Check that GaggiMate is online and reachable from the Docker or NAS network.".into()
+            "Sync attempt failed after its automatic retries: GaggiMate could not be reached through the configured private LAN address. Sync will resume on the selected interval. Check that GaggiMate is online and reachable from the Docker or NAS network.".into()
         }
         EngineError::Local(LocalError::InvalidHost) => format!(
             "Sync configuration needs attention: {error}. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to gaggimate.local or GaggiMate's private LAN IP, then recreate the Sync container."
@@ -59,7 +59,9 @@ fn sync_attempt_message(error: &EngineError, machine_host: &str) -> String {
         EngineError::Local(LocalError::UnsupportedShotFormat(_)) => format!(
             "Sync needs an update: {error}. Update MyBrewFolio Sync before retrying this shot."
         ),
-        _ => format!("Sync attempt failed: {error}. Retrying in 30 seconds."),
+        _ => format!(
+            "Sync attempt failed after its automatic retries: {error}. Sync will resume on the selected interval."
+        ),
     }
 }
 
@@ -387,7 +389,7 @@ async fn execute(
         "health" => Ok(json!({"ok": true})),
         "auth" => execute_auth(engine, arguments.into_iter()).await,
         "sync-once" => engine
-            .sync_once()
+            .sync_with_retries()
             .await
             .map(|_| json!({"ok": true}))
             .map_err(|error| error.to_string()),
@@ -615,7 +617,7 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                 eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
                 first_sync_notice_printed = true;
             }
-            match engine.sync_once().await {
+            match engine.sync_with_retries().await {
                 Ok(()) => {
                     for issue in engine.status().await.issues {
                         let key = format!("{}:{}:{}", issue.kind, issue.source_key, issue.stage);
@@ -632,7 +634,7 @@ async fn run_daemon(engine: Arc<SyncEngine>, socket: PathBuf) -> ! {
                 Err(_) => {}
             }
         }
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        engine.wait_for_sync_interval().await;
     }
 }
 
@@ -748,7 +750,7 @@ mod tests {
         );
         assert_eq!(
             timestamped_log_line("2026-09-18T14:30:00Z", &message),
-            "2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
+            "2026-09-18T14:30:00Z Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
         );
     }
 
@@ -758,6 +760,7 @@ mod tests {
             sync_attempt_message(&EngineError::Local(LocalError::Unreachable), "192.168.1.42");
         assert!(unreachable.contains("configured private LAN address"));
         assert!(!unreachable.contains("192.168.1.42"));
+        assert!(unreachable.contains("selected interval"));
 
         let notes = sync_attempt_message(
             &EngineError::Local(LocalError::InvalidNotes(123)),
@@ -765,7 +768,7 @@ mod tests {
         );
         assert_eq!(
             notes,
-            "Sync attempt failed: The GaggiMate returned invalid data while reading Notes for shot 123. Retrying in 30 seconds."
+            "Sync attempt failed after its automatic retries: The GaggiMate returned invalid data while reading Notes for shot 123. Sync will resume on the selected interval."
         );
 
         assert_eq!(

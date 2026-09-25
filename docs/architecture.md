@@ -47,17 +47,25 @@ open a network port.
 
 ## Synchronization schedule
 
-- The shot index is checked every 30 seconds.
+- The account-wide automatic cycle defaults to 30 seconds. Users can choose 30 seconds, 1, 2, 5,
+  10, 20 or 60 minutes under Account → MyBrewFolio Sync. The choice applies to every active
+  installation and controls the entire cycle, including profile and Notes scans. Those scans keep
+  their five-minute due markers but run only when a cycle starts. Manual sync still starts now.
+- A failed whole cycle is retried immediately, then up to two more times at 30-second intervals.
+  After both delayed retries fail, the selected interval resumes. Authentication and revoked-device
+  errors stop the retry sequence; item-level failures that leave the cycle successful retain their
+  existing handling.
 - New or changed shots are parsed from `.slog` files and queued with their notes.
-- Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
+- Profile comparisons become due every five minutes and run in a cycle through the GaggiMate
+  profile WebSocket protocol.
 - Profile Store operations are accepted only when addressed to this installation's authenticated
   device ID. Capability `profileStoreBridge: 2` keeps a separate outgoing long poll for this
   Store-only work and is woken immediately by the API; it never starts the normal shot, profile or
   Notes synchronization. Capability 1 remains compatible through the regular 30-second cycle.
   Inventory, fetch, preview and install results use short-lived leases; installation reloads the
   profile before reporting success and persists its completion until the API acknowledges it.
-- Notes for recent shots are refreshed every five minutes.
-- A throttled full notes pass runs once per day.
+- Notes for recent shots become due every five minutes.
+- A throttled full notes pass becomes due once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty
   objects, null/missing notes payloads and the machine's protocol-level “not found” response mean
   that no notes exist.
@@ -108,6 +116,10 @@ and refreshes the authoritative server state before uploading the restored inven
 Tauri retains local pairing, host configuration, status, disconnect, updates and OS preferences.
 Advanced CLI commands delegate to the same engine. Capability `syncControl: 1` is announced on
 registration and heartbeat, including upgrades that keep their existing device ID.
+Capability `syncSchedule: 1` advertises support for account-wide sync interval settings. The
+companion receives the saved interval through the existing control long poll and sync-state response,
+then persists it in local SQLite. MyBrewFolio disables interval changes while any active installation
+does not advertise that capability.
 
 The worker claims only enumerated actions for its authenticated account/device, using an outgoing
 25-second long poll and separate wake keys on the existing bridge notification broker. It opens no
@@ -124,12 +136,12 @@ write, and checks the writer authorization again before each write. Disabling No
 the device prevents further authorized writes. Web diagnostics include only counts and availability;
 local diagnostics remain available through the CLI.
 
-Roll out hosted API migration `038_sync_control.sql` and the API first. Coordinate the remaining
-releases: publish the new Docker image before the standalone installation guide, and make the web
-controls available before offering the new desktop packages. Existing clients keep their API paths and continue syncing; the web requests
-an update for clients without `syncControl`. The standalone Docker configuration requires the new
-image; retain original external-key mounts on existing installations. Source changes do not update
-already published `latest` images or installed desktop apps.
+Roll out hosted API migrations and the API first. Coordinate the remaining releases: publish the new
+Docker image before the standalone installation guide, and make the web controls available before
+offering the new desktop packages. Existing clients keep their API paths and continue syncing; the
+web requests an update for clients without `syncControl` or `syncSchedule`. The standalone Docker
+configuration requires the new image; retain original external-key mounts on existing installations.
+Source changes do not update already published `latest` images or installed desktop apps.
 
 ## Public server contract
 

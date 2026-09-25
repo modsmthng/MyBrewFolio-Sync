@@ -76,6 +76,7 @@ impl SyncEngine {
             .cloud
             .control_request(&device_id, "operations/claim", json!({"waitSeconds":25}))
             .await?;
+        self.apply_sync_interval_from_control_response(&claimed)?;
         for operation in claimed["operations"].as_array().into_iter().flatten() {
             let id = operation["id"]
                 .as_str()
@@ -142,7 +143,7 @@ impl SyncEngine {
                     self.retry_failures().await?;
                 }
             }
-            self.sync_once().await?;
+            self.sync_with_retries().await?;
             return Ok(json!({"ok":true}));
         }
         if kind == "diagnose" {
@@ -165,7 +166,7 @@ impl SyncEngine {
                         synchronized = true;
                         break;
                     }
-                    match self.sync_once().await {
+                    match self.sync_with_retries().await {
                         Err(EngineError::Busy) => {
                             tokio::time::sleep(StdDuration::from_secs(1)).await
                         }

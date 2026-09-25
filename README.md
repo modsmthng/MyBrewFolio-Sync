@@ -21,11 +21,13 @@ Track and share brews, quickly complete brew notes with smart suggestions from y
 For Docker, start the container and open the connection link in its logs; see
 [the Docker and NAS guide](docs/headless.md).
 
-The application then starts with the computer in the background, checks for new shots every 30
-seconds, compares profiles every five minutes, and catches up after either the computer, machine,
-or internet was offline. Profile Store requests use their own outgoing wake-up channel, so they do
-not wait for that normal 30-second cycle. Open Sync from its menu bar or tray icon; manually launched and first-run
-windows still open normally. One fixed status line reports the current operation and retains
+The application then starts with the computer in the background and checks for new shots on the
+interval selected under Account → MyBrewFolio Sync: 30 seconds, 1, 2, 5, 10, 20 or 60 minutes.
+Thirty seconds remains the default. Profile and Notes scans share that cycle, while Profile Store
+requests use their own outgoing wake-up channel. A failed cycle is retried immediately, then twice
+more with 30 seconds between attempts; after those retries the selected interval resumes. Sync
+catches up after the computer, machine, or internet was offline. Open Sync from its menu bar or tray
+icon; manually launched and first-run windows still open normally. One fixed status line reports the current operation and retains
 actionable failures without replacing the separate connection indicator.
 
 The optional **Hide app icon from Dock or taskbar** setting keeps the menu bar or tray icon as the

@@ -614,6 +614,35 @@ fn shot_identity_and_batch_result_helpers_have_stable_defaults() {
     assert!(!is_terminal_batch_status("retry"));
 }
 
+#[tokio::test]
+async fn sync_schedule_defaults_to_thirty_seconds_and_applies_valid_cloud_changes() {
+    let (engine, _directory) = test_engine();
+    assert_eq!(engine.sync_interval_seconds(), 30);
+
+    engine
+        .set_sync_interval_seconds(1200)
+        .expect("save local schedule");
+    assert_eq!(engine.sync_interval_seconds(), 1200);
+
+    let restarted = SyncEngine::open(engine.store.clone(), engine.credentials.clone())
+        .expect("reopen engine with persisted schedule");
+    assert_eq!(restarted.sync_interval_seconds(), 1200);
+
+    restarted
+        .apply_sync_interval_from_state(&json!({
+            "source": { "sync_interval_seconds": 60 }
+        }))
+        .expect("apply server schedule");
+    assert_eq!(restarted.sync_interval_seconds(), 60);
+
+    restarted
+        .apply_sync_interval_from_state(&json!({
+            "source": { "sync_interval_seconds": 90 }
+        }))
+        .expect("ignore unsupported server schedule");
+    assert_eq!(restarted.sync_interval_seconds(), 60);
+}
+
 pub(super) fn test_engine() -> (SyncEngine, tempfile::TempDir) {
     let directory = tempfile::tempdir().expect("temporary directory");
     let key_path = directory.path().join("key");

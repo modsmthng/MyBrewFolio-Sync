@@ -97,6 +97,7 @@ fn companion_capabilities() -> Value {
         "canonicalNotesHash": 1,
         "twoWayNotesProtocol": 2,
         "syncControl": 1,
+        "syncSchedule": 1,
         "initialNotesActivation": 1,
         "syncProgress": 1,
     })

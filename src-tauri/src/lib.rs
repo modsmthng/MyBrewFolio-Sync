@@ -529,7 +529,7 @@ mod desktop {
         let engine = engine.inner().clone();
         let handle = app.clone();
         tauri::async_runtime::spawn(async move {
-            let _ = engine.sync_once().await;
+            let _ = engine.sync_with_retries().await;
             emit_status(&handle, &engine).await;
         });
         Ok(())
@@ -540,7 +540,10 @@ mod desktop {
         app: tauri::AppHandle,
         engine: State<'_, Arc<SyncEngine>>,
     ) -> Result<(), String> {
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
+        let result = engine
+            .sync_with_retries()
+            .await
+            .map_err(|error| error.to_string());
         emit_status(&app, &engine).await;
         result
     }
@@ -555,7 +558,10 @@ mod desktop {
             .configure_sync(reuse_matching)
             .await
             .map_err(|error| error.to_string())?;
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
+        let result = engine
+            .sync_with_retries()
+            .await
+            .map_err(|error| error.to_string());
         emit_status(&app, &engine).await;
         result
     }
@@ -569,7 +575,10 @@ mod desktop {
             .retry_failures()
             .await
             .map_err(|error| error.to_string())?;
-        let result = engine.sync_once().await.map_err(|error| error.to_string());
+        let result = engine
+            .sync_with_retries()
+            .await
+            .map_err(|error| error.to_string());
         emit_status(&app, &engine).await;
         result
     }
@@ -688,7 +697,7 @@ mod desktop {
             .await
             .map_err(|error| error.to_string())?;
         let follow_up_error = engine
-            .sync_once()
+            .sync_with_retries()
             .await
             .err()
             .map(|error| error.to_string());
@@ -1144,7 +1153,7 @@ mod desktop {
                     let engine = app.state::<Arc<SyncEngine>>().inner().clone();
                     let handle = app.clone();
                     tauri::async_runtime::spawn(async move {
-                        let _ = engine.sync_once().await;
+                        let _ = engine.sync_with_retries().await;
                         emit_status(&handle, &engine).await;
                     });
                 }
@@ -1194,10 +1203,10 @@ mod desktop {
             tokio::time::sleep(Duration::from_secs(8)).await;
             loop {
                 if background_engine.status().await.connected {
-                    let _ = background_engine.sync_once().await;
+                    let _ = background_engine.sync_with_retries().await;
                     emit_status(&background_handle, &background_engine).await;
                 }
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                background_engine.wait_for_sync_interval().await;
             }
         });
 

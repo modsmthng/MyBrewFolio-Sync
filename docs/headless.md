@@ -149,11 +149,12 @@ is omitted, the local `host set` command can persist the address in the data dir
 
 ### Reading connection errors
 
-Each failed automatic attempt is written with a UTC timestamp and is retried after 30 seconds. For
-example:
+After a whole-cycle failure, Sync immediately tries once more, then makes two additional attempts
+30 seconds apart. If all four attempts fail, it resumes at the interval selected in MyBrewFolio.
+The final failure is written with a UTC timestamp. For example:
 
 ```text
-2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.
+2026-09-18T14:30:00Z Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.
 ```
 
 Errors that mention a Shot, Notes, or Profile include the local GaggiMate ID so you can identify the

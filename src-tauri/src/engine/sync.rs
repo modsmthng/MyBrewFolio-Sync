@@ -770,6 +770,7 @@ impl SyncEngine {
                 .await;
         }
         self.status.write().await.syncing = false;
+        self.schedule_changed.notify_one();
         drop(guard);
         result
     }
