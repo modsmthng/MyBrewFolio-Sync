@@ -633,7 +633,10 @@ mod desktop {
         manager: State<'_, Arc<MachineManager>>,
         machine_id: Option<String>,
     ) -> Result<(), String> {
-        let result = manager.sync_selected(machine_id.as_deref()).await;
+        let result = match machine_id.as_deref() {
+            Some(machine_id) => manager.sync_machine(machine_id).await,
+            None => manager.sync_all_checked().await,
+        };
         emit_status(&app, &manager.primary()).await;
         result
     }
@@ -1344,17 +1347,26 @@ mod desktop {
             tokio::time::sleep(Duration::from_secs(8)).await;
             let mut workers: HashMap<
                 String,
-                (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>),
+                (
+                    tokio::task::JoinHandle<()>,
+                    tokio::task::JoinHandle<()>,
+                    tokio::task::JoinHandle<()>,
+                ),
             > = HashMap::new();
             loop {
                 let active = background_manager.active_engines().await;
                 let active_ids: HashSet<_> = active.iter().map(|(id, _)| id.clone()).collect();
-                workers.retain(|id, (control, bridge)| {
-                    if active_ids.contains(id) && !control.is_finished() && !bridge.is_finished() {
+                workers.retain(|id, (control, bridge, scheduled)| {
+                    if active_ids.contains(id)
+                        && !control.is_finished()
+                        && !bridge.is_finished()
+                        && !scheduled.is_finished()
+                    {
                         true
                     } else {
                         control.abort();
                         bridge.abort();
+                        scheduled.abort();
                         false
                     }
                 });
@@ -1392,17 +1404,36 @@ mod desktop {
                             }
                         }
                     });
+                    let scheduled_manager = background_manager.clone();
+                    let scheduled_engine = engine.clone();
+                    let scheduled_handle = background_handle.clone();
+                    let scheduled_id = id.clone();
+                    let (scheduled_start, scheduled_ready) = tokio::sync::oneshot::channel();
+                    let scheduled = tokio::spawn(async move {
+                        if scheduled_ready.await.is_err() {
+                            return;
+                        }
+                        loop {
+                            if scheduled_engine.status().await.connected {
+                                let _ = scheduled_manager.sync_machine(&scheduled_id).await;
+                                emit_status(&scheduled_handle, &scheduled_engine).await;
+                            }
+                            scheduled_engine.wait_for_sync_interval().await;
+                        }
+                    });
                     if background_manager.register_worker(id, &control).await {
                         let _ = control_start.send(());
                     }
                     if background_manager.register_worker(id, &bridge).await {
                         let _ = bridge_start.send(());
                     }
-                    workers.insert(id.clone(), (control, bridge));
+                    if background_manager.register_worker(id, &scheduled).await {
+                        let _ = scheduled_start.send(());
+                    }
+                    workers.insert(id.clone(), (control, bridge, scheduled));
                 }
                 let _ = background_manager.flush_pending_detaches().await;
                 let _ = background_manager.list_account_machines().await;
-                let _ = background_manager.sync_all().await;
                 emit_status(&background_handle, &background_manager.primary()).await;
                 tokio::time::sleep(Duration::from_secs(30)).await;
             }

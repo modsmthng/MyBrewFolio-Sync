@@ -85,6 +85,7 @@ impl SyncEngine {
             control_lock: Mutex::new(()),
             sync_lock: Mutex::new(()),
             profile_store_lock: Mutex::new(()),
+            schedule_changed: tokio::sync::Notify::new(),
         })
     }
 
@@ -261,6 +262,7 @@ impl SyncEngine {
     }
 
     pub(super) async fn update_from_cloud_state(&self, value: &Value) {
+        let _ = self.apply_sync_interval_from_state(value);
         let items = value
             .get("items")
             .and_then(Value::as_array)

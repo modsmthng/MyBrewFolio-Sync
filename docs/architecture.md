@@ -61,17 +61,26 @@ open a network port.
 
 ## Synchronization schedule
 
-- The shot index is checked every 30 seconds.
+- The account-wide automatic interval defaults to 30 seconds. Users can choose 30 seconds, 1, 2,
+  5, 10, 20 or 60 minutes under Account → MyBrewFolio Sync. It applies to all machines and
+  installations. Each machine runs its own timer so an unavailable machine cannot delay another
+  machine's next cycle. The interval controls shot, profile and Notes scans; the five-minute due
+  markers run only when that machine's cycle starts. Manual sync still starts now.
+- A failed whole cycle is retried immediately, then up to two more times at 30-second intervals.
+  After both delayed retries fail, the selected interval resumes. Authentication and revoked-device
+  errors stop the retry sequence; item-level failures that leave the cycle successful retain their
+  existing handling.
 - New or changed shots are parsed from `.slog` files and queued with their notes.
-- Profiles are compared every five minutes through the GaggiMate profile WebSocket protocol.
+- Profile comparisons become due every five minutes and run in a cycle through the GaggiMate
+  profile WebSocket protocol.
 - Profile Store operations are accepted only when addressed to the selected machine attachment's
   authenticated device ID. Capability `profileStoreBridge: 2` keeps a separate outgoing long poll for this
   Store-only work and is woken immediately by the API; it never starts the normal shot, profile or
   Notes synchronization. Capability 1 remains compatible through the regular 30-second cycle.
   Inventory, fetch, preview and install results use short-lived leases; installation reloads the
   profile before reporting success and persists its completion until the API acknowledges it.
-- Notes for recent shots are refreshed every five minutes.
-- A throttled full notes pass runs once per day.
+- Notes for recent shots become due every five minutes.
+- A throttled full notes pass becomes due once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty
   objects, null/missing notes payloads and the machine's protocol-level “not found” response mean
   that no notes exist.
@@ -136,6 +145,10 @@ Advanced CLI commands delegate to the same engine. Capability `syncControl: 1` i
 registration and heartbeat, including upgrades that keep their existing device ID.
 Capability `multiMachine: 1` identifies the machine-management protocol; older clients remain
 bound to the account's default source.
+Capability `syncSchedule: 1` advertises support for account-wide sync interval settings. The
+companion receives the saved interval through the existing control long poll and sync-state response,
+then persists it in each machine's local SQLite. MyBrewFolio disables interval changes while any
+active installation does not advertise that capability.
 
 The worker claims only enumerated actions for its authenticated account/device, using an outgoing
 25-second long poll and separate wake keys on the existing bridge notification broker. It opens no
@@ -152,10 +165,11 @@ write, and checks the writer authorization again before each write. Disabling No
 the device prevents further authorized writes. Web diagnostics include only counts and availability;
 local diagnostics remain available through the CLI.
 
-For multi-machine rollout, apply the hosted database migration and API before the updated
+For multi-machine rollout, apply the hosted database migrations and API before the updated
 MyBrewFolio web interface, then release the new desktop and Docker companions. Existing v0.5.6
 clients continue to register and sync against the account's legacy default machine through the
-original device endpoint. Keep existing Docker `/data` volumes and optional external-key mounts
+original device endpoint. Interval changes require `syncSchedule: 1` on every active installation.
+Keep existing Docker `/data` volumes and optional external-key mounts
 during the upgrade. Source changes do not update already published images or installed apps.
 
 ## Public server contract

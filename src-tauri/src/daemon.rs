@@ -14,7 +14,7 @@ use mybrewfolio_sync_lib::{
     credentials::{CredentialStore, EncryptedFileCredentialStore},
     engine::{EngineError, SyncEngine},
     local::LocalError,
-    machines::MachineManager,
+    machines::{MachineManager, MachineSyncError},
     model::SyncIssue,
     store::AppStore,
 };
@@ -54,10 +54,10 @@ fn daemon_error(message: &str) {
 fn sync_attempt_message(error: &EngineError, machine_host: &str) -> String {
     match error {
         EngineError::Local(LocalError::Unreachable) if machine_host == "gaggimate.local" => {
-            "Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.".into()
+            "Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.".into()
         }
         EngineError::Local(LocalError::Unreachable) => {
-            "Sync attempt failed: GaggiMate could not be reached through the configured private LAN address. Retrying in 30 seconds. Check that GaggiMate is online and reachable from the Docker or NAS network.".into()
+            "Sync attempt failed after its automatic retries: GaggiMate could not be reached through the configured private LAN address. Sync will resume on the selected interval. Check that GaggiMate is online and reachable from the Docker or NAS network.".into()
         }
         EngineError::Local(LocalError::InvalidHost) => format!(
             "Sync configuration needs attention: {error}. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to gaggimate.local or GaggiMate's private LAN IP, then recreate the Sync container."
@@ -65,7 +65,9 @@ fn sync_attempt_message(error: &EngineError, machine_host: &str) -> String {
         EngineError::Local(LocalError::UnsupportedShotFormat(_)) => format!(
             "Sync needs an update: {error}. Update MyBrewFolio Sync before retrying this shot."
         ),
-        _ => format!("Sync attempt failed: {error}. Retrying in 30 seconds."),
+        _ => format!(
+            "Sync attempt failed after its automatic retries: {error}. Sync will resume on the selected interval."
+        ),
     }
 }
 
@@ -439,7 +441,7 @@ async fn execute(
         "health" => Ok(json!({"ok": true})),
         "auth" => execute_auth(engine, arguments.into_iter()).await,
         "sync-once" => engine
-            .sync_once()
+            .sync_with_retries()
             .await
             .map(|_| json!({"ok": true}))
             .map_err(|error| error.to_string()),
@@ -781,6 +783,50 @@ async fn proxy_active_daemon(socket: &PathBuf, command: &str, args: &[String]) -
     }
 }
 
+async fn run_scheduled_machine(manager: Arc<MachineManager>, id: String, engine: Arc<SyncEngine>) {
+    let mut first_sync_notice_printed = false;
+    let mut logged_issues = HashMap::new();
+    loop {
+        let status = engine.status().await;
+        if first_sync_notice_due(
+            first_sync_notice_printed,
+            status.connected,
+            status.last_sync_at.as_deref(),
+            status.last_error.as_deref(),
+        ) {
+            eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
+            first_sync_notice_printed = true;
+        }
+        if status.connected {
+            let result = manager.sync_machine_detailed(&id).await;
+            let status = engine.status().await;
+            match result {
+                Ok(()) => {
+                    for issue in status.issues {
+                        let key = format!("{}:{}:{}", issue.kind, issue.source_key, issue.stage);
+                        let marker = (issue.updated_at, issue.attempts);
+                        if logged_issues.get(&key) != Some(&marker) {
+                            daemon_error(&sync_issue_message(&issue, &status.machine_host));
+                            logged_issues.insert(key, marker);
+                        }
+                    }
+                }
+                Err(MachineSyncError::Engine(error)) if should_log_sync_error(&error) => {
+                    daemon_error(&format!(
+                        "Machine {id}: {}",
+                        sync_attempt_message(&error, &status.machine_host)
+                    ));
+                }
+                Err(MachineSyncError::Unavailable(error)) => {
+                    daemon_error(&format!("Machine {id}: {error}"))
+                }
+                Err(MachineSyncError::Engine(_)) => {}
+            }
+        }
+        engine.wait_for_sync_interval().await;
+    }
+}
+
 async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) -> ! {
     let pairing_manager = manager.clone();
     tokio::spawn(async move {
@@ -819,19 +865,28 @@ async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) -> ! {
             }
         });
     }
-    let mut first_sync_notices = HashSet::new();
-    let mut logged_issues = HashMap::new();
-    let mut workers: HashMap<String, (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> =
-        HashMap::new();
+    let mut workers: HashMap<
+        String,
+        (
+            tokio::task::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+            tokio::task::JoinHandle<()>,
+        ),
+    > = HashMap::new();
     loop {
         let active = manager.active_engines().await;
         let active_ids: HashSet<_> = active.iter().map(|(id, _)| id.clone()).collect();
-        workers.retain(|id, (control, bridge)| {
-            if active_ids.contains(id) && !control.is_finished() && !bridge.is_finished() {
+        workers.retain(|id, (control, bridge, scheduled)| {
+            if active_ids.contains(id)
+                && !control.is_finished()
+                && !bridge.is_finished()
+                && !scheduled.is_finished()
+            {
                 true
             } else {
                 control.abort();
                 bridge.abort();
+                scheduled.abort();
                 false
             }
         });
@@ -866,50 +921,28 @@ async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) -> ! {
                     }
                 }
             });
+            let scheduled_manager = manager.clone();
+            let scheduled_engine = engine.clone();
+            let scheduled_id = id.clone();
+            let (scheduled_start, scheduled_ready) = tokio::sync::oneshot::channel();
+            let scheduled = tokio::spawn(async move {
+                if scheduled_ready.await.is_ok() {
+                    run_scheduled_machine(scheduled_manager, scheduled_id, scheduled_engine).await;
+                }
+            });
             if manager.register_worker(id, &control).await {
                 let _ = control_start.send(());
             }
             if manager.register_worker(id, &bridge).await {
                 let _ = bridge_start.send(());
             }
-            workers.insert(id.clone(), (control, bridge));
-        }
-        for (id, engine) in &active {
-            let status = engine.status().await;
-            if first_sync_notice_due(
-                first_sync_notices.contains(id),
-                status.connected,
-                status.last_sync_at.as_deref(),
-                status.last_error.as_deref(),
-            ) {
-                eprintln!("{FIRST_SYNCHRONIZATION_MESSAGE}");
-                first_sync_notices.insert(id.clone());
+            if manager.register_worker(id, &scheduled).await {
+                let _ = scheduled_start.send(());
             }
+            workers.insert(id.clone(), (control, bridge, scheduled));
         }
         let _ = manager.flush_pending_detaches().await;
         let _ = manager.list_account_machines().await;
-        for (id, result) in manager.sync_all().await {
-            let Some((_, engine)) = active.iter().find(|(active_id, _)| *active_id == id) else {
-                continue;
-            };
-            let status = engine.status().await;
-            match result {
-                Ok(()) => {
-                    for issue in status.issues {
-                        let key =
-                            format!("{id}:{}:{}:{}", issue.kind, issue.source_key, issue.stage);
-                        let marker = (issue.updated_at, issue.attempts);
-                        if logged_issues.get(&key) != Some(&marker) {
-                            daemon_error(&sync_issue_message(&issue, &status.machine_host));
-                            logged_issues.insert(key, marker);
-                        }
-                    }
-                }
-                Err(error) => daemon_error(&format!(
-                    "Sync attempt failed for machine {id}: {error}. Retrying in 30 seconds."
-                )),
-            }
-        }
         let _ = manager.reconcile_auth_loss().await;
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
@@ -1027,7 +1060,7 @@ mod tests {
         );
         assert_eq!(
             timestamped_log_line("2026-09-18T14:30:00Z", &message),
-            "2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
+            "2026-09-18T14:30:00Z Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container."
         );
     }
 
@@ -1037,6 +1070,7 @@ mod tests {
             sync_attempt_message(&EngineError::Local(LocalError::Unreachable), "192.168.1.42");
         assert!(unreachable.contains("configured private LAN address"));
         assert!(!unreachable.contains("192.168.1.42"));
+        assert!(unreachable.contains("selected interval"));
 
         let notes = sync_attempt_message(
             &EngineError::Local(LocalError::InvalidNotes(123)),
@@ -1044,7 +1078,7 @@ mod tests {
         );
         assert_eq!(
             notes,
-            "Sync attempt failed: The GaggiMate returned invalid data while reading Notes for shot 123. Retrying in 30 seconds."
+            "Sync attempt failed after its automatic retries: The GaggiMate returned invalid data while reading Notes for shot 123. Sync will resume on the selected interval."
         );
 
         assert_eq!(

@@ -25,6 +25,14 @@ use crate::{
     store::{AppStore, MachineRecord, StoreError},
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum MachineSyncError {
+    #[error("{0}")]
+    Unavailable(String),
+    #[error(transparent)]
+    Engine(#[from] EngineError),
+}
+
 /// One account session, with a private queue and scan state for each machine.
 /// The original sync.sqlite remains the default machine's database.
 pub struct MachineManager {
@@ -680,13 +688,15 @@ impl MachineManager {
             .get(machine_id)
             .cloned()
             .ok_or("Machine is not available locally")?;
-        let _run = gate.lock().await;
         machine.active = false;
         machine.pending_detach = true;
         self.registry
             .save_machine(&machine)
             .map_err(|error| error.to_string())?;
+        // Abort the scheduled worker before waiting for the run gate. It may
+        // otherwise be sleeping between retries while holding that gate.
         self.stop_workers(machine_id).await;
+        let _run = gate.lock().await;
         let _guards = engine.pause_operations().await;
         drop(_guards);
         drop(_run);
@@ -915,7 +925,7 @@ impl MachineManager {
         Ok(())
     }
 
-    pub async fn sync_machine(&self, machine_id: &str) -> Result<(), String> {
+    pub async fn sync_machine_detailed(&self, machine_id: &str) -> Result<(), MachineSyncError> {
         let _account = self.account_gate.read().await;
         let gate = self
             .run_gates
@@ -923,10 +933,24 @@ impl MachineManager {
             .await
             .get(machine_id)
             .cloned()
-            .ok_or("Machine is not available locally")?;
+            .ok_or_else(|| {
+                MachineSyncError::Unavailable("Machine is not available locally".into())
+            })?;
         let _run = gate.lock().await;
-        let engine = self.engine(machine_id).await?;
-        engine.sync_once().await.map_err(|error| error.to_string())
+        let engine = self
+            .engine(machine_id)
+            .await
+            .map_err(MachineSyncError::Unavailable)?;
+        engine
+            .sync_with_retries()
+            .await
+            .map_err(MachineSyncError::Engine)
+    }
+
+    pub async fn sync_machine(&self, machine_id: &str) -> Result<(), String> {
+        self.sync_machine_detailed(machine_id)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     pub async fn sync_selected(&self, machine_id: Option<&str>) -> Result<(), String> {
@@ -964,6 +988,25 @@ impl MachineManager {
             (machine.id.clone(), self.sync_machine(&machine.id).await)
         }))
         .await
+    }
+
+    pub async fn sync_all_checked(&self) -> Result<(), String> {
+        let outcomes = self.sync_all().await;
+        if outcomes.is_empty() {
+            return Err("Connect a machine first".into());
+        }
+        let failures: Vec<_> = outcomes
+            .into_iter()
+            .filter_map(|(id, result)| result.err().map(|error| format!("{id}: {error}")))
+            .collect();
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "One or more machines could not synchronize: {}",
+                failures.join("; ")
+            ))
+        }
     }
 
     pub async fn disconnect_all(&self) -> Result<Value, String> {

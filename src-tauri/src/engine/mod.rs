@@ -10,7 +10,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 use crate::{
     cloud::{CloudClient, CloudError, PendingOAuth},
@@ -24,6 +24,7 @@ mod auth;
 mod control;
 mod notes;
 mod profile_store;
+mod schedule;
 mod state;
 mod sync;
 
@@ -39,6 +40,9 @@ pub(super) const NOTES_WRITE_RETRY_DELAYS: [StdDuration; NOTES_WRITE_ATTEMPTS - 
     // after the second.
     StdDuration::from_millis(500),
 ];
+pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30;
+pub const SYNC_INTERVAL_SECONDS: [u64; 7] = [30, 60, 120, 300, 600, 1200, 3600];
+pub(super) const SYNC_RETRY_DELAY: StdDuration = StdDuration::from_secs(30);
 pub(super) const TWO_WAY_NOTES_PROTOCOL_VERSION: &str = "2";
 pub(super) const TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING: &str =
     "two_way_notes_protocol_announced";
@@ -589,6 +593,7 @@ pub struct SyncEngine {
     control_lock: Mutex<()>,
     sync_lock: Mutex<()>,
     profile_store_lock: Mutex<()>,
+    schedule_changed: Notify,
 }
 
 pub(super) fn canonical_json(value: &Value) -> String {

@@ -323,3 +323,129 @@ async fn account_disconnect_waits_for_in_flight_machine_work() {
     assert_eq!(result["credentialsRemoved"], true);
     assert!(credentials.tokens().expect("tokens").is_none());
 }
+
+#[tokio::test]
+async fn each_machine_receives_and_persists_the_account_schedule() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let registry = Arc::new(AppStore::open(&directory.path().join("sync.sqlite")).expect("store"));
+    let first_id = "11111111-1111-4111-8111-111111111111";
+    let second_id = "22222222-2222-4222-8222-222222222222";
+    registry
+        .set_setting("device_id", "first-device")
+        .expect("first device");
+    for (id, name, device_id, legacy_default) in [
+        (first_id, "Kitchen", "first-device", true),
+        (second_id, "Office", "second-device", false),
+    ] {
+        registry
+            .save_machine(&MachineRecord {
+                id: id.into(),
+                name: name.into(),
+                device_id: Some(device_id.into()),
+                active: true,
+                pending_detach: false,
+                legacy_default,
+            })
+            .expect("machine saved");
+    }
+    let credentials: Arc<dyn CredentialStore> =
+        Arc::new(TestCredentials(StdMutex::new(Some(OAuthTokens {
+            access_token: "valid".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: i64::MAX,
+        }))));
+    let manager = MachineManager::open(directory.path(), registry.clone(), credentials.clone())
+        .expect("machine manager");
+    let first = manager.engine(first_id).await.expect("first machine");
+    let second = manager.engine(second_id).await.expect("second machine");
+    first
+        .apply_sync_interval_from_control_response(&serde_json::json!({
+            "syncIntervalSeconds": 1200
+        }))
+        .expect("first schedule update");
+    assert_eq!(first.sync_interval_seconds(), 1200);
+    assert_eq!(second.sync_interval_seconds(), 30);
+    second
+        .apply_sync_interval_from_state(&serde_json::json!({
+            "source": { "sync_interval_seconds": 1200 }
+        }))
+        .expect("second schedule update");
+    assert_eq!(second.sync_interval_seconds(), 1200);
+
+    drop(manager);
+    let reopened = MachineManager::open(directory.path(), registry, credentials)
+        .expect("reopened machine manager");
+    assert_eq!(
+        reopened
+            .engine(first_id)
+            .await
+            .expect("first machine")
+            .sync_interval_seconds(),
+        1200
+    );
+    assert_eq!(
+        reopened
+            .engine(second_id)
+            .await
+            .expect("second machine")
+            .sync_interval_seconds(),
+        1200
+    );
+}
+
+#[tokio::test]
+async fn removing_a_machine_aborts_a_background_retry_holding_its_run_gate() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let registry = Arc::new(AppStore::open(&directory.path().join("sync.sqlite")).expect("store"));
+    let machine_id = "11111111-1111-4111-8111-111111111111";
+    registry
+        .set_setting("device_id", "first-device")
+        .expect("first device");
+    registry
+        .save_machine(&MachineRecord {
+            id: machine_id.into(),
+            name: "Kitchen".into(),
+            device_id: Some("first-device".into()),
+            active: true,
+            pending_detach: false,
+            legacy_default: true,
+        })
+        .expect("machine saved");
+    let credentials: Arc<dyn CredentialStore> =
+        Arc::new(TestCredentials(StdMutex::new(Some(OAuthTokens {
+            access_token: "valid".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: i64::MAX,
+        }))));
+    let manager = Arc::new(
+        MachineManager::open(directory.path(), registry.clone(), credentials).expect("manager"),
+    );
+    let gate = manager
+        .run_gates
+        .read()
+        .await
+        .get(machine_id)
+        .cloned()
+        .expect("machine run gate");
+    let (started, running) = oneshot::channel::<()>();
+    let (_keep_pending, pending) = oneshot::channel::<()>();
+    let worker = tokio::spawn(async move {
+        let _run = gate.lock().await;
+        let _ = started.send(());
+        let _ = pending.await;
+    });
+    assert!(manager.register_worker(machine_id, &worker).await);
+    running.await.expect("background retry holds run gate");
+    timeout(Duration::from_secs(1), manager.remove_machine(machine_id))
+        .await
+        .expect("removal does not wait for the retry delay")
+        .expect("local removal");
+    let outcome = timeout(Duration::from_secs(1), worker)
+        .await
+        .expect("worker stopped")
+        .expect_err("worker must be aborted");
+    assert!(outcome.is_cancelled());
+    let machine = registry.machines().expect("machines").remove(0);
+    assert!(!machine.active);
+    assert!(machine.pending_detach);
+}

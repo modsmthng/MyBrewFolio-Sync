@@ -381,16 +381,16 @@ describe('Sync interface', () => {
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'syncHelp' }));
   });
 
-  it('refreshes the app through status and tray events', async () => {
+  it('refreshes the app and requests a global sync from the tray with multiple machines', async () => {
     invoke.mockImplementation(command => {
-      if (command === 'get_status') return Promise.resolve(status);
+      if (command === 'get_status') return Promise.resolve(multiMachineStatus);
       if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
       if (command === 'get_hide_app_icon') return Promise.resolve(false);
       if (command === 'check_update') return Promise.resolve('up-to-date');
       return Promise.resolve(undefined);
     });
     render(<App />);
-    await vi.waitFor(() => expect(screen.getByText('Connected')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: /Office office.local/ })).toBeTruthy());
     await vi.waitFor(() => expect(handlers['sync-requested']).toBeTypeOf('function'));
     handlers['sync-requested']();
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('sync_now'));

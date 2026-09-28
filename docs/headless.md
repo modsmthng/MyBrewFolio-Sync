@@ -198,11 +198,13 @@ the local data directory.
 
 ### Reading connection errors
 
-Each failed automatic attempt is written with a UTC timestamp and is retried after 30 seconds. For
-example:
+After a whole-cycle failure, Sync immediately tries once more, then makes two additional attempts
+30 seconds apart. If all four attempts fail, that machine resumes at the account-wide interval
+selected in MyBrewFolio. Another machine continues on its own timer. The final failure is written
+with a UTC timestamp and machine ID. For example:
 
 ```text
-2026-09-18T14:30:00Z Sync attempt failed: GaggiMate could not be reached. Retrying in 30 seconds. Docker/NAS: gaggimate.local may not resolve inside containers. Set MYBREWFOLIO_SYNC_GAGGIMATE_HOST to GaggiMate's private LAN IP, then recreate the Sync container.
+2026-09-18T14:30:00Z Machine MACHINE_ID: Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval.
 ```
 
 Errors that mention a Shot, Notes, or Profile include the local GaggiMate ID so you can identify the
