@@ -2,6 +2,7 @@
 
 fn main() {
     println!("cargo:rerun-if-env-changed=MYBREWFOLIO_SYNC_WINDOWS_STORE_BUILD");
+    println!("cargo:rerun-if-env-changed=MYBREWFOLIO_SYNC_REDIRECT_URI");
     #[cfg(feature = "desktop")]
     tauri_build::build()
 }

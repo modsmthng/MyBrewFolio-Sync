@@ -33,6 +33,7 @@ const initialStatus = {
   syncing: false,
   lastSyncAt: null,
   lastError: null,
+  lastErrorCode: null,
   syncProgress: null,
   profiles: 0,
   shots: 0,
@@ -63,6 +64,20 @@ export function statusTone(activeSyncActivity, message, messageTone, engineError
   return 'info';
 }
 
+export function dashboardEngineError(status, acknowledgedLastError = '') {
+  if (!status?.lastError || status.lastError === acknowledgedLastError) return '';
+  if (['GAGGIMATE_UNREACHABLE', 'GAGGIMATE_UNREACHABLE_RETRYING'].includes(status.lastErrorCode)) {
+    if (status.machineReachable) return '';
+    const machine = status.name?.trim() || status.machineHost?.trim() || 'GaggiMate';
+    if (status.lastErrorCode === 'GAGGIMATE_UNREACHABLE_RETRYING') {
+      return `The ${machine} could not be reached. Trying again, this may take a few minutes. Please wait.`;
+    }
+    const address = status.machineHost?.trim() || 'its configured address';
+    return `The ${machine} could not be reached. Make sure MyBrewFolio Sync can access your local network, then restart the app. Also check that the machine is reachable at ${address}.`;
+  }
+  return status.lastError;
+}
+
 function SyncSpinner() {
   return <span className="sync-spinner" aria-hidden="true" />;
 }
@@ -76,12 +91,13 @@ function ActionLabel({ active, activeText, children }) {
   );
 }
 
-function ExternalLink({ page, machineId, children, className = '' }) {
+function ExternalLink({ page, machineId, children, className = '', ...buttonProps }) {
   return (
     <button
       type="button"
       className={`text-link ${className}`.trim()}
       onClick={() => invoke('open_mybrewfolio_page', machineId ? { page, machineId } : { page }).catch(() => {})}
+      {...buttonProps}
     >
       {children}
     </button>
@@ -273,7 +289,8 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
       setAdding(false);
       setName('');
       await refresh();
-      const nextId = machineIdOf(result) || (mode === 'existing' ? existingId : '');
+      const createdId = typeof result === 'string' ? result : machineIdOf(result);
+      const nextId = createdId || (mode === 'existing' ? existingId : '');
       if (nextId) onSelectMachine(nextId);
       setNotice(mode === 'new' ? 'Machine added.' : 'Machine connected.');
     } catch (error) {
@@ -326,10 +343,11 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
         <div className="machine-list" role="group" aria-label="Connected machines">
           {machines.map(machine => {
             const id = machineIdOf(machine);
+            const machineHasError = Boolean(dashboardEngineError(machine));
             return (
               <button type="button" key={id} className={`machine-choice ${selectedId === id ? 'selected' : ''}`} aria-pressed={selectedId === id} onClick={() => onSelectMachine(id)}>
                 <span><strong>{machine.name || 'GaggiMate'}</strong><small>{machine.machineHost || 'Address not set'}</small></span>
-                <span className={`machine-state ${machine.syncing ? 'working' : machine.lastError || machine.machineReachable === false ? 'error' : 'ok'}`}>{machine.syncing ? 'Syncing' : machine.lastError ? 'Needs attention' : machine.machineReachable === false ? 'Offline' : 'Connected'}</span>
+                <span className={`machine-state ${machine.syncing ? 'working' : machineHasError || machine.machineReachable === false ? 'error' : 'ok'}`}>{machine.syncing ? 'Syncing' : machineHasError ? 'Needs attention' : machine.machineReachable === false ? 'Offline' : 'Connected'}</span>
               </button>
             );
           })}
@@ -612,9 +630,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   };
 
   const activeSyncActivity = syncActivity || (machineStatus?.syncing ? 'sync' : '');
-  const engineError = machineStatus?.lastError && machineStatus.lastError !== acknowledgedLastError
-    ? machineStatus.lastError
-    : '';
+  const engineError = dashboardEngineError(machineStatus, acknowledgedLastError);
   const visibleStatusMessage = visibleDashboardStatus(activeSyncActivity, machineStatus, message, engineError);
   const visibleStatusTone = statusTone(activeSyncActivity, message, messageTone, engineError);
   return (
@@ -660,6 +676,8 @@ function DashboardContent({
   toggleAutostart, toggleAppIcon, confirmDisconnect, setConfirmDisconnect,
   disconnect, laterUpdate, installUpdate,
 }) {
+  const hasSuccessfulSync = Boolean(status.lastSyncAt && Number.isFinite(new Date(status.lastSyncAt).getTime()));
+  const awaitingFirstSyncSetup = !status.initialSyncConfigured && !hasSuccessfulSync;
   return (
     <main className="shell">
       <header className="brand-row dashboard-header">
@@ -673,6 +691,14 @@ function DashboardContent({
       ) : null}
       {machines ? <MachineManager machines={machines} selectedMachineId={selectedMachineId} onSelectMachine={onSelectMachine} refresh={refresh} disabled={busy} /> : null}
       {hasMachine ? <>
+      {awaitingFirstSyncSetup ? (
+        <section className="card first-sync" aria-label="First sync setup">
+          <h2>First Sync</h2>
+          <p className="muted">Open Sync settings on MyBrewFolio for your first sync. Choose your Sync preferences and start importing your GaggiMate library.</p>
+          <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary" aria-label="Open Sync settings for first sync">Open Sync settings</ExternalLink>
+        </section>
+      ) : null}
+      {!awaitingFirstSyncSetup ? <>
       <section className="overview card">
         <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
         <button type="button" className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
@@ -687,9 +713,9 @@ function DashboardContent({
       <section className="card settings">
         <h3>Manage Sync in MyBrewFolio</h3>
         <p className="muted">Manage matching preferences, Notes, backups, conflicts and complete resync in your account.</p>
-        {!status.initialSyncConfigured ? <p>Finish choosing your Sync preferences in MyBrewFolio to start importing.</p> : null}
         <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary">Open Sync settings</ExternalLink>
       </section>
+      </> : null}
       <section className="card settings">
         <h3>Local connection</h3>
         <div className="inline-field"><input aria-label="GaggiMate hostname or local IP" value={host} onInput={event => setHost(event.currentTarget.value)} /><button type="button" onClick={saveHost} disabled={busy}>Save</button></div>
@@ -777,13 +803,23 @@ export function App() {
   useEffect(() => {
     invoke('frontend_ready').catch(() => {});
     refresh();
-    const poll = setInterval(refresh, 5000);
+    const poll = setInterval(refresh, 1000);
     let unlistenDeepLink;
     let unlistenStatus;
     let unlistenSync;
     let unlistenDisconnect;
     const handleUrls = urls => {
-      const callback = urls?.find(url => url.startsWith('mybrewfolio-sync://oauth/callback'));
+      // The desktop app's configured redirect URI is validated in Rust. Keep
+      // this frontend check scheme agnostic so isolated development bundles
+      // (for example mybrewfolio-sync-dev://) can complete the same flow.
+      const callback = urls?.find(value => {
+        try {
+          const url = new URL(value);
+          return url.hostname === 'oauth' && url.pathname === '/callback';
+        } catch {
+          return false;
+        }
+      });
       if (callback) {
         setOauthError('');
         setDisconnectNotice(null);

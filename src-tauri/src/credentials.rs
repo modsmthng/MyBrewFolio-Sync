@@ -33,14 +33,18 @@ pub struct KeyringCredentialStore;
 
 #[cfg(feature = "desktop")]
 impl KeyringCredentialStore {
+    const SERVICE: &'static str = if cfg!(debug_assertions) {
+        "com.mybrewfolio.sync.dev"
+    } else {
+        "com.mybrewfolio.sync"
+    };
+
     fn entry() -> Result<keyring::Entry, StoreError> {
-        keyring::Entry::new("com.mybrewfolio.sync", "oauth-tokens")
-            .map_err(|_| StoreError::Keychain)
+        keyring::Entry::new(Self::SERVICE, "oauth-tokens").map_err(|_| StoreError::Keychain)
     }
 
     fn pending_entry() -> Result<keyring::Entry, StoreError> {
-        keyring::Entry::new("com.mybrewfolio.sync", "oauth-device-pending")
-            .map_err(|_| StoreError::Keychain)
+        keyring::Entry::new(Self::SERVICE, "oauth-device-pending").map_err(|_| StoreError::Keychain)
     }
 }
 

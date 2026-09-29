@@ -102,6 +102,7 @@ input:focus { box-shadow: 0 0 0 3px rgba(50, 107, 142, .2); border-color: #326b8
 .settings-title-with-info h3, .intro-with-info p, .modal-title-row h2 { margin: 0; }
 .section-title { margin: 30px 0 12px; }
 .first-sync { border-color: rgba(50,107,142,.55); }
+.first-sync + .overview { margin-top: 0; }
 .issue-details summary { cursor: pointer; }
 .issue-details ul { margin: 16px 0; padding: 0; list-style: none; display: grid; gap: 10px; }
 .issue-details li { display: grid; gap: 3px; padding: 10px 12px; border-radius: 14px; background: rgba(141,52,58,.08); }

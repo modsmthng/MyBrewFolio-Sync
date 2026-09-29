@@ -731,7 +731,9 @@ fn gaggimate_unreachable_guidance(host: &str) -> Value {
 fn local_error_guidance(status: &AppStatus) -> Option<Value> {
     let code = status.last_error_code.as_deref()?;
     match code {
-        "GAGGIMATE_UNREACHABLE" => Some(gaggimate_unreachable_guidance(&status.machine_host)),
+        "GAGGIMATE_UNREACHABLE" | "GAGGIMATE_UNREACHABLE_RETRYING" => {
+            Some(gaggimate_unreachable_guidance(&status.machine_host))
+        }
         "GAGGIMATE_HOST_INVALID" => Some(json!({
             "code": code,
             "message": "The configured GaggiMate address is invalid. Use gaggimate.local or a private LAN IP address.",

@@ -141,9 +141,9 @@ impl SyncEngine {
         progress: SyncProgress,
         publish: bool,
     ) -> Result<(), EngineError> {
+        self.mark_machine_reachable().await;
         {
             let mut status = self.status.write().await;
-            status.machine_reachable = true;
             status.sync_progress = Some(progress.clone());
         }
         eprintln!("{}", sync_progress_log_line(&progress));

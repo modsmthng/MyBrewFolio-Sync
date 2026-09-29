@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::redirect::Policy;
 use serde_json::{json, Value};
 use thiserror::Error;
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, sync::mpsc::Sender};
 use tokio_tungstenite::{client_async, tungstenite::Message};
 use url::Url;
 use uuid::Uuid;
@@ -148,6 +148,7 @@ pub struct GaggiMateClient {
     port: u16,
     socket_address: SocketAddr,
     http: reqwest::Client,
+    reachability_notifier: Option<Sender<()>>,
 }
 
 impl GaggiMateClient {
@@ -182,7 +183,19 @@ impl GaggiMateClient {
             port: target.port,
             socket_address,
             http,
+            reachability_notifier: None,
         })
+    }
+
+    pub fn with_reachability_notifier(mut self, notifier: Sender<()>) -> Self {
+        self.reachability_notifier = Some(notifier);
+        self
+    }
+
+    fn report_reachable(&self) {
+        if let Some(notifier) = &self.reachability_notifier {
+            let _ = notifier.try_send(());
+        }
     }
 
     fn http_url(&self, path: &str) -> String {
@@ -212,6 +225,7 @@ impl GaggiMateClient {
         if !response.status().is_success() || !self.response_is_local(&response) {
             return Err(LocalError::Unreachable);
         }
+        self.report_reachable();
         let bytes = response
             .bytes()
             .await
@@ -335,6 +349,7 @@ impl GaggiMateClient {
         let (mut socket, _) = client_async(url.as_str(), stream)
             .await
             .map_err(|_| LocalError::Unreachable)?;
+        self.report_reachable();
         let rid = Uuid::new_v4().to_string();
         let mut request = body.as_object().cloned().unwrap_or_default();
         request.insert("tp".into(), json!(request_type));
@@ -511,6 +526,11 @@ impl GaggiMateClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::mpsc,
+    };
 
     #[test]
     fn unsupported_shot_format_is_reported_separately() {
@@ -597,6 +617,31 @@ mod tests {
             GaggiMateClient::new("public.example.test"),
             Err(LocalError::InvalidHost)
         ));
+    }
+
+    #[tokio::test]
+    async fn successful_local_http_response_reports_reachability() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("local test listener");
+        let address = listener.local_addr().expect("listener address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("local request");
+            let mut request = [0_u8; 1024];
+            stream.read(&mut request).await.expect("request read");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("local response");
+        });
+        let (sender, mut receiver) = mpsc::channel(1);
+        let client = GaggiMateClient::new(&address.to_string())
+            .expect("local client")
+            .with_reachability_notifier(sender);
+
+        client.bytes("/status").await.expect("successful response");
+        assert!(receiver.try_recv().is_ok());
+        assert!(receiver.try_recv().is_err());
     }
 
     #[test]

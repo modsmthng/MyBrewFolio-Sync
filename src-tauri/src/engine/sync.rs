@@ -12,6 +12,7 @@ use crate::{
     model::{AppStatus, SyncObject, SyncProgress, SyncProgressPhase},
 };
 
+use super::schedule::UnreachableErrorState;
 use super::{
     api_timestamp, batch_result_status, hash_value, is_terminal_batch_status, normalized_notes,
     notes_are_semantically_empty, parse_time, scan_due, select_sync_batch, shot_fingerprint,
@@ -22,6 +23,19 @@ use super::{
 };
 
 impl SyncEngine {
+    pub(super) async fn mark_machine_reachable(&self) {
+        let mut status = self.status.write().await;
+        status.machine_reachable = true;
+        if matches!(
+            status.last_error_code.as_deref(),
+            Some("GAGGIMATE_UNREACHABLE" | "GAGGIMATE_UNREACHABLE_RETRYING")
+        ) {
+            status.last_error = None;
+            status.last_error_code = None;
+            status.last_error_at = None;
+        }
+    }
+
     #[cfg(test)]
     pub(super) async fn queue_local_changes(
         &self,
@@ -562,6 +576,14 @@ impl SyncEngine {
     }
 
     pub async fn sync_once(&self) -> Result<(), EngineError> {
+        self.sync_once_with_retry_policy(UnreachableErrorState::Final)
+            .await
+    }
+
+    pub(super) async fn sync_once_with_retry_policy(
+        &self,
+        unreachable_error_state: UnreachableErrorState,
+    ) -> Result<(), EngineError> {
         let guard = self.sync_lock.try_lock().map_err(|_| EngineError::Busy)?;
         let _full_sync_slot = self.cloud.full_sync_slot().await;
         let device_id = self
@@ -576,7 +598,8 @@ impl SyncEngine {
             .store
             .setting("machine_host")?
             .unwrap_or_else(|| "gaggimate.local".into());
-        let result = async {
+        let (reachable_sender, mut reachable_receiver) = tokio::sync::mpsc::channel(1);
+        let result_future = async {
             let (state, cloud_unreachable) = match self.cloud.state(&device_id).await {
                 Ok(state) => {
                     self.store.set_setting("cloud_state", &state.to_string())?;
@@ -602,7 +625,8 @@ impl SyncEngine {
                 })
                 .is_some_and(|value| !value.is_null());
             let first_sync = self.status().await.last_sync_at.is_none();
-            let local = GaggiMateClient::new(&host)?;
+            let local =
+                GaggiMateClient::new(&host)?.with_reachability_notifier(reachable_sender.clone());
             self.process_profile_store_operations(&local, &device_id, 0)
                 .await?;
             if !configured {
@@ -610,8 +634,7 @@ impl SyncEngine {
                 self.cloud
                     .heartbeat(&device_id, true, None, None, None)
                     .await?;
-                let mut status = self.status.write().await;
-                status.machine_reachable = true;
+                self.mark_machine_reachable().await;
                 return Ok(());
             }
             // An in-place app update keeps the device ID. Advertise the new
@@ -699,8 +722,19 @@ impl SyncEngine {
             status.last_error_at = warning_code.map(|_| api_timestamp(Utc::now()));
             status.issues = self.store.failures().unwrap_or_default();
             Ok::<(), EngineError>(())
+        };
+        tokio::pin!(result_future);
+        let result = loop {
+            tokio::select! {
+                result = &mut result_future => break result,
+                Some(()) = reachable_receiver.recv() => self.mark_machine_reachable().await,
+            }
+        };
+        // A successful local response can notify us in the same poll that the
+        // sync future completes. Consume that notification before finishing.
+        while reachable_receiver.try_recv().is_ok() {
+            self.mark_machine_reachable().await;
         }
-        .await;
         if let Err(error) = &result {
             if matches!(
                 error,
@@ -750,12 +784,25 @@ impl SyncEngine {
             let message = error.to_string();
             let error_code = error.heartbeat_code();
             let error_at = api_timestamp(Utc::now());
+            let local_unreachable = error_code == "GAGGIMATE_UNREACHABLE";
+            let suppress_error =
+                local_unreachable && unreachable_error_state == UnreachableErrorState::Suppress;
             let (machine_reachable, last_sync_at) = {
                 let mut status = self.status.write().await;
                 status.machine_reachable = error.machine_reachable();
-                status.last_error = Some(message.clone());
-                status.last_error_code = Some(error_code.to_string());
-                status.last_error_at = Some(error_at);
+                if !suppress_error {
+                    status.last_error = Some(message.clone());
+                    status.last_error_code = Some(
+                        if local_unreachable
+                            && unreachable_error_state == UnreachableErrorState::Retrying
+                        {
+                            "GAGGIMATE_UNREACHABLE_RETRYING".to_string()
+                        } else {
+                            error_code.to_string()
+                        },
+                    );
+                    status.last_error_at = Some(error_at);
+                }
                 status.sync_progress = None;
                 (status.machine_reachable, status.last_sync_at.clone())
             };

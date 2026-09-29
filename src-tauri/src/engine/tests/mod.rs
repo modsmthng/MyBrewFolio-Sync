@@ -137,6 +137,38 @@ pub(super) fn status() -> AppStatus {
     }
 }
 
+#[tokio::test]
+async fn local_reconnection_clears_an_unreachable_error_before_sync_finishes() {
+    let (engine, _directory) = test_engine();
+    {
+        let mut status = engine.status.write().await;
+        status.machine_reachable = false;
+        status.last_error = Some("The GaggiMate could not be reached".into());
+        status.last_error_code = Some("GAGGIMATE_UNREACHABLE".into());
+        status.last_error_at = Some("2026-09-28T12:00:00Z".into());
+    }
+
+    engine.mark_machine_reachable().await;
+
+    let status = engine.status().await;
+    assert!(status.machine_reachable);
+    assert!(status.last_error.is_none());
+    assert!(status.last_error_code.is_none());
+    assert!(status.last_error_at.is_none());
+
+    {
+        let mut status = engine.status.write().await;
+        status.machine_reachable = false;
+        status.last_error = Some("The GaggiMate could not be reached".into());
+        status.last_error_code = Some("GAGGIMATE_UNREACHABLE_RETRYING".into());
+    }
+    engine.mark_machine_reachable().await;
+    let status = engine.status().await;
+    assert!(status.machine_reachable);
+    assert!(status.last_error.is_none());
+    assert!(status.last_error_code.is_none());
+}
+
 #[test]
 fn hashes_json_like_the_sync_api() {
     let value = serde_json::json!({

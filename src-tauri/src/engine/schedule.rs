@@ -16,6 +16,13 @@ enum RetryStep {
     Stop,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UnreachableErrorState {
+    Suppress,
+    Retrying,
+    Final,
+}
+
 fn retry_step(failed_attempts: usize) -> RetryStep {
     match failed_attempts {
         1 => RetryStep::Immediate,
@@ -40,13 +47,29 @@ fn retryable(error: &EngineError) -> bool {
     )
 }
 
+fn unreachable_error_state(prior_failures: usize, already_reported: bool) -> UnreachableErrorState {
+    match prior_failures {
+        0 if !already_reported => UnreachableErrorState::Suppress,
+        0..=2 => UnreachableErrorState::Retrying,
+        _ => UnreachableErrorState::Final,
+    }
+}
+
+fn scheduled_wait_seconds(interval_seconds: u64, initial_sync_configured: bool) -> u64 {
+    if initial_sync_configured {
+        interval_seconds
+    } else {
+        interval_seconds.min(DEFAULT_SYNC_INTERVAL_SECONDS)
+    }
+}
+
 async fn run_retry_policy<E, Attempt, AttemptFuture, IsRetryable, Wait, WaitFuture>(
     mut attempt: Attempt,
     is_retryable: IsRetryable,
     mut wait: Wait,
 ) -> Result<(), E>
 where
-    Attempt: FnMut() -> AttemptFuture,
+    Attempt: FnMut(usize) -> AttemptFuture,
     AttemptFuture: Future<Output = Result<(), E>>,
     IsRetryable: Fn(&E) -> bool,
     Wait: FnMut(StdDuration) -> WaitFuture,
@@ -54,7 +77,7 @@ where
 {
     let mut failed_attempts = 0;
     loop {
-        match attempt().await {
+        match attempt(failed_attempts).await {
             Ok(()) => return Ok(()),
             Err(error) if !is_retryable(&error) => return Err(error),
             Err(error) => {
@@ -126,7 +149,10 @@ impl SyncEngine {
         loop {
             let changed = self.schedule_changed.notified();
             tokio::pin!(changed);
-            let seconds = self.sync_interval_seconds();
+            let seconds = scheduled_wait_seconds(
+                self.sync_interval_seconds(),
+                self.status.read().await.initial_sync_configured,
+            );
             tokio::select! {
                 _ = tokio::time::sleep(StdDuration::from_secs(seconds)) => return,
                 _ = &mut changed => {}
@@ -135,7 +161,21 @@ impl SyncEngine {
     }
 
     pub async fn sync_with_retries(&self) -> Result<(), EngineError> {
-        run_retry_policy(|| self.sync_once(), retryable, tokio::time::sleep).await
+        let already_reported = matches!(
+            self.status().await.last_error_code.as_deref(),
+            Some("GAGGIMATE_UNREACHABLE" | "GAGGIMATE_UNREACHABLE_RETRYING")
+        );
+        run_retry_policy(
+            |prior_failures| {
+                self.sync_once_with_retry_policy(unreachable_error_state(
+                    prior_failures,
+                    already_reported,
+                ))
+            },
+            retryable,
+            tokio::time::sleep,
+        )
+        .await
     }
 }
 
@@ -145,7 +185,10 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{retry_step, retryable, run_retry_policy, RetryStep};
+    use super::{
+        retry_step, retryable, run_retry_policy, scheduled_wait_seconds, unreachable_error_state,
+        RetryStep, UnreachableErrorState,
+    };
     use crate::cloud::CloudError;
     use crate::engine::EngineError;
 
@@ -163,6 +206,13 @@ mod tests {
             assert!(!retryable(&error));
         }
         assert!(retryable(&EngineError::Cloud(CloudError::Unreachable)));
+    }
+
+    #[test]
+    fn first_sync_setup_is_checked_within_thirty_seconds_even_with_a_long_schedule() {
+        assert_eq!(scheduled_wait_seconds(3600, false), 30);
+        assert_eq!(scheduled_wait_seconds(120, false), 30);
+        assert_eq!(scheduled_wait_seconds(3600, true), 3600);
     }
 
     #[test]
@@ -190,12 +240,36 @@ mod tests {
         assert_eq!(retry_step(4), RetryStep::Stop);
     }
 
+    #[test]
+    fn unreachable_error_transitions_from_hidden_to_retrying_to_final() {
+        assert_eq!(
+            unreachable_error_state(0, false),
+            UnreachableErrorState::Suppress
+        );
+        assert_eq!(
+            unreachable_error_state(1, false),
+            UnreachableErrorState::Retrying
+        );
+        assert_eq!(
+            unreachable_error_state(2, false),
+            UnreachableErrorState::Retrying
+        );
+        assert_eq!(
+            unreachable_error_state(3, false),
+            UnreachableErrorState::Final
+        );
+        assert_eq!(
+            unreachable_error_state(0, true),
+            UnreachableErrorState::Retrying
+        );
+    }
+
     #[tokio::test]
     async fn retry_policy_recovers_on_a_later_attempt_and_waits_twice() {
         let attempts = Cell::new(0);
         let mut waits = Vec::new();
         let result = run_retry_policy(
-            || {
+            |_| {
                 let count = attempts.get() + 1;
                 attempts.set(count);
                 ready(if count < 4 { Err("temporary") } else { Ok(()) })
@@ -218,7 +292,7 @@ mod tests {
         let attempts = Cell::new(0);
         let mut waits = Vec::new();
         let result = run_retry_policy(
-            || {
+            |_| {
                 attempts.set(attempts.get() + 1);
                 ready(Err("temporary"))
             },
@@ -236,7 +310,7 @@ mod tests {
         let terminal_attempts = Cell::new(0);
         let terminal_waits = Cell::new(0);
         let result = run_retry_policy(
-            || {
+            |_| {
                 terminal_attempts.set(terminal_attempts.get() + 1);
                 ready(Err("authentication"))
             },

@@ -1210,7 +1210,11 @@ mod desktop {
     fn initialize_application(
         app: &mut tauri::App,
     ) -> DesktopSetupResult<(Arc<AppStore>, Arc<SyncEngine>, Arc<StartupDiagnostics>)> {
-        let data_dir = app.path().app_data_dir()?;
+        let mut data_dir = app.path().app_data_dir()?;
+        if cfg!(debug_assertions) {
+            data_dir.push("development");
+        }
+        std::fs::create_dir_all(&data_dir)?;
         let startup_diagnostics = Arc::new(StartupDiagnostics::new(
             data_dir.join("startup-diagnostics.log"),
         ));

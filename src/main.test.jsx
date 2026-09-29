@@ -20,6 +20,7 @@ import {
   Dashboard,
   FIRST_SYNCHRONIZATION_MESSAGE,
   Setup,
+  dashboardEngineError,
   firstSynchronizationInProgress,
   formatDate,
   statusTone,
@@ -92,6 +93,73 @@ describe('dashboard decisions', () => {
     expect(statusTone('', '', 'success', '')).toBe('info');
   });
 
+  it('labels unreachable errors with the machine name or configured address', () => {
+    const unreachable = {
+      ...status,
+      machineReachable: false,
+      lastError: 'The GaggiMate could not be reached',
+      lastErrorCode: 'GAGGIMATE_UNREACHABLE',
+      name: 'Kitchen',
+    };
+    expect(dashboardEngineError(unreachable)).toBe(
+      'The Kitchen could not be reached. Make sure MyBrewFolio Sync can access your local network, then restart the app. Also check that the machine is reachable at gaggimate.local.',
+    );
+    expect(dashboardEngineError({ ...unreachable, name: '', machineHost: '192.168.178.140' })).toBe(
+      'The 192.168.178.140 could not be reached. Make sure MyBrewFolio Sync can access your local network, then restart the app. Also check that the machine is reachable at 192.168.178.140.',
+    );
+    expect(dashboardEngineError({ ...unreachable, lastErrorCode: 'GAGGIMATE_UNREACHABLE_RETRYING' })).toBe(
+      'The Kitchen could not be reached. Trying again, this may take a few minutes. Please wait.',
+    );
+    expect(dashboardEngineError({ ...unreachable, machineReachable: true })).toBe('');
+    expect(dashboardEngineError(unreachable, unreachable.lastError)).toBe('');
+    expect(dashboardEngineError({ ...unreachable, lastErrorCode: 'MYBREWFOLIO_UNREACHABLE' }))
+      .toBe('The GaggiMate could not be reached');
+  });
+
+  it('shows the selected machine in the unreachable alert and clears it when status recovers', () => {
+    const kitchen = {
+      ...multiMachineStatus.machines[0],
+      lastError: 'The GaggiMate could not be reached',
+      lastErrorCode: 'GAGGIMATE_UNREACHABLE',
+      machineReachable: false,
+    };
+    const view = render(
+      <Dashboard
+        status={{ ...multiMachineStatus, machines: [kitchen, multiMachineStatus.machines[1]] }}
+        refresh={vi.fn()}
+        onDisconnected={vi.fn()}
+        disconnectRequestToken={0}
+      />,
+    );
+    expect(screen.getByText(/The Kitchen could not be reached\. Make sure MyBrewFolio Sync/)).toBeTruthy();
+
+    view.rerender(
+      <Dashboard
+        status={{
+          ...multiMachineStatus,
+          machines: [{ ...kitchen, machineReachable: true }, multiMachineStatus.machines[1]],
+        }}
+        refresh={vi.fn()}
+        onDisconnected={vi.fn()}
+        disconnectRequestToken={0}
+      />,
+    );
+    expect(screen.queryByText(/The Kitchen could not be reached/)).toBeNull();
+
+    view.rerender(
+      <Dashboard
+        status={{
+          ...multiMachineStatus,
+          machines: [{ ...kitchen, lastError: null, lastErrorCode: null, machineReachable: true }, multiMachineStatus.machines[1]],
+        }}
+        refresh={vi.fn()}
+        onDisconnected={vi.fn()}
+        disconnectRequestToken={0}
+      />,
+    );
+    expect(screen.queryByText(/The Kitchen could not be reached/)).toBeNull();
+  });
+
   it('shows safe first-sync progress for every phase', () => {
     expect(
       syncProgressMessage({ phase: 'reading_history', scannedShots: 8, totalShots: 20 }),
@@ -132,8 +200,8 @@ describe('Sync interface', () => {
   it('creates a named machine and connects an existing account machine', async () => {
     invoke.mockImplementation(command => {
       if (command === 'list_account_machines') return Promise.resolve([{ machineId: 'office-id', name: 'Office' }, { machineId: 'garage-id', name: 'Garage' }]);
-      if (command === 'add_machine') return Promise.resolve({ machineId: 'new-id' });
-      if (command === 'connect_machine') return Promise.resolve({ machineId: 'garage-id' });
+      if (command === 'add_machine') return Promise.resolve('new-id');
+      if (command === 'connect_machine') return Promise.resolve(undefined);
       if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
       if (command === 'get_update_status') return Promise.resolve({ kind: 'unknown' });
       return Promise.resolve(undefined);
@@ -154,6 +222,63 @@ describe('Sync interface', () => {
     fireEvent.change(screen.getByRole('combobox', { name: 'Existing machine' }), { target: { value: 'garage-id' } });
     fireEvent.click(screen.getByRole('button', { name: 'Connect machine' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('connect_machine', { machineId: 'garage-id', host: 'patio.local' }));
+  });
+
+  it('selects a newly created machine after refreshing the account list', async () => {
+    const newMachine = { machineId: 'new-id', name: 'Patio', machineHost: 'patio.local', syncing: false, lastSyncAt: null, lastError: null, profiles: 0, shots: 0, notes: 0, issues: [], initialSyncConfigured: false };
+    const updatedStatus = { ...multiMachineStatus, machines: [...multiMachineStatus.machines, newMachine] };
+    let view;
+    const disconnected = vi.fn();
+    const refresh = vi.fn(async () => {
+      view.rerender(<Dashboard status={updatedStatus} refresh={refresh} onDisconnected={disconnected} disconnectRequestToken={0} />);
+    });
+    invoke.mockImplementation(command => {
+      if (command === 'list_account_machines') return Promise.resolve([]);
+      if (command === 'add_machine') return Promise.resolve('new-id');
+      if (command === 'get_autostart_status') return Promise.resolve({ enabled: true, requiresWindowsSettings: false, blockedByPolicy: false, migrationAvailable: false });
+      if (command === 'get_update_status') return Promise.resolve({ kind: 'unknown' });
+      return Promise.resolve(undefined);
+    });
+    view = render(<Dashboard status={multiMachineStatus} refresh={refresh} onDisconnected={disconnected} disconnectRequestToken={0} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add machine' }));
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Create machine' })).toBeTruthy());
+    fireEvent.input(screen.getByRole('textbox', { name: 'New machine name' }), { target: { value: 'Patio' } });
+    fireEvent.input(screen.getByRole('textbox', { name: 'New machine address' }), { target: { value: 'patio.local' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create machine' }));
+
+    await vi.waitFor(() => {
+      expect(screen.getByRole('button', { name: /Patio patio\.local/ }).getAttribute('aria-pressed')).toBe('true');
+    });
+  });
+
+  it.each([
+    ['one machine', { ...status, initialSyncConfigured: false }, { page: 'accountSync' }],
+    ['multiple machines', { ...multiMachineStatus, machines: multiMachineStatus.machines.map(machine => ({ ...machine, initialSyncConfigured: false })) }, { page: 'accountSync', machineId: 'kitchen-id' }],
+  ])('offers first-sync settings for %s', async (_label, dashboardStatus, expectedRequest) => {
+    render(<Dashboard status={dashboardStatus} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.getByRole('heading', { name: 'First Sync' })).toBeTruthy();
+    expect(screen.getByText(/Open Sync settings on MyBrewFolio for your first sync/)).toBeTruthy();
+    expect(screen.queryByText('Last successful sync')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Sync now' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Manage Sync in MyBrewFolio' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Local connection' })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings for first sync' }));
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', expectedRequest));
+  });
+
+  it('hides the first-sync settings card after a successful sync', () => {
+    render(<Dashboard status={{ ...status, lastSyncAt: '2026-09-28T10:00:00Z' }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.queryByRole('region', { name: 'First sync setup' })).toBeNull();
+  });
+
+  it('shows Sync cards as soon as first sync is started in MyBrewFolio', () => {
+    const view = render(<Dashboard status={{ ...status, initialSyncConfigured: false }} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.getByRole('heading', { name: 'First Sync' })).toBeTruthy();
+    view.rerender(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.queryByRole('heading', { name: 'First Sync' })).toBeNull();
+    expect(screen.getByText('Last successful sync')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Manage Sync in MyBrewFolio' })).toBeTruthy();
   });
 
   it('renames and removes only the selected machine', async () => {
@@ -295,8 +420,8 @@ describe('Sync interface', () => {
     expect(screen.getByText('Update 0.3.13 is available.')).toBeTruthy();
     expect(screen.getByText(/Windows needs a one-time confirmation/)).toBeTruthy();
     expect(screen.getByText(/Windows has disabled startup/)).toBeTruthy();
-    expect(screen.getByText(/Finish choosing your Sync preferences/)).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings' }));
+    expect(screen.getByText(/Open Sync settings on MyBrewFolio for your first sync/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Open Sync settings for first sync' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('open_mybrewfolio_page', { page: 'accountSync' }));
     fireEvent.click(screen.getByRole('button', { name: 'Install update' }));
     await vi.waitFor(() => expect(screen.getByText('MyBrewFolio Sync is up to date.')).toBeTruthy());
@@ -398,16 +523,19 @@ describe('Sync interface', () => {
     await vi.waitFor(() => expect(screen.getByText('Disconnect this computer?')).toBeTruthy());
   });
 
-  it('surfaces a deep-link sign-in error on the setup screen', async () => {
-    getCurrent.mockResolvedValue(['mybrewfolio-sync://oauth/callback?code=example']);
-    invoke.mockImplementation(command => {
-      if (command === 'get_status') return Promise.resolve({ ...status, connected: false });
-      if (command === 'complete_oauth') return Promise.reject(new Error('Authorization was cancelled'));
-      return Promise.resolve(undefined);
+  it.each(['mybrewfolio-sync://', 'mybrewfolio-sync-dev://'])(
+    'passes the %s OAuth deep link to the native verifier', async scheme => {
+      const callback = `${scheme}oauth/callback?code=example`;
+      getCurrent.mockResolvedValue([callback]);
+      invoke.mockImplementation(command => {
+        if (command === 'get_status') return Promise.resolve({ ...status, connected: false });
+        if (command === 'complete_oauth') return Promise.reject(new Error('Authorization was cancelled'));
+        return Promise.resolve(undefined);
+      });
+      render(<App />);
+      await vi.waitFor(() => expect(screen.getByText('MyBrewFolio could not finish connecting this installation: Error: Authorization was cancelled')).toBeTruthy());
+      expect(invoke).toHaveBeenCalledWith('complete_oauth', { callbackUrl: callback });
     });
-    render(<App />);
-    await vi.waitFor(() => expect(screen.getByText('MyBrewFolio could not finish connecting this installation: Error: Authorization was cancelled')).toBeTruthy());
-  });
 
   it('explains when a local disconnect cannot remove credentials', async () => {
     let refreshCount = 0;

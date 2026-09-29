@@ -66,7 +66,9 @@ impl CloudConfig {
             token_url: option_env!("MYBREWFOLIO_SYNC_TOKEN_URL")
                 .unwrap_or("https://clerk.mybrewfolio.com/oauth/token")
                 .to_string(),
-            redirect_uri: "mybrewfolio-sync://oauth/callback".to_string(),
+            redirect_uri: option_env!("MYBREWFOLIO_SYNC_REDIRECT_URI")
+                .unwrap_or("mybrewfolio-sync://oauth/callback")
+                .to_string(),
             device_redirect_uri: option_env!("MYBREWFOLIO_SYNC_DEVICE_CALLBACK_URL")
                 .map(str::to_string)
                 .unwrap_or_else(|| {
@@ -254,9 +256,10 @@ impl CloudClient {
         pending: PendingOAuth,
     ) -> Result<(), CloudError> {
         let url = Url::parse(callback).map_err(|_| CloudError::OAuth)?;
-        if url.scheme() != "mybrewfolio-sync"
-            || url.host_str() != Some("oauth")
-            || url.path() != "/callback"
+        let redirect_uri = Url::parse(&self.config.redirect_uri).map_err(|_| CloudError::OAuth)?;
+        if url.scheme() != redirect_uri.scheme()
+            || url.host_str() != redirect_uri.host_str()
+            || url.path() != redirect_uri.path()
         {
             return Err(CloudError::OAuth);
         }
