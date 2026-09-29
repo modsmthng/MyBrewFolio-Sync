@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
-use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use super::serve_control_multi;
+use super::{
+    daemon_error, first_sync_notice_due, should_log_sync_error, sync_attempt_message,
+    sync_issue_message, MachineManager, MachineSyncError, SyncEngine,
+    FIRST_SYNCHRONIZATION_MESSAGE,
+};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 
 async fn run_scheduled_machine(manager: Arc<MachineManager>, id: String, engine: Arc<SyncEngine>) {
@@ -203,7 +214,11 @@ pub(super) async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{retain_active_workers, MachineWorkers};
+    use std::{
+        collections::{HashMap, HashSet},
+        time::Duration,
+    };
 
     #[tokio::test]
     async fn removed_machine_workers_are_aborted_without_stopping_other_machines() {

@@ -1,7 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
-use std::collections::{HashMap, HashSet};
+use super::{
+    autostart::{autostart_status, update_autostart_tray_item},
+    emit_status,
+    updates::run_update_check,
+    StartupDiagnostics, UpdateRestartState,
+};
+use crate::{engine::SyncEngine, machines::MachineManager, store::AppStore};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
+use tauri::Manager;
 use tokio::task::JoinHandle;
 
 struct MachineWorkers {
@@ -186,7 +197,11 @@ pub(super) fn start_background_services(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{retain_active_workers, MachineWorkers};
+    use std::{
+        collections::{HashMap, HashSet},
+        time::Duration,
+    };
 
     #[tokio::test]
     async fn removed_machine_workers_are_aborted_without_stopping_other_machines() {

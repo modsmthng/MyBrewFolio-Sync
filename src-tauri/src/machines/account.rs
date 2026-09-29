@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
-use std::collections::HashSet;
+use super::{MachineManager, MachineRecord};
+use crate::engine::SyncEngine;
+use serde_json::Value;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::Ordering, Arc},
+};
+use tokio::sync::Mutex;
 
 impl MachineManager {
     pub async fn after_account_connected(&self) -> Result<(), String> {

@@ -11,7 +11,8 @@ use tokio::{
     net::TcpListener,
 };
 
-use super::{CloudClient, CloudConfig, CloudError, CredentialStore, OAuthTokens};
+use super::{CloudClient, CloudConfig, CloudError, CredentialStore};
+use crate::model::OAuthTokens;
 use crate::{
     model::{SyncProgress, SyncProgressPhase},
     store::StoreError,

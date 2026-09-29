@@ -6,9 +6,13 @@ mod runtime;
 mod tests;
 mod updates;
 
-use autostart::*;
-use runtime::*;
-use updates::*;
+use autostart::{autostart_status, set_autostart, update_autostart_tray_item, windows_version};
+#[cfg(test)]
+use autostart::{autostart_status_from_state, StoreStartupTaskState};
+use runtime::start_background_services;
+use updates::store_managed_updates;
+#[cfg(test)]
+use updates::{is_store_managed_build, restart_schedule, update_check_required, update_due};
 
 use std::{
     fs::{self, OpenOptions},
@@ -18,7 +22,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
 };
 
 use crate::{
@@ -35,7 +38,6 @@ use tauri::{
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::UpdaterExt;
 
 pub(crate) struct TrayStatusItem(MenuItem<tauri::Wry>);
 pub(crate) struct TrayMachineItem(MenuItem<tauri::Wry>);
@@ -832,8 +834,8 @@ fn build_application(launch_in_background: bool) -> tauri::App {
             remove_machine,
             get_hide_app_icon,
             set_hide_app_icon,
-            get_autostart_status,
-            set_autostart_enabled,
+            autostart::get_autostart_status,
+            autostart::set_autostart_enabled,
             begin_oauth,
             complete_oauth,
             sync_now,
@@ -850,11 +852,11 @@ fn build_application(launch_in_background: bool) -> tauri::App {
             apply_complete_resync,
             disconnect_account,
             open_mybrewfolio_page,
-            get_update_status,
-            check_update,
-            dismiss_update,
-            install_update,
-            restart_after_update,
+            updates::get_update_status,
+            updates::check_update,
+            updates::dismiss_update,
+            updates::install_update,
+            updates::restart_after_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while running MyBrewFolio Sync")

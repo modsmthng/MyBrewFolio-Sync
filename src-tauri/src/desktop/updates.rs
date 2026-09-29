@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
+use super::{
+    show_main_window, RestartSchedule, UpdateRestartState, UpdateStatus, UPDATE_AVAILABLE_VERSION,
+    UPDATE_CHECK_FAILED_MESSAGE, UPDATE_CHECK_INTERVAL_HOURS, UPDATE_INSTALL_FAILED_MESSAGE,
+    UPDATE_LAST_CHECK_AT, UPDATE_LAST_PROMPT_AT, UPDATE_PROMPT_PENDING, UPDATE_RESTART_VERSION,
+};
+use crate::{engine::SyncEngine, store::AppStore};
+use std::sync::{atomic::Ordering, Arc};
+use tauri::{Emitter, State};
+use tauri_plugin_updater::UpdaterExt;
 
 pub(super) fn stored_update_status(
     store: &AppStore,

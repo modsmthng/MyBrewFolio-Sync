@@ -2,13 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use chrono::Utc;
-use rand::{rngs::OsRng, RngCore};
-use reqwest::{header::AUTHORIZATION, redirect::Policy, RequestBuilder, Response, StatusCode};
+use reqwest::{redirect::Policy, RequestBuilder, Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::Mutex;
 use url::Url;
@@ -17,7 +13,7 @@ mod auth;
 
 use crate::{
     credentials::CredentialStore,
-    model::{DeviceRegistration, OAuthTokens, SyncObject, SyncProgress},
+    model::{DeviceRegistration, SyncObject, SyncProgress},
 };
 
 #[derive(Debug, Error)]

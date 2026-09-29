@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use super::*;
+use super::{updates::store_managed_updates, TrayAutostartItem};
+use serde::Serialize;
+use tauri::Manager;
+use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 
 #[cfg(target_os = "windows")]
 pub(super) const STORE_STARTUP_TASK_ID: &str = "MyBrewFolioSyncStartup";
