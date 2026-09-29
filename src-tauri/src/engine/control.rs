@@ -157,44 +157,7 @@ impl SyncEngine {
             );
         }
         if kind == "notes_prepare" {
-            if payload["afterInitialSync"].as_bool() == Some(true) {
-                // The background first sync may already hold the machine lock while it uploads a
-                // long history. Wait for it instead of failing the server-owned setup action.
-                let mut synchronized = false;
-                for _ in 0..900 {
-                    if self.status().await.last_sync_at.is_some() {
-                        synchronized = true;
-                        break;
-                    }
-                    match self.sync_with_retries().await {
-                        Err(EngineError::Busy) => {
-                            tokio::time::sleep(StdDuration::from_secs(1)).await
-                        }
-                        Ok(()) => {
-                            synchronized = true;
-                            break;
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                if !synchronized {
-                    return Err(EngineError::Busy);
-                }
-                let device_id = self.device_id()?;
-                let backup = self
-                    .cloud
-                    .create_notes_activation_from_import(&device_id)
-                    .await?;
-                self.dismiss_notes_sync_intro().await?;
-                return Ok(json!({"backupId":backup["backup"]["id"], "reviewOperationId":id}));
-            }
-            let preview = self
-                .prepare_headless_notes_activation()
-                .await
-                .map_err(|_| CloudError::Rejected)?;
-            return Ok(
-                json!({"backupId":preview["backupId"],"alreadyEnabled":preview["alreadyEnabled"]}),
-            );
+            return self.prepare_control_notes(id, payload).await;
         }
         let _sync = self.sync_lock.lock().await;
         let _machine = self.profile_store_lock.lock().await;
@@ -229,43 +192,84 @@ impl SyncEngine {
             }
             "notes_restore" => self.restore_control_notes(id, token, payload).await,
             "resync_preview" => self.resync_preview().await,
-            "resync_apply" => {
-                // Refresh machine inventory before accepting an older user-reviewed selection.
-                let current = self.resync_preview().await?;
-                let ids = current["restoreItems"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                if payload["restoreItemIds"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|id| !ids.iter().any(|item| item["id"] == *id))
-                {
-                    return Err(CloudError::Rejected.into());
-                }
-                let duplicates = current["duplicates"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                if payload["duplicateResolutions"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|choice| {
-                        !duplicates.iter().any(|item| {
-                            item["mapping_id"] == choice["mappingId"]
-                                && item["keep_shot_id"] == choice["keepShotId"]
-                                && item["remove_shot_id"] == choice["removeShotId"]
-                        })
-                    })
-                {
-                    return Err(CloudError::Rejected.into());
-                }
-                self.apply_resync(payload.clone()).await
-            }
+            "resync_apply" => self.apply_control_resync(payload).await,
             _ => Err(CloudError::Rejected.into()),
         }
+    }
+
+    async fn prepare_control_notes(&self, id: &str, payload: &Value) -> Result<Value, EngineError> {
+        if payload["afterInitialSync"].as_bool() != Some(true) {
+            let preview = self
+                .prepare_headless_notes_activation()
+                .await
+                .map_err(|_| CloudError::Rejected)?;
+            return Ok(
+                json!({"backupId":preview["backupId"],"alreadyEnabled":preview["alreadyEnabled"]}),
+            );
+        }
+        // The background first sync may already hold the machine lock while it uploads a
+        // long history. Wait for it instead of failing the server-owned setup action.
+        let mut synchronized = false;
+        for _ in 0..900 {
+            if self.status().await.last_sync_at.is_some() {
+                synchronized = true;
+                break;
+            }
+            match self.sync_with_retries().await {
+                Err(EngineError::Busy) => tokio::time::sleep(StdDuration::from_secs(1)).await,
+                Ok(()) => {
+                    synchronized = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !synchronized {
+            return Err(EngineError::Busy);
+        }
+        let device_id = self.device_id()?;
+        let backup = self
+            .cloud
+            .create_notes_activation_from_import(&device_id)
+            .await?;
+        self.dismiss_notes_sync_intro().await?;
+        Ok(json!({"backupId":backup["backup"]["id"], "reviewOperationId":id}))
+    }
+
+    async fn apply_control_resync(&self, payload: &Value) -> Result<Value, EngineError> {
+        // Refresh machine inventory before accepting an older user-reviewed selection.
+        let current = self.resync_preview().await?;
+        let ids = current["restoreItems"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if payload["restoreItemIds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|id| !ids.iter().any(|item| item["id"] == *id))
+        {
+            return Err(CloudError::Rejected.into());
+        }
+        let duplicates = current["duplicates"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        if payload["duplicateResolutions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|choice| {
+                !duplicates.iter().any(|item| {
+                    item["mapping_id"] == choice["mappingId"]
+                        && item["keep_shot_id"] == choice["keepShotId"]
+                        && item["remove_shot_id"] == choice["removeShotId"]
+                })
+            })
+        {
+            return Err(CloudError::Rejected.into());
+        }
+        self.apply_resync(payload.clone()).await
     }
 
     async fn restore_control_notes(

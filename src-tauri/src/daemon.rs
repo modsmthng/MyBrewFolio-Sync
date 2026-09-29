@@ -488,50 +488,11 @@ async fn execute_multi(
             if machine_id.is_some() {
                 return Err("Use the machine ID as an argument to machines".into());
             }
-            match arguments.as_slice() {
-                [action] if action == "list" => {
-                    Ok(json!({"machines": manager.list_account_machines().await?}))
-                }
-                [action, name, host] if action == "add" => {
-                    let id = manager.add_machine(name, host).await?;
-                    Ok(json!({"ok": true, "machineId": id}))
-                }
-                [action, flag, id, host] if action == "add" && flag == "--existing" => {
-                    manager.connect_machine(id, host).await?;
-                    Ok(json!({"ok": true, "machineId": id}))
-                }
-                [action, id, name] if action == "rename" => {
-                    manager.rename_machine(id, name).await?;
-                    Ok(json!({"ok": true, "machineId": id, "name": name}))
-                }
-                [action, id] if action == "remove" => {
-                    manager.remove_machine(id).await?;
-                    Ok(json!({"ok": true, "machineId": id}))
-                }
-                _ => Err("Usage: machines <list|add <name> <host>|add --existing <id> <host>|rename <id> <name>|remove <id>>".into()),
-            }
+            execute_machine_command(manager, &arguments).await
         }
         "auth" => execute_auth_multi(manager, arguments.into_iter()).await,
         "disconnect" => manager.disconnect_all().await,
-        "sync-once" if machine_id.is_none() => {
-            let outcomes = manager.sync_all().await;
-            let failed: Vec<_> = outcomes
-                .into_iter()
-                .filter_map(|(id, result)| {
-                    result
-                        .err()
-                        .map(|error| json!({"machineId": id, "error": error}))
-                })
-                .collect();
-            if failed.is_empty() {
-                Ok(json!({"ok": true}))
-            } else {
-                Err(format!(
-                    "One or more machines could not synchronize: {}",
-                    Value::Array(failed)
-                ))
-            }
-        }
+        "sync-once" if machine_id.is_none() => sync_all_machines(manager).await,
         "sync-once" => {
             manager.sync_selected(machine_id.as_deref()).await?;
             Ok(json!({"ok": true}))
@@ -542,6 +503,55 @@ async fn execute_multi(
             let engine = manager.selected_engine(machine_id.as_deref()).await?;
             execute(&engine, command, arguments).await
         }
+    }
+}
+
+async fn execute_machine_command(
+    manager: &Arc<MachineManager>,
+    arguments: &[String],
+) -> Result<Value, String> {
+    match arguments {
+        [action] if action == "list" => {
+            Ok(json!({"machines": manager.list_account_machines().await?}))
+        }
+        [action, name, host] if action == "add" => {
+            let id = manager.add_machine(name, host).await?;
+            Ok(json!({"ok": true, "machineId": id}))
+        }
+        [action, flag, id, host] if action == "add" && flag == "--existing" => {
+            manager.connect_machine(id, host).await?;
+            Ok(json!({"ok": true, "machineId": id}))
+        }
+        [action, id, name] if action == "rename" => {
+            manager.rename_machine(id, name).await?;
+            Ok(json!({"ok": true, "machineId": id, "name": name}))
+        }
+        [action, id] if action == "remove" => {
+            manager.remove_machine(id).await?;
+            Ok(json!({"ok": true, "machineId": id}))
+        }
+        _ => Err("Usage: machines <list|add <name> <host>|add --existing <id> <host>|rename <id> <name>|remove <id>>".into()),
+    }
+}
+
+async fn sync_all_machines(manager: &Arc<MachineManager>) -> Result<Value, String> {
+    let failed: Vec<_> = manager
+        .sync_all()
+        .await
+        .into_iter()
+        .filter_map(|(id, result)| {
+            result
+                .err()
+                .map(|error| json!({"machineId": id, "error": error}))
+        })
+        .collect();
+    if failed.is_empty() {
+        Ok(json!({"ok": true}))
+    } else {
+        Err(format!(
+            "One or more machines could not synchronize: {}",
+            Value::Array(failed)
+        ))
     }
 }
 

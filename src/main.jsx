@@ -168,11 +168,15 @@ export function Setup({ status, refresh, externalNotice }) {
   const [machineName, setMachineName] = useState(status.machineName || 'GaggiMate');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
-  const reconnectMessage = status.lastErrorCode === 'SYNC_REAUTH_REQUIRED'
-    ? 'Your MyBrewFolio connection needs to be renewed. Sign in again to resume syncing.'
-    : status.lastErrorCode === 'SYNC_DEVICE_REVOKED'
-      ? 'This Sync installation was disconnected in MyBrewFolio. Sign in again to reconnect it.'
-      : '';
+  let reconnectMessage = '';
+  if (status.lastErrorCode === 'SYNC_REAUTH_REQUIRED') {
+    reconnectMessage = 'Your MyBrewFolio connection needs to be renewed. Sign in again to resume syncing.';
+  } else if (status.lastErrorCode === 'SYNC_DEVICE_REVOKED') {
+    reconnectMessage = 'This Sync installation was disconnected in MyBrewFolio. Sign in again to reconnect it.';
+  }
+  let connectLabel = 'Connect MyBrewFolio';
+  if (busy) connectLabel = 'Opening browser…';
+  else if (reconnectMessage) connectLabel = 'Sign in again';
 
   const connect = async () => {
     const cleanName = machineName.trim();
@@ -218,7 +222,7 @@ export function Setup({ status, refresh, externalNotice }) {
         <input value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" />
       </label> : null}
       {!reconnectMessage ? <label className="field setup-machine-name"><span>Machine name in MyBrewFolio</span><input value={machineName} onInput={event => setMachineName(event.currentTarget.value)} aria-label="Machine name in MyBrewFolio" /></label> : null}
-      <button type="button" className="primary" disabled={busy} onClick={connect}>{busy ? 'Opening browser…' : reconnectMessage ? 'Sign in again' : 'Connect MyBrewFolio'}</button>
+      <button type="button" className="primary" disabled={busy} onClick={connect}>{connectLabel}</button>
       {message ? <p className="message" aria-live="polite">{message}</p> : null}
       {!message && externalNotice ? (
         <div className="message disconnect-notice" aria-live="polite">
@@ -333,6 +337,9 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
     }
   };
 
+  let addButtonLabel = mode === 'new' ? 'Create machine' : 'Connect machine';
+  if (busy) addButtonLabel = 'Connecting…';
+
   return (
     <section className="card settings machine-manager" aria-label="Machines">
       <div className="machine-manager-title">
@@ -344,10 +351,19 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
           {machines.map(machine => {
             const id = machineIdOf(machine);
             const machineHasError = Boolean(dashboardEngineError(machine));
+            let machineState = 'Connected';
+            let machineStateClass = 'ok';
+            if (machine.syncing) {
+              machineState = 'Syncing';
+              machineStateClass = 'working';
+            } else if (machineHasError || machine.machineReachable === false) {
+              machineState = machineHasError ? 'Needs attention' : 'Offline';
+              machineStateClass = 'error';
+            }
             return (
               <button type="button" key={id} className={`machine-choice ${selectedId === id ? 'selected' : ''}`} aria-pressed={selectedId === id} onClick={() => onSelectMachine(id)}>
                 <span><strong>{machine.name || 'GaggiMate'}</strong><small>{machine.machineHost || 'Address not set'}</small></span>
-                <span className={`machine-state ${machine.syncing ? 'working' : machineHasError || machine.machineReachable === false ? 'error' : 'ok'}`}>{machine.syncing ? 'Syncing' : machineHasError ? 'Needs attention' : machine.machineReachable === false ? 'Offline' : 'Connected'}</span>
+                <span className={`machine-state ${machineStateClass}`}>{machineState}</span>
               </button>
             );
           })}
@@ -376,7 +392,7 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
             <label className="field"><span>Machine in your account</span><select aria-label="Existing machine" value={existingId} onChange={event => setExistingId(event.currentTarget.value)}><option value="">Choose a machine</option>{available.map(machine => <option key={machineIdOf(machine)} value={machineIdOf(machine)}>{machine.name}</option>)}</select>{!available.length ? <small>No other machines are available in this account.</small> : null}</label>
           )}
           <label className="field"><span>GaggiMate hostname or local IP</span><input aria-label="New machine address" value={host} onInput={event => setHost(event.currentTarget.value)} placeholder="gaggimate.local" /></label>
-          <div className="button-row"><button type="button" className="secondary compact-button" disabled={busy} onClick={() => setAdding(false)}>Cancel</button><button type="button" className="primary compact-button" disabled={busy} onClick={addMachine}>{busy ? 'Connecting…' : mode === 'new' ? 'Create machine' : 'Connect machine'}</button></div>
+          <div className="button-row"><button type="button" className="secondary compact-button" disabled={busy} onClick={() => setAdding(false)}>Cancel</button><button type="button" className="primary compact-button" disabled={busy} onClick={addMachine}>{addButtonLabel}</button></div>
           <p className="muted">The local address stays on this computer.</p>
         </div>
       ) : null}

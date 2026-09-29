@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{
     cloud::CloudError,
     local::{GaggiMateClient, LocalError},
-    model::{AppStatus, SyncObject, SyncProgress, SyncProgressPhase},
+    model::{AppStatus, IndexEntry, SyncObject, SyncProgress, SyncProgressPhase},
 };
 
 use super::schedule::UnreachableErrorState;
@@ -21,6 +21,12 @@ use super::{
     NOTES_WRITE_ATTEMPTS, NOTES_WRITE_RETRY_DELAYS, TWO_WAY_NOTES_PROTOCOL_ANNOUNCED_SETTING,
     TWO_WAY_NOTES_PROTOCOL_VERSION,
 };
+
+struct NotesScanOptions {
+    full_notes: bool,
+    recent_notes: bool,
+    two_way_notes: bool,
+}
 
 impl SyncEngine {
     pub(super) async fn mark_machine_reachable(&self) {
@@ -94,96 +100,19 @@ impl SyncEngine {
         }
         let mut last_progress_update = Instant::now();
         for (position, entry) in index.into_iter().enumerate() {
-            // IDs can be reused after history maintenance. The timestamp keeps a
-            // later shot from silently replacing an older cloud copy.
-            let source_key = shot_source_key(&entry);
-            if !suppressed.contains(&("shot".into(), source_key.clone())) {
-                let fingerprint = shot_fingerprint(&entry);
-                // v2 deliberately requeues shots once after the original client
-                // used non-canonical JSON hashes that the API could not accept.
-                let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
-                let changed =
-                    self.store.setting(&fingerprint_key)?.as_deref() != Some(&fingerprint);
-                let shot_readable = if changed {
-                    match local.shot(entry.id).await {
-                        Ok(mut shot) => {
-                            self.store
-                                .clear_failure_stage("shot", &source_key, "read")?;
-                            if let Some(object) = shot.as_object_mut() {
-                                object.insert(
-                                    "name".into(),
-                                    Value::String(format!("{} · {}", entry.profile_name, entry.id)),
-                                );
-                                object.insert("rating".into(), serde_json::json!(entry.rating));
-                                object.insert("volume".into(), serde_json::json!(entry.volume));
-                            }
-                            self.store.queue(&SyncObject {
-                                kind: "shot".into(),
-                                source_key: source_key.clone(),
-                                source_hash: hash_value(&shot),
-                                shot_source_key: None,
-                                data: shot,
-                            })?;
-                            self.store.set_setting(&fingerprint_key, &fingerprint)?;
-                            true
-                        }
-                        Err(error) => {
-                            let reason = shot_read_failure(&error);
-                            self.store.record_failure(
-                                None,
-                                "shot",
-                                &source_key,
-                                "read",
-                                &reason,
-                            )?;
-                            skipped.push(format!("Shot {} could not be read: {reason}", entry.id));
-                            false
-                        }
-                    }
-                } else {
-                    true
-                };
-                if shot_readable
-                    && should_refresh_notes(changed, full_notes, recent_notes, position)
-                    && !suppressed.contains(&("notes".into(), source_key.clone()))
-                {
-                    match local.notes(entry.id).await {
-                        Ok(notes) => {
-                            self.store
-                                .clear_failure_stage("notes", &source_key, "read")?;
-                            let notes =
-                                normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
-                            let empty = notes_are_semantically_empty(&notes);
-                            // One-way sync keeps ignoring untouched Notes. The
-                            // Protocol-2 two-way baseline needs every empty Note
-                            // so the API can map Brews that appeared after setup.
-                            if !empty || two_way_notes {
-                                self.store.queue(&SyncObject {
-                                    kind: "notes".into(),
-                                    source_key: source_key.clone(),
-                                    source_hash: hash_value(&notes),
-                                    shot_source_key: Some(source_key.clone()),
-                                    data: notes,
-                                })?;
-                            }
-                        }
-                        Err(error) => {
-                            let reason = error.to_string();
-                            self.store.record_failure(
-                                None,
-                                "notes",
-                                &source_key,
-                                "read",
-                                &reason,
-                            )?;
-                            skipped.push(format!(
-                                "Notes for shot {} could not be read: {reason}",
-                                entry.id
-                            ))
-                        }
-                    }
-                }
-            }
+            self.queue_shot_and_notes(
+                local,
+                &entry,
+                position,
+                &suppressed,
+                NotesScanOptions {
+                    full_notes,
+                    recent_notes,
+                    two_way_notes,
+                },
+                &mut skipped,
+            )
+            .await?;
             let scanned_shots = position + 1;
             if let Some((device_id, publish)) = progress {
                 if scanned_shots == total_shots
@@ -214,6 +143,131 @@ impl SyncEngine {
                 .set_setting("last_full_notes_scan", &now.to_rfc3339())?;
         }
         Ok((skipped, total_shots))
+    }
+
+    async fn queue_shot_and_notes(
+        &self,
+        local: &GaggiMateClient,
+        entry: &IndexEntry,
+        position: usize,
+        suppressed: &HashSet<(String, String)>,
+        notes_options: NotesScanOptions,
+        skipped: &mut Vec<String>,
+    ) -> Result<(), EngineError> {
+        // IDs can be reused after history maintenance. The timestamp keeps a
+        // later shot from silently replacing an older cloud copy.
+        let source_key = shot_source_key(entry);
+        if suppressed.contains(&("shot".into(), source_key.clone())) {
+            return Ok(());
+        }
+        let Some(changed) = self
+            .queue_shot_read(local, entry, &source_key, skipped)
+            .await?
+        else {
+            return Ok(());
+        };
+        if should_refresh_notes(
+            changed,
+            notes_options.full_notes,
+            notes_options.recent_notes,
+            position,
+        ) && !suppressed.contains(&("notes".into(), source_key.clone()))
+        {
+            self.queue_notes_read(
+                local,
+                entry.id,
+                &source_key,
+                notes_options.two_way_notes,
+                skipped,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn queue_shot_read(
+        &self,
+        local: &GaggiMateClient,
+        entry: &IndexEntry,
+        source_key: &str,
+        skipped: &mut Vec<String>,
+    ) -> Result<Option<bool>, EngineError> {
+        let fingerprint = shot_fingerprint(entry);
+        // v2 deliberately requeues shots once after the original client
+        // used non-canonical JSON hashes that the API could not accept.
+        let fingerprint_key = format!("shot_fingerprint_v2:{source_key}");
+        let changed = self.store.setting(&fingerprint_key)?.as_deref() != Some(&fingerprint);
+        if !changed {
+            return Ok(Some(false));
+        }
+        match local.shot(entry.id).await {
+            Ok(mut shot) => {
+                self.store.clear_failure_stage("shot", source_key, "read")?;
+                if let Some(object) = shot.as_object_mut() {
+                    object.insert(
+                        "name".into(),
+                        Value::String(format!("{} · {}", entry.profile_name, entry.id)),
+                    );
+                    object.insert("rating".into(), serde_json::json!(entry.rating));
+                    object.insert("volume".into(), serde_json::json!(entry.volume));
+                }
+                self.store.queue(&SyncObject {
+                    kind: "shot".into(),
+                    source_key: source_key.into(),
+                    source_hash: hash_value(&shot),
+                    shot_source_key: None,
+                    data: shot,
+                })?;
+                self.store.set_setting(&fingerprint_key, &fingerprint)?;
+                Ok(Some(true))
+            }
+            Err(error) => {
+                let reason = shot_read_failure(&error);
+                self.store
+                    .record_failure(None, "shot", source_key, "read", &reason)?;
+                skipped.push(format!("Shot {} could not be read: {reason}", entry.id));
+                Ok(None)
+            }
+        }
+    }
+
+    async fn queue_notes_read(
+        &self,
+        local: &GaggiMateClient,
+        shot_id: u32,
+        source_key: &str,
+        two_way_notes: bool,
+        skipped: &mut Vec<String>,
+    ) -> Result<(), EngineError> {
+        match local.notes(shot_id).await {
+            Ok(notes) => {
+                self.store
+                    .clear_failure_stage("notes", source_key, "read")?;
+                let notes = normalized_notes(notes.unwrap_or_else(|| serde_json::json!({})));
+                let empty = notes_are_semantically_empty(&notes);
+                // One-way sync keeps ignoring untouched Notes. The Protocol-2
+                // two-way baseline needs every empty Note so the API can map
+                // Brews that appeared after setup.
+                if !empty || two_way_notes {
+                    self.store.queue(&SyncObject {
+                        kind: "notes".into(),
+                        source_key: source_key.into(),
+                        source_hash: hash_value(&notes),
+                        shot_source_key: Some(source_key.into()),
+                        data: notes,
+                    })?;
+                }
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                self.store
+                    .record_failure(None, "notes", source_key, "read", &reason)?;
+                skipped.push(format!(
+                    "Notes for shot {shot_id} could not be read: {reason}"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(super) async fn queue_due_profiles(
