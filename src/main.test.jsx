@@ -185,6 +185,7 @@ describe('dashboard decisions', () => {
 describe('Sync interface', () => {
   it('switches machine details and scopes sync, address and web settings to the selected machine', async () => {
     render(<Dashboard status={multiMachineStatus} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    expect(screen.getByRole('group', { name: 'Connected machines' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: /Office office.local/ }));
     expect(screen.getByText('4')).toBeTruthy();
     expect(screen.getByRole('textbox', { name: 'GaggiMate hostname or local IP' }).value).toBe('office.local');
@@ -209,12 +210,13 @@ describe('Sync interface', () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
     render(<Dashboard status={multiMachineStatus} refresh={refresh} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
     fireEvent.click(screen.getByRole('button', { name: 'Add machine' }));
+    expect(screen.getByRole('group', { name: 'Machine type' })).toBeTruthy();
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('list_account_machines'));
     fireEvent.input(screen.getByRole('textbox', { name: 'New machine name' }), { target: { value: '  Patio  ' } });
     fireEvent.input(screen.getByRole('textbox', { name: 'New machine address' }), { target: { value: 'patio.local' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create machine' }));
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('add_machine', { name: 'Patio', host: 'patio.local' }));
-    await vi.waitFor(() => expect(screen.getByText('Machine added.')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByRole('status').textContent).toBe('Machine added.'));
     fireEvent.click(screen.getByRole('button', { name: 'Add machine' }));
     fireEvent.click(screen.getByRole('radio', { name: 'Existing machine' }));
     await vi.waitFor(() => expect(screen.getByRole('option', { name: 'Garage' })).toBeTruthy());

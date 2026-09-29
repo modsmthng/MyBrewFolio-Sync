@@ -33,7 +33,7 @@ pub struct KeyringCredentialStore;
 
 #[cfg(feature = "desktop")]
 impl KeyringCredentialStore {
-    const SERVICE: &'static str = if cfg!(debug_assertions) {
+    const SERVICE: &str = if cfg!(debug_assertions) {
         "com.mybrewfolio.sync.dev"
     } else {
         "com.mybrewfolio.sync"

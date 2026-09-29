@@ -347,7 +347,8 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
         <button type="button" className="secondary compact-button" disabled={disabled || busy} onClick={openAdd}>Add machine</button>
       </div>
       {machines.length ? (
-        <div className="machine-list" role="group" aria-label="Connected machines">
+        <fieldset className="machine-list">
+          <legend className="visually-hidden">Connected machines</legend>
           {machines.map(machine => {
             const id = machineIdOf(machine);
             const machineHasError = Boolean(dashboardEngineError(machine));
@@ -367,7 +368,7 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
               </button>
             );
           })}
-        </div>
+        </fieldset>
       ) : <p className="muted">No machine is connected to this installation yet.</p>}
       {selectedMachine ? (
         <div className="machine-edit">
@@ -384,10 +385,11 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
       {adding ? (
         <div className="machine-add-form">
           <h3>Add a machine</h3>
-          <div className="machine-add-modes" role="group" aria-label="Machine type">
+          <fieldset className="machine-add-modes">
+            <legend className="visually-hidden">Machine type</legend>
             <label><input type="radio" name="machine-mode" checked={mode === 'new'} onChange={() => setMode('new')} /> New machine</label>
             <label><input type="radio" name="machine-mode" checked={mode === 'existing'} onChange={() => setMode('existing')} /> Existing machine</label>
-          </div>
+          </fieldset>
           {mode === 'new' ? <label className="field"><span>Name in MyBrewFolio</span><input aria-label="New machine name" value={name} onInput={event => setName(event.currentTarget.value)} placeholder="Kitchen GaggiMate" /></label> : (
             <label className="field"><span>Machine in your account</span><select aria-label="Existing machine" value={existingId} onChange={event => setExistingId(event.currentTarget.value)}><option value="">Choose a machine</option>{available.map(machine => <option key={machineIdOf(machine)} value={machineIdOf(machine)}>{machine.name}</option>)}</select>{!available.length ? <small>No other machines are available in this account.</small> : null}</label>
           )}
@@ -396,7 +398,7 @@ export function MachineManager({ machines, selectedMachineId, onSelectMachine, r
           <p className="muted">The local address stays on this computer.</p>
         </div>
       ) : null}
-      {notice ? <p className="message" role="status">{notice}</p> : null}
+      {notice ? <output className="message">{notice}</output> : null}
     </section>
   );
 }
@@ -406,7 +408,10 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   const [selectedMachineId, setSelectedMachineId] = useState(machineIdOf(machines?.[0]));
   const selectedMachine = machines?.find(machine => machineIdOf(machine) === selectedMachineId) || machines?.[0];
   const machineId = machineIdOf(selectedMachine);
-  const machineStatus = selectedMachine ? { ...status, ...selectedMachine, connected: true } : machines ? null : status;
+  let machineStatus = status;
+  if (machines) {
+    machineStatus = selectedMachine ? { ...status, ...selectedMachine, connected: true } : null;
+  }
   const hasMachine = Boolean(machineStatus);
   const [autostart, setAutostart] = useState(true);
   const [autostartStatus, setAutostartStatus] = useState({
@@ -684,6 +689,125 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   );
 }
 
+function LocalConnectionCard({ status, host, setHost, saveHost, busy }) {
+  return (
+    <section className="card settings">
+      <h3>Local connection</h3>
+      <div className="inline-field"><input aria-label="GaggiMate hostname or local IP" value={host} onInput={event => setHost(event.currentTarget.value)} /><button type="button" onClick={saveHost} disabled={busy}>Save</button></div>
+      <p className="muted">The machine address stays on this computer.</p>
+      {status.issues?.length ? <p className="muted">{status.issues.length} local items need attention. Review and retry them in MyBrewFolio.</p> : null}
+    </section>
+  );
+}
+
+function MachineDashboardCards({ status, hasMachine, selectedMachineId, busy, activeSyncActivity, syncNow, host, setHost, saveHost }) {
+  if (!hasMachine) return null;
+  const hasSuccessfulSync = Boolean(status.lastSyncAt && Number.isFinite(new Date(status.lastSyncAt).getTime()));
+  const awaitingFirstSyncSetup = !status.initialSyncConfigured && !hasSuccessfulSync;
+  return (
+    <>
+      {awaitingFirstSyncSetup ? (
+        <section className="card first-sync" aria-label="First sync setup">
+          <h2>First Sync</h2>
+          <p className="muted">Open Sync settings on MyBrewFolio for your first sync. Choose your Sync preferences and start importing your GaggiMate library.</p>
+          <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary" aria-label="Open Sync settings for first sync">Open Sync settings</ExternalLink>
+        </section>
+      ) : (
+        <>
+          <section className="overview card">
+            <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
+            <button type="button" className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
+              <ActionLabel active={activeSyncActivity === 'sync'} activeText="Syncing…">Sync now</ActionLabel>
+            </button>
+          </section>
+          <section className="counts">
+            <article className="card"><strong>{status.shots}</strong><span>Shots</span></article>
+            <article className="card"><strong>{status.profiles}</strong><span>Profiles</span></article>
+            <article className="card"><strong>{status.notes}</strong><span>Notes</span></article>
+          </section>
+          <section className="card settings">
+            <h3>Manage Sync in MyBrewFolio</h3>
+            <p className="muted">Manage matching preferences, Notes, backups, conflicts and complete resync in your account.</p>
+            <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary">Open Sync settings</ExternalLink>
+          </section>
+        </>
+      )}
+      <LocalConnectionCard status={status} host={host} setHost={setHost} saveHost={saveHost} busy={busy} />
+    </>
+  );
+}
+
+function BackgroundAppSettings({ autostart, autostartStatus, hideAppIcon, toggleAutostart, toggleAppIcon, busy }) {
+  return (
+    <section className="card settings background-app-settings">
+      <h3>Background app</h3>
+      <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy || autostartStatus.requiresWindowsSettings || autostartStatus.blockedByPolicy} /><span>Start Sync with this computer</span></label>
+      {autostartStatus.migrationAvailable ? (
+        <p className="muted app-visibility-help">Windows needs a one-time confirmation to keep your existing startup choice. Turn this on and accept the Windows prompt.</p>
+      ) : null}
+      {autostartStatus.requiresWindowsSettings ? (
+        <p className="muted app-visibility-help">Windows has disabled startup for Sync. Re-enable it in Settings &gt; Apps &gt; Startup.</p>
+      ) : null}
+      {autostartStatus.blockedByPolicy ? (
+        <p className="muted app-visibility-help">Startup for Sync is disabled by Windows or your organization.</p>
+      ) : null}
+      <label className="toggle"><input type="checkbox" checked={hideAppIcon} onChange={toggleAppIcon} disabled={busy} /><span>Hide app icon from Dock or taskbar</span></label>
+      <p className="muted app-visibility-help">The menu bar or tray icon stays available so you can reopen Sync at any time.</p>
+    </section>
+  );
+}
+
+function AccountSettings({ confirmDisconnect, setConfirmDisconnect, disconnect, busy }) {
+  return (
+    <section className="card account-action">
+      <h3>Account</h3>
+      <p className="muted">This installation is connected to your private MyBrewFolio library.</p>
+      {confirmDisconnect ? (
+        <div className="disconnect-confirm" role="alertdialog" aria-labelledby="disconnect-title">
+          <strong id="disconnect-title">Disconnect this computer?</strong>
+          <div>
+            <button type="button" className="secondary compact-button" disabled={busy} onClick={() => setConfirmDisconnect(false)}>Cancel</button>
+            <button type="button" className="primary compact-button" disabled={busy} onClick={disconnect}>Disconnect</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
+      )}
+    </section>
+  );
+}
+
+function UpdateDialogs({ showUpdateDialog, updateStatus, busy, laterUpdate, installUpdate, restartAfterUpdate }) {
+  if (!showUpdateDialog) return null;
+  if (updateStatus.kind === 'available') {
+    return (
+      <section className="card modal-card" role="alertdialog" aria-labelledby="update-available-title">
+        <div className="modal-title-row"><h2 id="update-available-title">Update available</h2></div>
+        <p>MyBrewFolio Sync {updateStatus.version} is ready to install.</p>
+        <div className="dialog-actions">
+          <button type="button" className="secondary compact-button" disabled={busy} onClick={laterUpdate}>Later</button>
+          <button type="button" className="primary compact-button" disabled={busy} onClick={installUpdate}>Install update</button>
+        </div>
+      </section>
+    );
+  }
+  if (updateStatus.kind === 'installed') {
+    return (
+      <section className="card modal-card" role="alertdialog" aria-labelledby="update-installed-title">
+        <div className="modal-title-row"><h2 id="update-installed-title">Update installed</h2></div>
+        <p>MyBrewFolio Sync {updateStatus.version} is installed. Restart Sync to use the new version.</p>
+        {updateStatus.restartWaitingForSync ? <p className="muted">Restarting after the current synchronization finishes.</p> : null}
+        <div className="dialog-actions">
+          <button type="button" className="primary compact-button" onClick={restartAfterUpdate}>
+            {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
+          </button>
+        </div>
+      </section>
+    );
+  }
+  return null;
+}
+
 function DashboardContent({
   status, hasMachine, machines, selectedMachineId, onSelectMachine, refresh,
   visibleStatusMessage, visibleStatusTone, busy, activeSyncActivity, syncNow,
@@ -692,8 +816,6 @@ function DashboardContent({
   toggleAutostart, toggleAppIcon, confirmDisconnect, setConfirmDisconnect,
   disconnect, laterUpdate, installUpdate,
 }) {
-  const hasSuccessfulSync = Boolean(status.lastSyncAt && Number.isFinite(new Date(status.lastSyncAt).getTime()));
-  const awaitingFirstSyncSetup = !status.initialSyncConfigured && !hasSuccessfulSync;
   return (
     <main className="shell">
       <header className="brand-row dashboard-header">
@@ -706,101 +828,12 @@ function DashboardContent({
         </output>
       ) : null}
       {machines ? <MachineManager machines={machines} selectedMachineId={selectedMachineId} onSelectMachine={onSelectMachine} refresh={refresh} disabled={busy} /> : null}
-      {hasMachine ? <>
-      {awaitingFirstSyncSetup ? (
-        <section className="card first-sync" aria-label="First sync setup">
-          <h2>First Sync</h2>
-          <p className="muted">Open Sync settings on MyBrewFolio for your first sync. Choose your Sync preferences and start importing your GaggiMate library.</p>
-          <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary" aria-label="Open Sync settings for first sync">Open Sync settings</ExternalLink>
-        </section>
-      ) : null}
-      {!awaitingFirstSyncSetup ? <>
-      <section className="overview card">
-        <div><small>Last successful sync</small><strong>{formatDate(status.lastSyncAt)}</strong></div>
-        <button type="button" className="primary compact-button" disabled={busy || status.syncing} onClick={syncNow}>
-          <ActionLabel active={activeSyncActivity === 'sync'} activeText="Syncing…">Sync now</ActionLabel>
-        </button>
-      </section>
-      <section className="counts">
-        <article className="card"><strong>{status.shots}</strong><span>Shots</span></article>
-        <article className="card"><strong>{status.profiles}</strong><span>Profiles</span></article>
-        <article className="card"><strong>{status.notes}</strong><span>Notes</span></article>
-      </section>
-      <section className="card settings">
-        <h3>Manage Sync in MyBrewFolio</h3>
-        <p className="muted">Manage matching preferences, Notes, backups, conflicts and complete resync in your account.</p>
-        <ExternalLink page="accountSync" machineId={selectedMachineId} className="primary">Open Sync settings</ExternalLink>
-      </section>
-      </> : null}
-      <section className="card settings">
-        <h3>Local connection</h3>
-        <div className="inline-field"><input aria-label="GaggiMate hostname or local IP" value={host} onInput={event => setHost(event.currentTarget.value)} /><button type="button" onClick={saveHost} disabled={busy}>Save</button></div>
-        <p className="muted">The machine address stays on this computer.</p>
-        {status.issues?.length ? <p className="muted">{status.issues.length} local items need attention. Review and retry them in MyBrewFolio.</p> : null}
-      </section>
-      </> : null}
+      <MachineDashboardCards status={status} hasMachine={hasMachine} selectedMachineId={selectedMachineId} busy={busy} activeSyncActivity={activeSyncActivity} syncNow={syncNow} host={host} setHost={setHost} saveHost={saveHost} />
       <h2 className="section-title">App settings</h2>
       <UpdateSettings updateStatus={updateStatus} showUpdateDialog={showUpdateDialog} busy={busy} checkForUpdates={checkForUpdates} restartAfterUpdate={restartAfterUpdate} appVersion={appVersion} />
-      <section className="card settings background-app-settings">
-        <h3>Background app</h3>
-        <label className="toggle"><input type="checkbox" checked={autostart} onChange={toggleAutostart} disabled={busy || autostartStatus.requiresWindowsSettings || autostartStatus.blockedByPolicy} /><span>Start Sync with this computer</span></label>
-        {autostartStatus.migrationAvailable ? (
-          <p className="muted app-visibility-help">Windows needs a one-time confirmation to keep your existing startup choice. Turn this on and accept the Windows prompt.</p>
-        ) : null}
-        {autostartStatus.requiresWindowsSettings ? (
-          <p className="muted app-visibility-help">Windows has disabled startup for Sync. Re-enable it in Settings &gt; Apps &gt; Startup.</p>
-        ) : null}
-        {autostartStatus.blockedByPolicy ? (
-          <p className="muted app-visibility-help">Startup for Sync is disabled by Windows or your organization.</p>
-        ) : null}
-        <label className="toggle"><input type="checkbox" checked={hideAppIcon} onChange={toggleAppIcon} disabled={busy} /><span>Hide app icon from Dock or taskbar</span></label>
-        <p className="muted app-visibility-help">The menu bar or tray icon stays available so you can reopen Sync at any time.</p>
-      </section>
-      <section className="card account-action">
-        <h3>Account</h3>
-        <p className="muted">This installation is connected to your private MyBrewFolio library.</p>
-        {confirmDisconnect ? (
-          <div className="disconnect-confirm" role="alertdialog" aria-labelledby="disconnect-title">
-            <strong id="disconnect-title">Disconnect this computer?</strong>
-            <div>
-              <button type="button" className="secondary compact-button" disabled={busy} onClick={() => setConfirmDisconnect(false)}>Cancel</button>
-              <button type="button" className="primary compact-button" disabled={busy} onClick={disconnect}>Disconnect</button>
-            </div>
-          </div>
-        ) : (
-          <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmDisconnect(true)}>Disconnect account</button>
-        )}
-      </section>
-      {showUpdateDialog && updateStatus.kind === 'available' ? (
-        <section className="card modal-card" role="alertdialog" aria-labelledby="update-available-title">
-          <div className="modal-title-row">
-            <h2 id="update-available-title">Update available</h2>
-          </div>
-          <p>MyBrewFolio Sync {updateStatus.version} is ready to install.</p>
-          <div className="dialog-actions">
-            <button type="button" className="secondary compact-button" disabled={busy} onClick={laterUpdate}>Later</button>
-            <button type="button" className="primary compact-button" disabled={busy} onClick={installUpdate}>
-              Install update
-            </button>
-          </div>
-        </section>
-      ) : null}
-      {showUpdateDialog && updateStatus.kind === 'installed' ? (
-        <section className="card modal-card" role="alertdialog" aria-labelledby="update-installed-title">
-          <div className="modal-title-row">
-            <h2 id="update-installed-title">Update installed</h2>
-          </div>
-          <p>MyBrewFolio Sync {updateStatus.version} is installed. Restart Sync to use the new version.</p>
-          {updateStatus.restartWaitingForSync ? (
-            <p className="muted">Restarting after the current synchronization finishes.</p>
-          ) : null}
-          <div className="dialog-actions">
-            <button type="button" className="primary compact-button" onClick={restartAfterUpdate}>
-              {updateStatus.restartRequested ? 'Restart scheduled' : 'Restart Sync'}
-            </button>
-          </div>
-        </section>
-      ) : null}
+      <BackgroundAppSettings autostart={autostart} autostartStatus={autostartStatus} hideAppIcon={hideAppIcon} toggleAutostart={toggleAutostart} toggleAppIcon={toggleAppIcon} busy={busy} />
+      <AccountSettings confirmDisconnect={confirmDisconnect} setConfirmDisconnect={setConfirmDisconnect} disconnect={disconnect} busy={busy} />
+      <UpdateDialogs showUpdateDialog={showUpdateDialog} updateStatus={updateStatus} busy={busy} laterUpdate={laterUpdate} installUpdate={installUpdate} restartAfterUpdate={restartAfterUpdate} />
       <AppFooter />
     </main>
   );
