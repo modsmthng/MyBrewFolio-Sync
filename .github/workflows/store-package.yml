@@ -163,7 +163,7 @@ jobs:
               --target $env:GITHUB_SHA `
               --draft `
               --title $storeTitle `
-              --notes 'Private Microsoft Store submission package. Never publish this draft release.'
+              --notes 'Private Microsoft Store submission package. Sync multiple named GaggiMate machines with one account, with configurable intervals and clearer connection guidance. Never publish this draft release.'
             if ($LASTEXITCODE -ne 0) {
               throw 'Failed to create the private Microsoft Store draft release'
             }

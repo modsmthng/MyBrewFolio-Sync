@@ -118,10 +118,10 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'MyBrewFolio Sync Alpha. Review the generated installers and signatures before publishing this draft.'
+          releaseBody: 'Sync multiple named GaggiMate machines with one account. Includes configurable sync intervals and clearer connection and first-sync guidance.'
           releaseDraft: true
           prerelease: false
-          generateReleaseNotes: true
+          generateReleaseNotes: false
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
           args: ${{ matrix.args }}
