@@ -10,7 +10,33 @@ import './style.css';
 import syncLogo from '../assets/textlogosync.svg';
 
 function SyncLogo({ compact = false }) {
-  return <span className={`mark${compact ? ' compact' : ''}`} role="img" aria-label="MyBrewFolio Sync" style={{ maskImage: `url(${syncLogo})`, WebkitMaskImage: `url(${syncLogo})` }} />;
+  return (
+    <span className={`mark${compact ? ' compact' : ''}`} style={{ maskImage: `url(${syncLogo})`, WebkitMaskImage: `url(${syncLogo})` }}>
+      <img className="visually-hidden" src={syncLogo} alt="MyBrewFolio Sync" />
+    </span>
+  );
+}
+
+function removeListener(unlisten, description) {
+  // Tauri's unlisten callback can return a promise despite its void type.
+  Promise.resolve().then(unlisten).catch(error => {
+    console.error(`Unable to remove ${description}:`, error);
+  });
+}
+
+function registerListener(registration, description) {
+  let active = true;
+  let unlisten;
+  registration.then(stop => {
+    if (active) unlisten = stop;
+    else removeListener(stop, description);
+  }).catch(error => {
+    console.error(`Unable to register ${description}:`, error);
+  });
+  return () => {
+    active = false;
+    if (unlisten) removeListener(unlisten, description);
+  };
 }
 
 export const FIRST_SYNCHRONIZATION_MESSAGE =
@@ -576,8 +602,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
   };
 
   useEffect(() => {
-    let unlisten;
-    listen('update-status-changed', event => {
+    return registerListener(listen('update-status-changed', event => {
       const next = event.payload || { kind: 'unknown' };
       if (next.kind === 'error') {
         showStatusMessage(next.message, 'error');
@@ -585,8 +610,7 @@ export function Dashboard({ status, refresh, onDisconnected, disconnectRequestTo
       }
       setUpdateStatus(next);
       if (next.kind === 'available' && next.promptPending) setShowUpdateDialog(true);
-    }).then(stop => { unlisten = stop; });
-    return () => unlisten?.();
+    }), 'update status listener');
   }, []);
 
   const checkForUpdates = async () => {
@@ -851,17 +875,21 @@ export function App() {
   const [disconnectNotice, setDisconnectNotice] = useState(null);
   const [disconnectRequestToken, setDisconnectRequestToken] = useState(0);
   const refresh = async () => {
-    try { setStatus(await invoke('get_status')); } finally { setLoading(false); }
+    try {
+      setStatus(await invoke('get_status'));
+    } catch (error) {
+      // Keep the last known status; the next poll will retry automatically.
+      console.error('Unable to refresh Sync status:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => {
     invoke('frontend_ready').catch(() => {});
-    refresh();
-    const poll = setInterval(refresh, 1000);
-    let unlistenDeepLink;
-    let unlistenStatus;
-    let unlistenSync;
-    let unlistenDisconnect;
+    const refreshInBackground = () => { void refresh(); };
+    refreshInBackground();
+    const poll = setInterval(refreshInBackground, 1000);
     const handleUrls = urls => {
       // The desktop app's configured redirect URI is validated in Rust. Keep
       // this frontend check scheme agnostic so isolated development bundles
@@ -883,17 +911,23 @@ export function App() {
       }
     };
     getCurrent().then(handleUrls).catch(() => {});
-    onOpenUrl(handleUrls).then(unlisten => { unlistenDeepLink = unlisten; });
-    listen('sync-status-changed', refresh).then(unlisten => { unlistenStatus = unlisten; });
-    listen('sync-requested', () => invoke('sync_now').finally(refresh)).then(unlisten => { unlistenSync = unlisten; });
-    listen('disconnect-confirmation-requested', () => setDisconnectRequestToken(value => value + 1))
-      .then(unlisten => { unlistenDisconnect = unlisten; });
+    const unlistenDeepLink = registerListener(onOpenUrl(handleUrls), 'OAuth deep link listener');
+    const unlistenStatus = registerListener(listen('sync-status-changed', refreshInBackground), 'Sync status listener');
+    const unlistenSync = registerListener(listen('sync-requested', () => {
+      invoke('sync_now').finally(refresh).catch(error => {
+        console.error('Unable to synchronize from the tray:', error);
+      });
+    }), 'tray sync listener');
+    const unlistenDisconnect = registerListener(
+      listen('disconnect-confirmation-requested', () => setDisconnectRequestToken(value => value + 1)),
+      'disconnect confirmation listener',
+    );
     return () => {
       clearInterval(poll);
-      unlistenDeepLink?.();
-      unlistenStatus?.();
-      unlistenSync?.();
-      unlistenDisconnect?.();
+      unlistenDeepLink();
+      unlistenStatus();
+      unlistenSync();
+      unlistenDisconnect();
     };
   }, []);
 

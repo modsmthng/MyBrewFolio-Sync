@@ -70,6 +70,113 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+describe('native events and logo accessibility', () => {
+  let reportError;
+
+  beforeEach(() => {
+    reportError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const defaultInvoke = invoke.getMockImplementation();
+    invoke.mockImplementation((command, ...args) => command === 'get_status'
+      ? Promise.resolve(status)
+      : defaultInvoke(command, ...args));
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(['setup', 'dashboard'])('provides a native image with alt text in %s', mode => {
+    if (mode === 'setup') render(<Setup status={status} refresh={vi.fn()} externalNotice={null} />);
+    else render(<Dashboard status={status} refresh={vi.fn()} onDisconnected={vi.fn()} disconnectRequestToken={0} />);
+    const image = screen.getByRole('img', { name: 'MyBrewFolio Sync' });
+    expect(image.tagName).toBe('IMG');
+    expect(image.getAttribute('src')).toMatch(/textlogosync\.svg$/);
+  });
+
+  it.each([
+    ['deepLink', 'OAuth deep link listener'],
+    ['sync-status-changed', 'Sync status listener'],
+    ['sync-requested', 'tray sync listener'],
+    ['disconnect-confirmation-requested', 'disconnect confirmation listener'],
+    ['update-status-changed', 'update status listener'],
+  ])('handles a rejected %s registration', async (event, description) => {
+    const error = new Error('Native event registration failed');
+    if (event === 'deepLink') onOpenUrl.mockRejectedValue(error);
+    else {
+      const defaultListen = listen.getMockImplementation();
+      listen.mockImplementation((name, callback) => name === event
+        ? Promise.reject(error)
+        : defaultListen(name, callback));
+    }
+    render(<App />);
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith(`Unable to register ${description}:`, error));
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+  });
+
+  it.each([
+    'deepLink', 'sync-status-changed', 'sync-requested',
+    'disconnect-confirmation-requested', 'update-status-changed',
+  ])('removes %s when registration resolves after unmount', async event => {
+    let finishRegistration;
+    const registration = new Promise(resolve => { finishRegistration = resolve; });
+    const stop = vi.fn().mockResolvedValue(undefined);
+    if (event === 'deepLink') onOpenUrl.mockReturnValue(registration);
+    else {
+      const defaultListen = listen.getMockImplementation();
+      listen.mockImplementation((name, callback) => name === event
+        ? registration
+        : defaultListen(name, callback));
+    }
+    const view = render(<App />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy());
+    view.unmount();
+    finishRegistration(stop);
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+  });
+
+  it('handles asynchronous listener cleanup failures', async () => {
+    const error = new Error('Native event removal failed');
+    const stop = vi.fn().mockRejectedValue(error);
+    onOpenUrl.mockResolvedValue(stop);
+    const view = render(<App />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy());
+    view.unmount();
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith('Unable to remove OAuth deep link listener:', error));
+  });
+
+  it('keeps the last status after a failed poll and recovers on the next poll', async () => {
+    const timers = vi.spyOn(globalThis, 'setInterval');
+    render(<App />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy());
+    const poll = timers.mock.calls.find(([, delay]) => delay === 1000)[0];
+    const error = new Error('Status is temporarily unavailable');
+    const defaultInvoke = invoke.getMockImplementation();
+    let failed = true;
+    invoke.mockImplementation((command, ...args) => {
+      if (command !== 'get_status') return defaultInvoke(command, ...args);
+      return failed ? Promise.reject(error) : Promise.resolve({ ...status, connected: false });
+    });
+    poll();
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith('Unable to refresh Sync status:', error));
+    expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy();
+    failed = false;
+    poll();
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Connect MyBrewFolio' })).toBeTruthy());
+  });
+
+  it('handles a failed tray sync and refreshes status afterward', async () => {
+    const error = new Error('Machine is offline');
+    const defaultInvoke = invoke.getMockImplementation();
+    invoke.mockImplementation((command, ...args) => command === 'sync_now'
+      ? Promise.reject(error)
+      : defaultInvoke(command, ...args));
+    render(<App />);
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Sync now' })).toBeTruthy());
+    invoke.mockClear();
+    handlers['sync-requested']();
+    await vi.waitFor(() => expect(reportError).toHaveBeenCalledWith('Unable to synchronize from the tray:', error));
+    expect(invoke).toHaveBeenCalledWith('get_status');
+  });
+});
+
 describe('dashboard decisions', () => {
   it('explains a first synchronization while it is running', () => {
     expect(FIRST_SYNCHRONIZATION_MESSAGE).toBe(
