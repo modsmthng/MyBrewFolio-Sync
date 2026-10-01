@@ -139,18 +139,26 @@ cargo test --locked --lib
 The trust boundary, synchronization behavior, public API contract, and release process are described
 in [docs/architecture.md](docs/architecture.md).
 
-The supplied logo masters live in `assets/`. Rebuild and verify all native, tray, and Microsoft
+The vector-only logo masters live in `assets/`: `textlogosync.svg` for the theme-colored UI,
+`app-icon.svg` for the full Sync application icon, and the isolated portafilter in
+`tray-template.svg` / `tray-color.svg`. Colored exports use `#E07035` and `#FBFBFB`.
+Install the locked Node dependencies with `npm ci` before rebuilding. Rebuild and verify all native, tray, and Microsoft
 Store icon formats reproducibly with:
 
 ```bash
 ./scripts/generate-icons.sh
 ```
 
+The normal build runs `npm run icons:verify` before bundling.
+
 The monochrome `assets/tray-template.svg` is rendered separately to
 `src-tauri/icons/tray-template.png`. macOS treats it as a template image so the menu-bar icon stays
 visible in both Light and Dark appearances. Windows and Linux use the generated, high-contrast
 `src-tauri/icons/tray-color.png`. Microsoft Store listing artwork is kept in
 `assets/microsoft-store/` at the exact requested 72, 150 and 300 pixel sizes.
+MSIX base images, scale variants (100–400%) and taskbar target sizes are generated
+in `windows/Assets/` and copied unchanged into the package by `package-msix.ps1`.
+The Unraid template uses the versioned `assets/mybrewfolio-sync-app-v2-1024.png`.
 
 ## Security and privacy
 

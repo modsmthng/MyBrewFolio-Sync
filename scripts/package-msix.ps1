@@ -44,33 +44,9 @@ if ($startupExtension.GetAttribute("EntryPoint") -ne "Windows.FullTrustApplicati
 if ($startupTask.GetAttribute("Enabled") -ne "false") { throw "The MSIX startup task must remain opt-in" }
 if ($startupTask.GetAttribute("DisplayName") -ne "MyBrewFolio Sync") { throw "The MSIX startup task must have the MyBrewFolio Sync display name" }
 
-Add-Type -AssemblyName System.Drawing
-$sourcePath = Join-Path $root "src-tauri\icons\icon.png"
-function Write-Logo([int]$width, [int]$height, [string]$name) {
-  $source = [System.Drawing.Image]::FromFile($sourcePath)
-  try {
-    $bitmap = New-Object System.Drawing.Bitmap($width, $height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    try {
-      $graphics.Clear([System.Drawing.Color]::Transparent)
-      $size = [Math]::Min($width, $height)
-      $x = [Math]::Floor(($width - $size) / 2)
-      $y = [Math]::Floor(($height - $size) / 2)
-      $graphics.DrawImage($source, $x, $y, $size, $size)
-      $bitmap.Save((Join-Path $staging "Assets\$name"), [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-      $graphics.Dispose()
-      $bitmap.Dispose()
-    }
-  } finally {
-    $source.Dispose()
-  }
-}
-
-Write-Logo 50 50 "StoreLogo.png"
-Write-Logo 44 44 "Square44x44Logo.png"
-Write-Logo 150 150 "Square150x150Logo.png"
-Write-Logo 310 150 "Wide310x150Logo.png"
+# Commit generated assets so packaging always includes the reviewed DPI variants.
+$iconAssets = Join-Path $root "windows\Assets"
+Copy-Item (Join-Path $iconAssets "*.png") (Join-Path $staging "Assets")
 
 $dumpbinPath = $null
 $dumpbinCommand = Get-Command "dumpbin.exe" -ErrorAction SilentlyContinue
@@ -143,7 +119,12 @@ $requiredFiles = @(
   "Assets\StoreLogo.png",
   "Assets\Square44x44Logo.png",
   "Assets\Square150x150Logo.png",
-  "Assets\Wide310x150Logo.png"
+  "Assets\Wide310x150Logo.png",
+  "Assets\Square44x44Logo.scale-200.png",
+  "Assets\Square44x44Logo.scale-400.png",
+  "Assets\Square150x150Logo.scale-200.png",
+  "Assets\Square150x150Logo.scale-400.png",
+  "Assets\Square44x44Logo.targetsize-256.png"
 )
 foreach ($relativePath in $requiredFiles) {
   if (-not (Test-Path (Join-Path $verification $relativePath))) {

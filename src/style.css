@@ -15,8 +15,8 @@ button:disabled { cursor: wait; opacity: .58; }
 .shell.loading { display: grid; place-items: center; font-weight: 700; }
 .brand-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .brand-row > div { display: flex; align-items: center; gap: 14px; }
-.mark { width: 74px; font-size: 22px; line-height: .77; letter-spacing: -.08em; font-weight: 900; color: #243c59; }
-.mark.compact { width: 48px; font-size: 15px; }
+.mark { display: inline-block; flex: none; width: 104px; height: 104px; color: #243c59; background-color: currentColor; mask-size: contain; mask-position: center; mask-repeat: no-repeat; -webkit-mask-size: contain; -webkit-mask-position: center; -webkit-mask-repeat: no-repeat; }
+.mark.compact { width: 88px; height: 88px; }
 .alpha-label, .eyebrow { letter-spacing: .18em; font-size: 11px; font-weight: 900; color: #7b8da3; }
 .hero { margin: 54px 0 30px; }
 .reconnect-notice { margin-top: 24px; }

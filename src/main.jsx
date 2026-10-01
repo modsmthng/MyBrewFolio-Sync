@@ -7,6 +7,11 @@ import { getVersion } from '@tauri-apps/api/app';
 import { listen } from '@tauri-apps/api/event';
 import { getCurrent, onOpenUrl } from '@tauri-apps/plugin-deep-link';
 import './style.css';
+import syncLogo from '../assets/textlogosync.svg';
+
+function SyncLogo({ compact = false }) {
+  return <span className={`mark${compact ? ' compact' : ''}`} role="img" aria-label="MyBrewFolio Sync" style={{ maskImage: `url(${syncLogo})`, WebkitMaskImage: `url(${syncLogo})` }} />;
+}
 
 export const FIRST_SYNCHRONIZATION_MESSAGE =
   'Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running.';
@@ -202,7 +207,7 @@ export function Setup({ status, refresh, externalNotice }) {
   return (
     <main className="shell setup">
       <header className="brand-row">
-        <div className="mark">my<br />brew<br />folio</div>
+        <SyncLogo />
         <span className="alpha-label">ALPHA</span>
       </header>
       {reconnectMessage ? <section className="card reconnect-notice" role="alert"><h2>Sign in again</h2><p>{reconnectMessage}</p></section> : null}
@@ -819,7 +824,7 @@ function DashboardContent({
   return (
     <main className="shell">
       <header className="brand-row dashboard-header">
-        <div><div className="mark compact">my<br />brew<br />folio</div><h1>Sync</h1></div>
+        <div><SyncLogo compact /><h1 className="visually-hidden">MyBrewFolio Sync</h1></div>
         <StatusPill status={status} />
       </header>
       {visibleStatusMessage ? (

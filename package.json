@@ -1,12 +1,12 @@
 {
   "name": "@mybrewfolio/sync",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.6.1",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node scripts/verify-icons.mjs && vite build",
     "fake-gaggimate": "node tests/fake-gaggimate.mjs",
     "test:fake-gaggimate": "node tests/verify-fake-gaggimate.mjs",
     "test:headless-installer": "node tests/verify-headless-installer.mjs",
@@ -14,7 +14,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "test:headless-container": "node tests/verify-headless-container.mjs"
+    "test:headless-container": "node tests/verify-headless-container.mjs",
+    "icons:generate": "node scripts/generate-icons.mjs",
+    "icons:verify": "node scripts/verify-icons.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
@@ -26,11 +28,12 @@
   "devDependencies": {
     "@preact/preset-vite": "^2.10.0",
     "@tauri-apps/cli": "^2.0.0",
+    "@testing-library/preact": "^3.2.4",
+    "@vitest/coverage-v8": "^3.2.4",
+    "jsdom": "^26.1.0",
+    "sharp": "^0.34.5",
     "vite": "^7.0.0",
     "vitest": "^3.2.4",
-    "@vitest/coverage-v8": "^3.2.4",
-    "@testing-library/preact": "^3.2.4",
-    "jsdom": "^26.1.0",
     "ws": "^8.21.1"
   }
 }
