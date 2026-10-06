@@ -293,10 +293,10 @@ async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch()
     connect_test_engine(&engine);
     let host = gaggimate_server().await;
     let local = GaggiMateClient::new(&host).expect("local client");
-    let v7_shot = local.shot(1).await.expect("v7 shot reads");
-    assert_eq!(v7_shot["samples"][0]["t"], 300.0);
-    assert_eq!(v7_shot["samples"][0]["ct"], 92.5);
-    assert_eq!(v7_shot["samples"][0]["wp"], 12.3);
+    let v8_shot = local.shot(1).await.expect("v8 shot reads");
+    assert_eq!(v8_shot["samples"][0]["t"], 300.0);
+    assert_eq!(v8_shot["samples"][0]["ct"], 92.5);
+    assert_eq!(v8_shot["samples"][0]["wp"], 12.3);
 
     engine
         .store
@@ -312,7 +312,7 @@ async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch()
     let skipped = engine
         .queue_local_changes(&local, &json!({ "items": [] }))
         .await
-        .expect("v7 shot queues");
+        .expect("v8 shot queues");
     assert!(skipped.is_empty());
     let queued = engine.store.pending(25).expect("queue reads");
     let queued_shot = queued
@@ -320,6 +320,19 @@ async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch()
         .find(|object| object.kind == "shot")
         .expect("shot is queued");
     assert_eq!(queued_shot.data["samples"][0]["wp"], 12.3);
+    assert_eq!(queued_shot.data["version"], 8);
+    assert_eq!(
+        queued_shot.data["samples"][0]["systemInfo"]["activeScaleConnected"],
+        true
+    );
+    assert_eq!(
+        queued_shot.data["samples"][0]["systemInfo"]["bluetoothScaleConnected"],
+        false
+    );
+    assert_eq!(
+        queued_shot.data["samples"][0]["systemInfo"]["phaseHasVolumetric"],
+        true
+    );
 
     engine.sync_once().await.expect("sync succeeds");
 

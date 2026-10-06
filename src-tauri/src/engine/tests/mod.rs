@@ -740,7 +740,7 @@ pub(super) fn history_index() -> Vec<u8> {
 pub(super) fn history_shot() -> Vec<u8> {
     let mut bytes = vec![0_u8; 512 + 30];
     bytes[0..4].copy_from_slice(&0x544f_4853_u32.to_le_bytes());
-    bytes[4] = 7;
+    bytes[4] = 8;
     bytes[5] = 30;
     bytes[6..8].copy_from_slice(&512_u16.to_le_bytes());
     bytes[8..10].copy_from_slice(&250_u16.to_le_bytes());
@@ -753,7 +753,7 @@ pub(super) fn history_shot() -> Vec<u8> {
     bytes[108..110].copy_from_slice(&180_u16.to_le_bytes());
     bytes[512..516].copy_from_slice(&300_u32.to_le_bytes());
     let values = [
-        930_u16, 925, 20, 18, 180, 200, 170, 0, 180, 180, 0, 0x000d, 123,
+        930_u16, 925, 20, 18, 180, 200, 170, 0, 180, 180, 0, 0x01e9, 123,
     ];
     for (index, value) in values.iter().enumerate() {
         let offset = 516 + index * 2;

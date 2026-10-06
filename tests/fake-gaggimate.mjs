@@ -31,11 +31,11 @@ function shotIndex() {
   return buffer;
 }
 
-function shotLog() {
+function shotLog(version = 8) {
   const sampleCount = 3;
   const buffer = Buffer.alloc(512 + sampleCount * 30);
   buffer.writeUInt32LE(0x544f4853, 0);
-  buffer.writeUInt8(7, 4);
+  buffer.writeUInt8(version, 4);
   buffer.writeUInt8(30, 5);
   buffer.writeUInt16LE(512, 6);
   buffer.writeUInt16LE(250, 8);
@@ -53,10 +53,11 @@ function shotLog() {
   buffer.writeUInt8(5, 459);
   buffer.writeUInt16LE(750, 460);
 
+  const flags = version >= 8 ? 0x01e0 : 0;
   const samples = [
-    [0, 930, 925, 20, 18, 180, 200, 170, 0, 0, 0, 0, 0x000d, 0],
-    [263, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f, 151],
-    [527, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f, 312]
+    [0, 930, 925, 20, 18, 180, 200, 170, 0, 0, 0, 0, 0x000d | flags, 0],
+    [263, 930, 928, 40, 39, 195, 200, 185, 0, 10, 10, 120, 0x000f | flags, 151],
+    [527, 930, 931, 60, 58, 210, 200, 205, 0, 20, 20, 250, 0x000f | flags, 312]
   ];
   samples.forEach((values, sampleIndex) => {
     const base = 512 + sampleIndex * 30;
@@ -72,11 +73,17 @@ function shotLog() {
 
 const indexFixture = shotIndex();
 const shotFixture = shotLog();
+const legacyShotFixture = shotLog(7);
 
 const server = http.createServer((request, response) => {
   if (request.url === '/api/history/index.bin') {
     response.writeHead(200, { 'Content-Type': 'application/octet-stream' });
     response.end(indexFixture);
+    return;
+  }
+  if (request.url === '/api/history/legacy-v7.slog') {
+    response.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+    response.end(legacyShotFixture);
     return;
   }
   if (request.url === '/api/history/000001.slog') {

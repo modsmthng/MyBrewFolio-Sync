@@ -25,12 +25,17 @@ try {
   const shotView = new DataView(shotBytes);
   if (
     !shot.ok ||
-    shotView.getUint8(4) !== 7 ||
+    shotView.getUint8(4) !== 8 ||
     shotView.getUint8(5) !== 30 ||
     shotView.getUint32(542, true) !== 263 ||
-    shotView.getUint16(570, true) !== 151
+    shotView.getUint16(570, true) !== 151 ||
+    (shotView.getUint16(568, true) & 0x01e0) !== 0x01e0
   ) {
-    throw new Error('Version-seven shot fixture is invalid');
+    throw new Error('Version-eight shot fixture is invalid');
+  }
+  const legacyShot = new DataView(await (await fetch(`http://127.0.0.1:${port}/api/history/legacy-v7.slog`)).arrayBuffer());
+  if (legacyShot.getUint8(4) !== 7 || legacyShot.getUint16(568, true) !== 0x000f) {
+    throw new Error('Legacy version-seven shot fixture is invalid');
   }
   const readNotes = id => new Promise((resolve, reject) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);

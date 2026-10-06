@@ -182,18 +182,27 @@ fn field(version: u8, bit: u32) -> Option<Field> {
     })
 }
 
-fn system_info(raw: u16) -> Value {
-    json!({
+fn system_info(raw: u16, extended_flags: bool) -> Value {
+    let mut info = json!({
+        "raw": raw,
         "shotStartedVolumetric": raw & 0x0001 != 0,
         "currentlyVolumetric": raw & 0x0002 != 0,
         "bluetoothScaleConnected": raw & 0x0004 != 0,
         "volumetricAvailable": raw & 0x0008 != 0,
-        "extendedRecording": raw & 0x0010 != 0
-    })
+        "extendedRecording": raw & 0x0010 != 0,
+        "activeScaleConnected": raw & (if extended_flags { 0x0100 } else { 0x0004 }) != 0
+    });
+    if extended_flags {
+        let flags = info.as_object_mut().expect("system info object");
+        flags.insert("processIsBrew".into(), json!(raw & 0x0020 != 0));
+        flags.insert("targetIsVolumetric".into(), json!(raw & 0x0040 != 0));
+        flags.insert("phaseHasVolumetric".into(), json!(raw & 0x0080 != 0));
+    }
+    info
 }
 
-fn field_width(version: u8, bit: u32) -> usize {
-    if version >= 6 && bit == 0 {
+fn field_width(elapsed_timestamp: bool, bit: u32) -> usize {
+    if elapsed_timestamp && bit == 0 {
         4
     } else {
         2
@@ -209,6 +218,8 @@ struct SampleLayout<'a> {
     active_bits: &'a [u32],
     sample_interval: u32,
     version: u8,
+    elapsed_timestamp: bool,
+    extended_flags: bool,
     transitions: &'a [PhaseTransition],
 }
 
@@ -245,11 +256,13 @@ fn field_value(
     bit: u32,
     offset: usize,
     sample_interval: u32,
+    elapsed_timestamp: bool,
+    extended_flags: bool,
 ) -> Result<(String, Value), BinaryError> {
     let known = field(version, bit);
     let (name, raw, scale) = match known {
         Some(value) => {
-            let raw = if version >= 6 && bit == 0 {
+            let raw = if elapsed_timestamp && bit == 0 {
                 u32_le(bytes, offset)? as f64
             } else {
                 match value.kind {
@@ -261,7 +274,7 @@ fn field_value(
         }
         None => (format!("unknown_{bit}"), u16_le(bytes, offset)? as f64, 0.0),
     };
-    let number = if name == "t" && version < 6 {
+    let number = if name == "t" && !elapsed_timestamp {
         raw * sample_interval as f64
     } else if scale > 0.0 {
         raw / scale
@@ -269,7 +282,7 @@ fn field_value(
         raw
     };
     let value = if name == "systemInfo" {
-        system_info(number as u16)
+        system_info(number as u16, extended_flags)
     } else {
         json!(number)
     };
@@ -300,9 +313,11 @@ fn parse_samples(layout: SampleLayout<'_>, sample_count: usize) -> Result<Vec<Va
                 *bit,
                 offset,
                 layout.sample_interval,
+                layout.elapsed_timestamp,
+                layout.extended_flags,
             )?;
             sample.insert(name, value);
-            offset += field_width(layout.version, *bit);
+            offset += field_width(layout.elapsed_timestamp, *bit);
         }
         debug_assert_eq!(offset, base + layout.sample_size);
         if layout.version >= 5 {
@@ -321,7 +336,7 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
         return Err(BinaryError::Unsupported);
     }
     let version = bytes[4];
-    if !(1..=7).contains(&version) {
+    if !(1..=8).contains(&version) {
         return Err(BinaryError::UnsupportedVersion(version));
     }
     let sample_size = bytes[5] as usize;
@@ -332,6 +347,9 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
     }
     let sample_interval = u16_le(bytes, 8)? as u32;
     let fields_mask = u32_le(bytes, 12)?;
+    let legacy_scale_v6 = version == 6 && sample_size == 26 && fields_mask == 0x1fff;
+    let elapsed_timestamp = version >= 6 && !legacy_scale_v6;
+    let extended_flags = version >= 8 || legacy_scale_v6;
     let sample_count_header = u32_le(bytes, 16)? as usize;
     let duration_header = u32_le(bytes, 20)?;
     let start_epoch = u32_le(bytes, 24)?;
@@ -343,7 +361,7 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
         .collect();
     let expected_sample_size = active_bits
         .iter()
-        .map(|bit| field_width(version, *bit))
+        .map(|bit| field_width(elapsed_timestamp, *bit))
         .sum::<usize>();
     if expected_sample_size != sample_size {
         return Err(BinaryError::Unsupported);
@@ -367,6 +385,8 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
             active_bits: &active_bits,
             sample_interval,
             version,
+            elapsed_timestamp,
+            extended_flags,
             transitions: &transitions,
         },
         sample_count,
@@ -396,13 +416,13 @@ pub fn parse_shot(bytes: &[u8], id: u32) -> Result<Value, BinaryError> {
     let final_exit_reason = (version >= 5).then(|| bytes.get(459).copied().unwrap_or(0));
     let brew_delay_ms = (version >= 5).then(|| u16_le(bytes, 460)).transpose()?;
     Ok(json!({
-        "id": id.to_string(), "name": format!("Shot {id}"), "profile": profile_name,
+        "version": version, "id": id.to_string(), "name": format!("Shot {id}"), "profile": profile_name,
         "profileId": profile_id, "timestamp": start_epoch, "duration": duration,
         "samples": samples, "volume": volume, "incomplete": incomplete,
         "sampleInterval": sample_interval, "fieldsMask": fields_mask,
         "phaseTransitions": phase_transitions,
         "finalExitReason": final_exit_reason,
-        "brewDelayMs": brew_delay_ms
+        "brewDelay": brew_delay_ms, "brewDelayMs": brew_delay_ms
     }))
 }
 
@@ -597,7 +617,7 @@ mod tests {
         assert_eq!(incomplete["incomplete"], true);
 
         let mut wrong_width = bytes.clone();
-        wrong_width[5] = 26;
+        wrong_width[5] = 27;
         assert!(matches!(
             parse_shot(&wrong_width, 42),
             Err(BinaryError::Unsupported)
@@ -702,6 +722,87 @@ mod tests {
     }
 
     #[test]
+    fn parses_v8_and_both_v6_layouts_without_losing_flags_or_offsets() {
+        for (version, size, mask, elapsed) in [
+            (6_u8, 26_usize, 0x1fff_u32, false),
+            (6, 28, 0x1fff, true),
+            (7, 30, 0x3fff, true),
+            (8, 30, 0x3fff, true),
+        ] {
+            let mut bytes = vec![0_u8; 512 + 2 * size];
+            bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
+            bytes[4] = version;
+            bytes[5] = size as u8;
+            bytes[6..8].copy_from_slice(&512_u16.to_le_bytes());
+            bytes[8..10].copy_from_slice(&250_u16.to_le_bytes());
+            bytes[12..16].copy_from_slice(&mask.to_le_bytes());
+            bytes[16..20].copy_from_slice(&2_u32.to_le_bytes());
+            bytes[458] = 1;
+            bytes[459] = 9;
+            bytes[460..462].copy_from_slice(&750_u16.to_le_bytes());
+            for index in 0..2 {
+                let base = 512 + index * size;
+                let width = if elapsed { 4 } else { 2 };
+                if elapsed {
+                    bytes[base..base + 4].copy_from_slice(&(index as u32 * 263).to_le_bytes());
+                } else {
+                    bytes[base..base + 2].copy_from_slice(&(index as u16).to_le_bytes());
+                }
+                // Hardware connected, Bluetooth disconnected; the second sample loses the scale.
+                let flags = if index == 0 { 0x01e3_u16 } else { 0x00e3 };
+                let values = [
+                    930_u16,
+                    925,
+                    90,
+                    88,
+                    220,
+                    200,
+                    (-180_i16) as u16,
+                    175,
+                    185,
+                    180,
+                    410,
+                    flags,
+                    123,
+                ];
+                for (field_index, value) in values.iter().take((size - width) / 2).enumerate() {
+                    let offset = base + width + field_index * 2;
+                    bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            let parsed = parse_shot(&bytes, 42).unwrap();
+            assert_eq!(parsed["version"], version);
+            assert_eq!(
+                parsed["samples"][1]["t"],
+                if elapsed { 263.0 } else { 250.0 }
+            );
+            assert_eq!(parsed["samples"][1]["pf"], -1.8);
+            assert_eq!(parsed["samples"][1]["v"], 18.5);
+            assert_eq!(parsed["brewDelay"], 750);
+            assert_eq!(parsed["brewDelayMs"], 750);
+            assert_eq!(parsed["finalExitReason"], 9);
+            let info = &parsed["samples"][0]["systemInfo"];
+            assert_eq!(info["raw"], 0x01e3_u16);
+            assert_eq!(info["bluetoothScaleConnected"], false);
+            let extended = version == 8 || !elapsed;
+            assert_eq!(info["activeScaleConnected"], extended);
+            assert_eq!(info.get("processIsBrew").is_some(), extended);
+            if extended {
+                assert_eq!(info["processIsBrew"], true);
+                assert_eq!(info["targetIsVolumetric"], true);
+                assert_eq!(info["phaseHasVolumetric"], true);
+            }
+            assert_eq!(
+                parsed["samples"][1]["systemInfo"]["activeScaleConnected"],
+                false
+            );
+            if version >= 7 {
+                assert_eq!(parsed["samples"][1]["wp"], 12.3);
+            }
+        }
+    }
+
+    #[test]
     fn old_shots_use_the_last_sample_for_incomplete_duration_and_volume() {
         let mut bytes = vec![0_u8; 128 + 8];
         bytes[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
@@ -719,6 +820,11 @@ mod tests {
         bytes[132..134].copy_from_slice(&6_u16.to_le_bytes());
         bytes[134..136].copy_from_slice(&250_u16.to_le_bytes());
 
+        for version in 1..=4 {
+            bytes[4] = version;
+            let old = parse_shot(&bytes, 7).expect("legacy shot parses");
+            assert_eq!(old["samples"][1]["t"], 600.0);
+        }
         let parsed = parse_shot(&bytes, 7).expect("old shot parses");
 
         assert_eq!(parsed["duration"], 600.0);
@@ -756,10 +862,10 @@ mod tests {
 
         let mut future = vec![0_u8; 512];
         future[0..4].copy_from_slice(&SHOT_MAGIC.to_le_bytes());
-        future[4] = 8;
+        future[4] = 9;
         assert!(matches!(
             parse_shot(&future, 1),
-            Err(BinaryError::UnsupportedVersion(8))
+            Err(BinaryError::UnsupportedVersion(9))
         ));
     }
 }
