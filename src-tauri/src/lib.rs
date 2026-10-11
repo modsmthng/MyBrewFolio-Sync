@@ -7,6 +7,7 @@ pub mod engine;
 pub mod local;
 pub mod machines;
 pub mod model;
+mod profile_image;
 pub mod store;
 
 #[cfg(feature = "desktop")]

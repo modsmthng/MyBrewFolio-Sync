@@ -17,6 +17,7 @@ use crate::{
     credentials::CredentialStore,
     local::{GaggiMateClient, LocalError},
     model::{AppStatus, IndexEntry, SyncObject, SyncProgress, SyncProgressPhase},
+    profile_image::device_image,
     store::{AppStore, StoreError},
 };
 
@@ -272,6 +273,7 @@ pub(super) fn profile_store_issue_source_key(payload: &Value) -> String {
 
 pub(super) fn profile_store_public_error_message(code: &str, message: &str) -> String {
     match code {
+        "PROFILE_IMAGE_UPLOAD_FAILED" => "The profile was saved, but its image could not be uploaded. Check local Sync diagnostics and try again.".into(),
         "GAGGIMATE_UNREACHABLE" => {
             "GaggiMate could not be reached while completing this profile operation. Check local Sync diagnostics and try again.".into()
         }
@@ -298,7 +300,8 @@ pub(super) fn profile_store_local_error(error: LocalError) -> (&'static str, Str
         | LocalError::InvalidNotes(_)
         | LocalError::InvalidProfileList
         | LocalError::InvalidProfile(_)
-        | LocalError::InvalidProfileUpdate(_) => "GAGGIMATE_DATA_INVALID",
+        | LocalError::InvalidProfileUpdate(_)
+        | LocalError::InvalidProfileImageUpdate(_) => "GAGGIMATE_DATA_INVALID",
     };
     (code, message)
 }
@@ -393,12 +396,20 @@ pub(super) async fn save_profile_if_needed(
     if request.actions_only || already_installed {
         return Ok(request.profile_id.to_string());
     }
+    let image = device_image(request.profile.get("image"))
+        .map_err(|message| ("PROFILE_IMAGE_INVALID", message.to_string()))?;
     let saved_id = local
         .save_profile(request.profile)
         .await
         .map_err(|error| ("PROFILE_SAVE_FAILED", error.to_string()))?;
     match local.load_profile(&saved_id).await {
         Ok(confirmed) if confirmed.get("id").and_then(Value::as_str) == Some(saved_id.as_str()) => {
+            if let Some(image) = image {
+                local
+                    .upload_profile_image(&saved_id, image)
+                    .await
+                    .map_err(|error| ("PROFILE_IMAGE_UPLOAD_FAILED", error.to_string()))?;
+            }
             Ok(saved_id)
         }
         Ok(_) => Err((
@@ -563,7 +574,8 @@ impl EngineError {
                 | LocalError::InvalidNotes(_)
                 | LocalError::InvalidProfileList
                 | LocalError::InvalidProfile(_)
-                | LocalError::InvalidProfileUpdate(_),
+                | LocalError::InvalidProfileUpdate(_)
+                | LocalError::InvalidProfileImageUpdate(_),
             ) => "GAGGIMATE_DATA_INVALID",
             Self::Local(LocalError::UnsupportedShotFormat(_)) => {
                 "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"

@@ -39,6 +39,8 @@ pub enum LocalError {
     InvalidProfile(String),
     #[error("The GaggiMate returned invalid data while updating profile {0}")]
     InvalidProfileUpdate(String),
+    #[error("The GaggiMate could not store the image for profile {0}")]
+    InvalidProfileImageUpdate(String),
     #[error("GaggiMate shot format version {0} is not supported by this MyBrewFolio Sync version")]
     UnsupportedShotFormat(u8),
 }
@@ -486,6 +488,9 @@ impl GaggiMateClient {
         }
         safe.remove("favorite");
         safe.remove("selected");
+        // Firmware imports the image through its separate HTTP endpoint, not
+        // req:profiles:save. Sending the PNG here can also exceed WS frame limits.
+        safe.remove("image");
         let requested_id = safe
             .get("id")
             .and_then(Value::as_str)
@@ -502,6 +507,59 @@ impl GaggiMateClient {
         // following load/favorite/select operations must use that ID rather
         // than the Store draft's requested one.
         Ok(saved_profile_id(&response, &requested_id))
+    }
+
+    pub(crate) async fn upload_profile_image(
+        &self,
+        id: &str,
+        data: Vec<u8>,
+    ) -> Result<(), LocalError> {
+        let invalid = || LocalError::InvalidProfileImageUpdate(id.to_string());
+        if id.is_empty()
+            || id.len() > 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+            || data.len() != crate::profile_image::DEVICE_IMAGE_BYTES
+        {
+            return Err(invalid());
+        }
+        let mut response = self
+            .http
+            .post(self.http_url(&format!("/api/profiles/image?id={id}")))
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(|_| LocalError::Unreachable)?;
+        if !self.response_is_local(&response) {
+            return Err(invalid());
+        }
+        self.report_reachable();
+        if response.status().is_success()
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|header| header.to_str().ok())
+                .is_some_and(|header| header.starts_with("application/json"))
+        {
+            return Ok(());
+        }
+        // Match the firmware's explicit no-SD response. Other 404s (including
+        // older firmware without this endpoint) must not silently lose an image.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| invalid())? {
+                if body.len() + chunk.len() > 256 {
+                    return Err(invalid());
+                }
+                body.extend_from_slice(&chunk);
+            }
+            if body == b"No SD card" {
+                return Ok(());
+            }
+        }
+        Err(invalid())
     }
 
     pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {

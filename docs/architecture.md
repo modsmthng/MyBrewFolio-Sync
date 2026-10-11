@@ -79,6 +79,13 @@ open a network port.
   Notes synchronization. Capability 1 remains compatible through the regular 30-second cycle.
   Inventory, fetch, preview and install results use short-lived leases; installation reloads the
   profile before reporting success and persists its completion until the API acknowledges it.
+  Capability `profileStoreImages: 1` adds cover installation: the companion removes the PNG data
+  URL from `req:profiles:save`, converts its bounded 300×300 RGB PNG to the device's LVGL/RGB565
+  binary format and posts it to `/api/profiles/image?id=…` using the firmware-assigned profile ID.
+  The explicit `No SD card` response skips only the cover; other image failures are reported.
+  A pending profile confirmation retains the frozen PNG locally and resumes the image upload
+  after reloading the profile, without repeating the profile save. Desktop and headless use the
+  same implementation; protocol fixtures live in `src-tauri/src/engine/tests/profile_images.rs`.
 - Notes for recent shots become due every five minutes.
 - A throttled full notes pass becomes due once per day.
 - Notes are read through `req:history:notes:get` with the ordinary GaggiMate history ID. Empty

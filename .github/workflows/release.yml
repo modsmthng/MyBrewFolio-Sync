@@ -118,7 +118,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Supports GaggiMate shot formats v1-v8, including both v6 layouts. Preserves active hardware-scale and process flags, ratio profiles, new stop reasons and brew delay while retaining compatibility with older shots.'
+          releaseBody: 'Fixes Profile Store installations with cover images on GaggiMate. Transfers profile values and RGB565 cover data through the device endpoints used by the GaggiMate WebUI, skips images when no SD card is installed, and preserves image uploads when resuming installation confirmation. Retains support for GaggiMate shot formats v1-v8.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false

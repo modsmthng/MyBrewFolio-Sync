@@ -1,6 +1,8 @@
 use serde_json::{json, Value};
 
-use crate::{cloud::CloudError, local::GaggiMateClient, store::BridgeCompletion};
+use crate::{
+    cloud::CloudError, local::GaggiMateClient, profile_image::device_image, store::BridgeCompletion,
+};
 
 use super::{
     apply_profile_actions, profile_favorite_count, profile_fetch_operation,
@@ -83,7 +85,28 @@ impl SyncEngine {
             // briefly unreachable machine must remain "confirming".
             Err(_) => return Ok(None),
         };
-        let completed = if confirmed.get("id").and_then(Value::as_str) == Some(profile_id) {
+        let image_result = if confirmed.get("id").and_then(Value::as_str) == Some(profile_id) {
+            match device_image(completion.payload.get("image")) {
+                Ok(Some(image)) => local
+                    .upload_profile_image(profile_id, image)
+                    .await
+                    .map_err(|error| error.to_string()),
+                Ok(None) => Ok(()),
+                Err(message) => Err(message.to_string()),
+            }
+        } else {
+            Ok(())
+        };
+        let completed = if let Err(message) = image_result {
+            self.store
+                .record_failure(None, "profile", profile_id, "store", &message)?;
+            json!({
+                "leaseToken": completion.lease_token,
+                "status": "failed",
+                "errorCode": "PROFILE_IMAGE_UPLOAD_FAILED",
+                "errorMessage": profile_store_public_error_message("PROFILE_IMAGE_UPLOAD_FAILED", &message),
+            })
+        } else if confirmed.get("id").and_then(Value::as_str) == Some(profile_id) {
             let favorite = completion
                 .payload
                 .get("favorite")
@@ -185,6 +208,7 @@ impl SyncEngine {
                             | "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED"
                             | "PROFILE_LOAD_FAILED"
                             | "PROFILE_SAVE_FAILED"
+                            | "PROFILE_IMAGE_UPLOAD_FAILED"
                     ) {
                         let source_key = profile_store_issue_source_key(&payload);
                         self.store.record_failure(
@@ -206,12 +230,19 @@ impl SyncEngine {
             let completion = if completion.get("errorCode").and_then(Value::as_str)
                 == Some("SAVE_CONFIRMATION_PENDING")
             {
-                json!({
+                let mut pending = json!({
                     "profileStoreConfirmationPending": true,
                     "profileId": completion.get("errorMessage").and_then(Value::as_str).unwrap_or_default(),
                     "favorite": payload.get("favorite").and_then(Value::as_bool).unwrap_or(false),
                     "selected": payload.get("selected").and_then(Value::as_bool).unwrap_or(false),
-                })
+                });
+                if let Some(image) = payload
+                    .get("profile")
+                    .and_then(|profile| profile.get("image"))
+                {
+                    pending["image"] = image.clone();
+                }
+                pending
             } else {
                 completion
             };

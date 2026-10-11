@@ -26,6 +26,8 @@ use tokio::{
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
+mod profile_images;
+
 #[derive(Clone)]
 struct NotesFixtureState {
     current: Value,
