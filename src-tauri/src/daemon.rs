@@ -17,6 +17,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 
+#[path = "daemon/data.rs"]
+mod data;
 mod notes_wizard;
 #[path = "daemon/runtime.rs"]
 mod runtime;
@@ -27,10 +29,15 @@ const FIRST_SYNCHRONIZATION_MESSAGE: &str =
 fn first_sync_notice_due(
     announced: bool,
     connected: bool,
+    initial_sync_configured: bool,
     last_sync_at: Option<&str>,
     last_error: Option<&str>,
 ) -> bool {
-    !announced && connected && last_sync_at.is_none() && last_error.is_none()
+    !announced
+        && connected
+        && initial_sync_configured
+        && last_sync_at.is_none()
+        && last_error.is_none()
 }
 
 fn should_log_sync_error(error: &EngineError) -> bool {
@@ -227,6 +234,7 @@ fn confirmed(value: Option<String>) -> Result<(), String> {
 
 async fn open_manager() -> Result<Arc<MachineManager>, String> {
     let data = data_dir();
+    data::prepare_data_directory(&data)?;
     let store =
         Arc::new(AppStore::open(&data.join("sync.sqlite")).map_err(|error| error.to_string())?);
     if let Some(host) = env::var_os("MYBREWFOLIO_SYNC_GAGGIMATE_HOST") {

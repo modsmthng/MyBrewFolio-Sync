@@ -135,6 +135,140 @@ async fn new_installation_does_not_bind_an_existing_account_machine_during_login
     assert!(lines[1].starts_with("GET "));
 }
 
+#[cfg(feature = "headless")]
+#[tokio::test]
+async fn headless_registration_retry_then_explicit_attachment_survive_restart() {
+    let installation_id = "22222222-2222-4222-8222-222222222222";
+    let machine_id = "11111111-1111-4111-8111-111111111111";
+    let directory = tempfile::tempdir().unwrap();
+    let registry = Arc::new(AppStore::open(&directory.path().join("sync.sqlite")).unwrap());
+    registry
+        .set_setting("installation_id", installation_id)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let machines = format!(
+        r#"{{"machines":[{{"id":"{machine_id}","name":"Existing","legacyDefault":true}}]}}"#
+    );
+    let device = format!(r#"{{"device":{{"id":"device-1","sourceId":"{machine_id}"}}}}"#);
+    let responses = vec![
+        (
+            "POST /v1/sync/installations ".to_owned(),
+            "503 Service Unavailable",
+            "{}".to_owned(),
+        ),
+        (
+            "POST /v1/sync/installations ".to_owned(),
+            "201 Created",
+            "{}".to_owned(),
+        ),
+        (
+            "GET /v1/sync/machines?".to_owned(),
+            "200 OK",
+            machines.clone(),
+        ),
+        (
+            "GET /v1/sync/machines?".to_owned(),
+            "200 OK",
+            machines.clone(),
+        ),
+        (
+            format!("POST /v1/sync/machines/{machine_id}/attach "),
+            "201 Created",
+            device.clone(),
+        ),
+        (
+            "POST /v1/sync/installations ".to_owned(),
+            "201 Created",
+            "{}".to_owned(),
+        ),
+        ("GET /v1/sync/machines?".to_owned(), "200 OK", machines),
+        (
+            format!("POST /v1/sync/machines/{machine_id}/attach "),
+            "201 Created",
+            device,
+        ),
+    ];
+    let server = tokio::spawn(async move {
+        for (path, status, body) in responses {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut input = [0_u8; 8192];
+            let count = stream.read(&mut input).await.unwrap();
+            assert!(String::from_utf8_lossy(&input[..count]).starts_with(&path));
+            let response = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+    let credentials: Arc<dyn CredentialStore> =
+        Arc::new(TestCredentials(StdMutex::new(Some(OAuthTokens {
+            access_token: "valid".into(),
+            refresh_token: Some("refresh".into()),
+            expires_at: i64::MAX,
+        }))));
+    let mut cloud = CloudClient::new(credentials.clone()).unwrap();
+    cloud.config.api_url = url;
+    let cloud = Arc::new(cloud);
+    let manager = MachineManager::open_with_cloud(
+        directory.path(),
+        registry.clone(),
+        credentials.clone(),
+        cloud.clone(),
+    )
+    .unwrap();
+    assert!(manager
+        .headless_pairing_and_authorize(Some("GaggiMate".into()), false)
+        .await
+        .is_err());
+    assert!(manager.active_engines().await.is_empty());
+    // Saved OAuth credentials alone must not count as completed initialization.
+    assert_eq!(
+        manager
+            .headless_pairing_and_authorize(Some("GaggiMate".into()), false)
+            .await
+            .unwrap(),
+        (None, true)
+    );
+    assert!(manager.active_engines().await.is_empty());
+    assert_eq!(
+        manager.status_json().await["machines"],
+        serde_json::json!([])
+    );
+    manager
+        .connect_machine(machine_id, "192.168.1.45")
+        .await
+        .unwrap();
+    assert_eq!(
+        manager
+            .headless_pairing_and_authorize(Some("GaggiMate".into()), true)
+            .await
+            .unwrap(),
+        (None, true)
+    );
+    assert_eq!(
+        manager.status_json().await["machines"][0]["machineId"],
+        machine_id
+    );
+    drop(manager);
+
+    let reopened =
+        MachineManager::open_with_cloud(directory.path(), registry, credentials, cloud).unwrap();
+    assert_eq!(
+        reopened
+            .headless_pairing_and_authorize(Some("GaggiMate".into()), false)
+            .await
+            .unwrap(),
+        (None, true)
+    );
+    let status = reopened.status_json().await;
+    assert_eq!(status["connected"], true);
+    assert_eq!(status["machines"].as_array().unwrap().len(), 1);
+    assert_eq!(status["machines"][0]["machineHost"], "192.168.1.45");
+    timeout(Duration::from_secs(5), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn reconnect_waits_for_pending_detach_and_preserves_new_attachment() {
     let machine_id = "11111111-1111-4111-8111-111111111111";

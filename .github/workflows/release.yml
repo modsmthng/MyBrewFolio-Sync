@@ -118,7 +118,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Fixes Profile Store installations with cover images on GaggiMate. Transfers profile values and RGB565 cover data through the device endpoints used by the GaggiMate WebUI, skips images when no SD card is installed, and preserves image uploads when resuming installation confirmation. Retains support for GaggiMate shot formats v1-v8.'
+          releaseBody: 'Improves Docker and NAS setup with actionable data-directory permission diagnostics and clear pairing, machine-selection and setup steps. Shows the account link after successful registration and local machine assignment, and announces the first import only after it is configured. Existing account machines still require explicit selection. Retains GaggiMate shot format v1-v8 and Profile Store cover-image support.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false

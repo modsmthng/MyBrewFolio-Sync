@@ -32,12 +32,7 @@ impl SyncEngine {
             return Ok(Some(info.verification_uri));
         }
         match self.poll_device_oauth_session().await {
-            Ok(true) => {
-                eprintln!(
-                    "MyBrewFolio connected. Manage Sync at https://mybrewfolio.com/account/sync"
-                );
-                return Ok(None);
-            }
+            Ok(true) => return Ok(None),
             Ok(false) => {}
             Err(EngineError::Cloud(
                 CloudError::DeviceAuthorizationRejected
@@ -444,7 +439,11 @@ mod tests {
     #[tokio::test]
     async fn automatic_pairing_reuses_pending_request_and_respects_local_disconnect() {
         let (mut engine, _directory) = test_engine();
-        let api = cloud_server(vec![r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://example.test/pair","pollToken":"poll-token","expiresIn":600}"#]).await;
+        let api = cloud_server(vec![
+            r#"{"requestId":"request-1","userCode":"ABCD-1234","verificationUri":"https://example.test/pair","pollToken":"poll-token","expiresIn":600}"#,
+            r#"{"status":"pending"}"#,
+            r#"{"requestId":"request-2","userCode":"EFGH-5678","verificationUri":"https://example.test/renewed","pollToken":"new-poll-token","expiresIn":600}"#,
+        ]).await;
         configure_test_cloud(&mut engine, &api);
         assert_eq!(
             engine.headless_pairing().await.unwrap().as_deref(),
@@ -455,6 +454,18 @@ mod tests {
             .setting("device_auth_expires")
             .unwrap()
             .is_some());
+        assert_eq!(
+            engine.headless_pairing().await.unwrap().as_deref(),
+            Some("https://example.test/pair")
+        );
+        engine
+            .store
+            .set_setting("device_auth_expires", "0")
+            .unwrap();
+        assert_eq!(
+            engine.headless_pairing().await.unwrap().as_deref(),
+            Some("https://example.test/renewed")
+        );
         engine.disconnect().await.unwrap();
         assert!(engine.headless_pairing().await.unwrap().is_none());
     }

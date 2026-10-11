@@ -37,6 +37,34 @@ The daemon polls for approval automatically. An unused link expires after ten mi
 renewed while the container remains unconnected. Closing the log window does not stop pairing or
 Sync. The persistent volume retains the key, account connection and queue across container updates.
 
+### Understanding the setup messages
+
+Before account approval, the logs show only the pairing link and wait for you to open it.
+After approval, Sync registers this installation and restores its known machine connections.
+Registration failures are logged and retried automatically.
+
+If the logs say **Account connected; machine selection required**, sign-in succeeded but no
+machine is connected to this installation yet. Run the commands printed in the logs inside
+the container. From the host, use the following, replacing `SERVICE` with your Compose service
+name (`sync` in the example above, or your own name such as `gaggimatesync`):
+
+```sh
+docker compose exec SERVICE mybrewfolio-syncd machines list
+docker compose exec SERVICE mybrewfolio-syncd machines add --existing MACHINE_ID HOST
+```
+
+Replace `MACHINE_ID` with the intended machine's ID from the list and `HOST` with that machine's
+local GaggiMate address. To create a different machine instead, run
+`mybrewfolio-syncd machines add NAME HOST` inside the container; quote names containing spaces.
+The machine choice is explicit even when the account has only one existing machine.
+
+Once a machine is connected, the logs show the MyBrewFolio Account link. Open it to finish
+first-sync setup or manage an existing connection. Account approval and machine connection do
+not start the first import until its import preference has been saved in MyBrewFolio.
+Each setup message appears at startup and when its state changes, including after a CLI machine
+connection. `status` can report `connected: true` and `machines: []` while machine selection is
+still required: `connected` describes the account connection.
+
 ### More than one machine
 
 `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` remains the address of the first, upgraded machine. On a new
@@ -119,6 +147,34 @@ grant the chosen UID/GID write access to that dedicated folder through the host'
 settings and set Compose `user: "UID:GID"` when needed. No `PUID`/`PGID` variables or automatic
 recursive permission changes are used. A permission error means `/data` is not writable by that
 container user; do not solve it by making the private data directory world-writable.
+
+For example, to keep data in a dedicated folder beside your Compose file:
+
+```yaml
+services:
+  sync:
+    image: ghcr.io/modsmthng/mybrewfolio-sync:latest
+    restart: unless-stopped
+    user: "10001:10001"
+    environment:
+      MYBREWFOLIO_SYNC_GAGGIMATE_HOST: gaggimate.local
+    volumes:
+      - ./sync-data:/data
+```
+
+Create `sync-data` on the host and grant UID/GID `10001:10001` access to read, write and enter
+that folder. If your NAS uses another dedicated owner, set `user:` to its numeric UID/GID and
+grant that owner access instead. Existing database and key files must also be accessible.
+On startup, Sync tests the data directory before opening SQLite. A failure reports the container
+path, operating-system error and effective UID/GID on Unix; check host permissions, a read-only
+mount or available disk space as indicated. Sync never changes existing ownership or permissions.
+
+Changing from a named volume to an empty host folder starts a new local installation. It does
+not copy the previous account connection, machine assignments, queue or key. To retain them,
+stop the container and copy the complete old data directory, including `state.key`, to the new
+folder while preserving private file permissions and granting the chosen container user access.
+Keep the original external key mount if you use one. If you intentionally start with an empty
+folder, pair again and explicitly select the existing account machine when prompted.
 
 ## Two-way Notes Sync
 

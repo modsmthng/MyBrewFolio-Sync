@@ -34,16 +34,20 @@ fn first_sync_notice_is_emitted_once_without_an_error() {
             FIRST_SYNCHRONIZATION_MESSAGE,
             "Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running."
         );
-    assert!(first_sync_notice_due(false, true, None, None));
-    assert!(!first_sync_notice_due(true, true, None, None));
+    assert!(first_sync_notice_due(false, true, true, None, None));
+    assert!(!first_sync_notice_due(true, true, true, None, None));
+    assert!(!first_sync_notice_due(false, true, false, None, None));
+    assert!(!first_sync_notice_due(false, false, true, None, None));
     assert!(!first_sync_notice_due(
         false,
+        true,
         true,
         Some("2026-09-16T00:00:00Z"),
         None
     ));
     assert!(!first_sync_notice_due(
         false,
+        true,
         true,
         None,
         Some("The GaggiMate could not be reached")
