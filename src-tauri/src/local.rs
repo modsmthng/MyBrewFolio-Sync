@@ -153,6 +153,46 @@ pub struct GaggiMateClient {
     reachability_notifier: Option<Sender<()>>,
 }
 
+// Only these fields may leave the LAN. /api/settings also contains unrelated private settings.
+pub(crate) fn maintenance_settings(settings: &Value) -> Result<Value, LocalError> {
+    let fields = [
+        "backflushIntervalDays",
+        "backflushIntervalShots",
+        "descalingIntervalWeeks",
+        "descalingIntervalShots",
+        "lastBackflushTime",
+        "lastDescalingTime",
+        "shotsSinceBackflush",
+        "shotsSinceDescaling",
+    ];
+    if fields.iter().all(|key| settings.get(key).is_none()) {
+        return Ok(json!({"supported":false}));
+    }
+    let integer = |key: &str, maximum: u64| -> Result<u64, LocalError> {
+        settings
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|value| *value <= maximum)
+            .ok_or(LocalError::InvalidData)
+    };
+    let task = |days: &str,
+                multiplier: u64,
+                brews: &str,
+                last: &str,
+                since: &str|
+     -> Result<Value, LocalError> {
+        Ok(
+            json!({"days":integer(days, 2_147_483_647 / multiplier)? * multiplier,
+            "brews":integer(brews, 2_147_483_647)?, "lastCompletedAt":integer(last, 4_294_967_295)?,
+            "shotsSince":integer(since, 2_147_483_647)?}),
+        )
+    };
+    Ok(json!({"supported":true,"tasks":{
+        "backflush":task("backflushIntervalDays", 1, "backflushIntervalShots", "lastBackflushTime", "shotsSinceBackflush")?,
+        "descaling":task("descalingIntervalWeeks", 7, "descalingIntervalShots", "lastDescalingTime", "shotsSinceDescaling")?
+    }}))
+}
+
 impl GaggiMateClient {
     pub fn new(host: &str) -> Result<Self, LocalError> {
         let target = local_target(host)?;
@@ -244,6 +284,114 @@ impl GaggiMateClient {
             .await
             .map_err(|error| error.with_context(LocalError::InvalidHistoryIndex))?;
         parse_index(&bytes).map_err(|_| LocalError::InvalidHistoryIndex)
+    }
+
+    pub async fn maintenance(&self) -> Result<Value, LocalError> {
+        let response = self
+            .http
+            .get(self.http_url("/api/settings"))
+            .send()
+            .await
+            .map_err(|_| LocalError::Unreachable)?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(json!({"supported":false}));
+        }
+        if !response.status().is_success() || !self.response_is_local(&response) {
+            return Err(LocalError::Unreachable);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| LocalError::InvalidData)?;
+        if bytes.len() > 256 * 1024 {
+            return Err(LocalError::InvalidData);
+        }
+        let settings: Value =
+            serde_json::from_slice(&bytes).map_err(|_| LocalError::InvalidData)?;
+        maintenance_settings(&settings)
+    }
+
+    pub async fn update_maintenance(
+        &self,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<Value, LocalError> {
+        let task = payload["task"]
+            .as_str()
+            .filter(|task| matches!(*task, "backflush" | "descaling"))
+            .ok_or(LocalError::InvalidData)?;
+        let before = self.maintenance().await?;
+        if before["supported"] != true {
+            return Err(LocalError::InvalidData);
+        }
+        for key in ["days", "brews", "lastCompletedAt"] {
+            if before["tasks"][task][key] != payload["expected"][key] {
+                return Err(LocalError::InvalidData);
+            }
+        }
+        match kind {
+            "maintenance_settings" => {
+                let days = payload["rules"]["days"]
+                    .as_u64()
+                    .filter(|value| *value <= 36500)
+                    .ok_or(LocalError::InvalidData)?;
+                let brews = payload["rules"]["brews"]
+                    .as_u64()
+                    .filter(|value| *value <= 1_000_000)
+                    .ok_or(LocalError::InvalidData)?;
+                let (time_key, brew_key, interval) = if task == "backflush" {
+                    ("backflushIntervalDays", "backflushIntervalShots", days)
+                } else {
+                    if days % 7 != 0 {
+                        return Err(LocalError::InvalidData);
+                    }
+                    ("descalingIntervalWeeks", "descalingIntervalShots", days / 7)
+                };
+                let response = self
+                    .http
+                    .post(self.http_url("/api/settings"))
+                    .header(
+                        reqwest::header::CONTENT_TYPE,
+                        "application/x-www-form-urlencoded",
+                    )
+                    .body(format!("{time_key}={interval}&{brew_key}={brews}"))
+                    .send()
+                    .await
+                    .map_err(|_| LocalError::Unreachable)?;
+                if !response.status().is_success() || !self.response_is_local(&response) {
+                    return Err(LocalError::InvalidData);
+                }
+            }
+            "maintenance_complete" => {
+                let response = self
+                    .websocket_request(&format!("req:cleaning:{task}:complete"), json!({}))
+                    .await?;
+                if response["success"] != true {
+                    return Err(LocalError::InvalidData);
+                }
+            }
+            _ => return Err(LocalError::InvalidData),
+        }
+        let after = self.maintenance().await?;
+        if after["supported"] != true {
+            return Err(LocalError::InvalidData);
+        }
+        if kind == "maintenance_settings" {
+            if after["tasks"][task]["days"] != payload["rules"]["days"]
+                || after["tasks"][task]["brews"] != payload["rules"]["brews"]
+            {
+                return Err(LocalError::InvalidData);
+            }
+        } else if after["tasks"][task]["lastCompletedAt"]
+            .as_u64()
+            .unwrap_or(0)
+            <= before["tasks"][task]["lastCompletedAt"]
+                .as_u64()
+                .unwrap_or(0)
+        {
+            return Err(LocalError::InvalidData);
+        }
+        Ok(json!({"maintenance":after}))
     }
 
     pub async fn shot(&self, id: u32) -> Result<Value, LocalError> {
@@ -580,6 +728,10 @@ impl GaggiMateClient {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "local/maintenance_tests.rs"]
+mod maintenance_tests;
 
 #[cfg(test)]
 mod tests {

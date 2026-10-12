@@ -38,8 +38,8 @@ rename therefore does not change content hashes or trigger new shot analysis.
 
 Neither runtime sends the local hostname, IP address, or a GaggiMate hardware identifier to
 MyBrewFolio. Automatic synchronization never writes shots or profiles and never deletes anything on
-the machine. Two explicit user actions may write: two-way Notes synchronization for an exact mapped
-shot, and the Profile Store bridge for one confirmed profile. The latter may save, favorite and
+the machine. Explicit user actions may write: two-way Notes synchronization for an exact mapped
+shot, maintenance settings/completion from Home, and the Profile Store bridge for one confirmed profile. The latter may save, favorite and
 select that profile but never deletes or reorders profiles.
 
 The app can locally hide its normal application icon while retaining the tray entry point. macOS
@@ -106,6 +106,29 @@ retried. The account machine and its library history remain. A Notes writer boun
 installation is disabled for that machine without selecting a replacement automatically. An
 account disconnect or switch treats every local machine together and never transfers a queue or
 cloud mapping to another account.
+
+## Machine maintenance
+
+Capability `machineMaintenance: 1` adds an optional `/api/settings` read in each normal sync cycle.
+Only the eight firmware maintenance fields are normalized and uploaded to `PUT /v1/sync/maintenance`:
+the Backflush days/shot limit, Descaling weeks/shot limit, both last-completed times and both shot
+counters. Weeks normalize to days, and zero retains the firmware's disabled limit. No other settings,
+credentials or local addresses enter the cloud snapshot. Missing fields mean unsupported firmware;
+optional read/report failures do not block Library synchronization.
+
+The hosted Home UI adopts existing firmware rules for synchronized tasks. Time and brew limits can
+coexist. Brew-water targets remain local to MyBrewFolio for the affected task, preserving machine
+settings; disabling water does not implicitly enable synchronization again.
+
+`maintenance_settings` and `maintenance_complete` use the existing account control worker and machine
+locks. The worker compares the current intervals/checkpoint with the expected snapshot before any
+write. Settings POST only the affected task's two form fields to `/api/settings`; completion uses
+`req:cleaning:backflush:complete` or `req:cleaning:descaling:complete`. Both read back the sanitized
+state and report success only after verification. Durable acknowledgements are retried; writes are
+never replayed after interruption. See `src-tauri/src/local/maintenance_tests.rs` for protocol fixtures.
+
+Deploy the hosted migration/API before the web UI and updated companions. Source changes do not
+update installed desktop apps or published Docker images.
 
 ## Two-way Notes synchronization
 
@@ -205,6 +228,7 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 | `POST /v1/sync/control/operations/claim`, `POST /:id/renew`, `POST /:id/complete` | Claim and acknowledge account-requested Sync actions |
 | `POST /v1/sync/control/operations/:id/restore-items`, `POST /:id/restore-results` | Read the selected restore snapshot and report verified results |
 | `POST /v1/sync/heartbeat` | Report app and machine availability without a local address |
+| `PUT /v1/sync/maintenance` | Report only supported firmware's sanitized maintenance intervals/checkpoints |
 | `POST /v1/sync/conflicts/:itemId/resolve` | Resolve a synchronization conflict |
 | `DELETE /v1/sync/devices/:id` | Disconnect the installation and all its machine attachments |
 

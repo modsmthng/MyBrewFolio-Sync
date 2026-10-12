@@ -156,6 +156,12 @@ impl SyncEngine {
         }
         let _sync = self.sync_lock.lock().await;
         let _machine = self.profile_store_lock.lock().await;
+        if matches!(kind, "maintenance_settings" | "maintenance_complete") {
+            return Ok(self
+                .local_client()?
+                .update_maintenance(kind, payload)
+                .await?);
+        }
         let device_id = self.device_id()?;
         let state = self.cloud.state(&device_id).await?;
         self.update_from_cloud_state(&state).await;

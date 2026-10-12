@@ -774,7 +774,7 @@ async fn gaggimate_server_with_notes(notes: Value) -> String {
         .expect("GaggiMate listener");
     let address = listener.local_addr().expect("GaggiMate address");
     tokio::spawn(async move {
-        for _ in 0..8 {
+        for _ in 0..9 {
             let (mut stream, _) = listener.accept().await.expect("GaggiMate request");
             let mut prefix = [0_u8; 64];
             let length = stream.peek(&mut prefix).await.expect("request preview");

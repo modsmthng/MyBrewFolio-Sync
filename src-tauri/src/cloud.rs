@@ -93,6 +93,7 @@ async fn log_http_failure(context: &str, response: Response) {
 
 fn companion_capabilities() -> Value {
     json!({
+        "machineMaintenance": 1,
         "profileStoreBridge": 2,
         "profileStoreImages": 1,
         "canonicalNotesHash": 1,
@@ -647,6 +648,21 @@ impl CloudClient {
             decisions,
         )
         .await
+    }
+
+    pub async fn report_maintenance(
+        &self,
+        device_id: &str,
+        snapshot: Value,
+    ) -> Result<(), CloudError> {
+        self.device_json(
+            reqwest::Method::PUT,
+            "/v1/sync/maintenance",
+            device_id,
+            snapshot,
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn heartbeat(

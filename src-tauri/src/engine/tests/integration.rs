@@ -278,6 +278,7 @@ async fn sync_once_reads_gaggimate_queues_all_item_kinds_and_flushes_the_batch()
     let api_url = cloud_server(vec![
             r#"{"source":{"initialSyncConfiguredAt":"2026-08-01T00:00:00Z"},"items":[]}"#,
             r#"{"operations":[]}"#,
+            "{}", // Optional maintenance snapshot, including unsupported firmware.
             "{}",
             "{}",
             "{}",

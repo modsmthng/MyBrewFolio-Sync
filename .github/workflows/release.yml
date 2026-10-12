@@ -118,7 +118,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Improves Docker and NAS setup with actionable data-directory permission diagnostics and clear pairing, machine-selection and setup steps. Shows the account link after successful registration and local machine assignment, and announces the first import only after it is configured. Existing account machines still require explicit selection. Retains GaggiMate shot format v1-v8 and Profile Store cover-image support.'
+          releaseBody: 'Adds GaggiMate nightly maintenance synchronization for Backflush and Descaling. Preserves existing time and brew intervals, reports maintenance status to MyBrewFolio, and supports explicitly requested setting changes and maintenance completion with conflict checks and verified machine readback. Older firmware continues to synchronize brews.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false

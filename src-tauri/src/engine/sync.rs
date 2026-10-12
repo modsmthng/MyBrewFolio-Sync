@@ -683,6 +683,17 @@ impl SyncEngine {
                 GaggiMateClient::new(&host)?.with_reachability_notifier(reachable_sender.clone());
             self.process_profile_store_operations(&local, &device_id, 0)
                 .await?;
+            // Maintenance is optional on older firmware/API deployments. Its read/report
+            // failure must not interrupt Library synchronization or trigger machine writes.
+            if !cloud_unreachable {
+                let maintenance = {
+                    let _machine_guard = self.profile_store_lock.lock().await;
+                    local.maintenance().await
+                };
+                if let Ok(snapshot) = maintenance {
+                    let _ = self.cloud.report_maintenance(&device_id, snapshot).await;
+                }
+            }
             if !configured {
                 self.clear_sync_progress().await;
                 self.cloud
