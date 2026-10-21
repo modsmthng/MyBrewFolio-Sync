@@ -118,7 +118,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Adds GaggiMate nightly maintenance synchronization for Backflush and Descaling. Preserves existing time and brew intervals, reports maintenance status to MyBrewFolio, and supports explicitly requested setting changes and maintenance completion with conflict checks and verified machine readback. Older firmware continues to synchronize brews.'
+          releaseBody: 'Updates Rust TLS/WebPKI dependencies and bundled root certificates to current patch releases.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false
