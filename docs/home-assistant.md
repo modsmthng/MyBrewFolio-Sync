@@ -6,8 +6,7 @@ The Home Assistant app is an optional web adapter over the existing `mybrewfolio
 
 [![Add the MyBrewFolio app repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmodsmthng%2FMyBrewFolio-Sync%23home-assistant)
 
-The installation button becomes usable after the first catalog publication. The catalog URL is
-`https://github.com/modsmthng/MyBrewFolio-Sync#home-assistant`; do not rename the branch, repository
+The catalog URL is `https://github.com/modsmthng/MyBrewFolio-Sync#home-assistant`; do not rename the branch, repository
 or `mybrewfolio_sync` slug after users install it.
 
 ## Runtime boundary
