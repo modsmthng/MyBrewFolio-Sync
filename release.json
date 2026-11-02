@@ -1,0 +1,14 @@
+{
+  "version": "0.6.7",
+  "sha": "870d995224ee827b0e3cd7047ebe3eea4951144b",
+  "image": "ghcr.io/modsmthng/mybrewfolio-sync-ha:0.6.7",
+  "digest": "sha256:fa9eaf23a6a8c3c463dffa7259f3745237c816842ed25863444312f85e887354",
+  "testedPlatforms": [
+    "linux/amd64",
+    "linux/arm64"
+  ],
+  "platformDigests": {
+    "linux/amd64": "sha256:e115a78a358ecf9e120b98ba2a43e92998a2a4a4542fdb8e463ba29f02b3178d",
+    "linux/arm64": "sha256:9ee91338a0b0a533dff1665fb178aa7d94f392ee27736d131539df9d81eaf6c3"
+  }
+}
