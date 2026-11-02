@@ -134,8 +134,7 @@ account pairing, machine selection and local status. No HACS dependency or addit
 is needed. Settings and reviewed Sync actions remain in MyBrewFolio.
 
 [![Add the MyBrewFolio app repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmodsmthng%2FMyBrewFolio-Sync%23home-assistant)
-
-The button becomes usable after the first stable HA catalog publication. See the
+See the
 [Home Assistant guide](docs/home-assistant.md) for setup, release requirements and testing.
 Home Assistant Container users should continue using the standard Docker companion.
 
