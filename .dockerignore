@@ -1,6 +1,7 @@
 .git
 node_modules
 dist
+dist-ha
 coverage
 src-tauri/target
 .env*

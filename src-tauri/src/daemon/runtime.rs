@@ -7,13 +7,14 @@ use super::{
     sync_issue_message, MachineManager, MachineSyncError, SyncEngine,
     FIRST_SYNCHRONIZATION_MESSAGE,
 };
+use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
     time::Duration,
 };
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 
 #[derive(Debug, PartialEq, Eq)]
 enum SetupState {
@@ -61,9 +62,10 @@ impl SetupNotices {
 async fn poll_setup(
     manager: &MachineManager,
     account_initialized: &mut bool,
+    initial_name: Option<String>,
 ) -> Result<SetupState, String> {
     let (url, connected) = manager
-        .headless_pairing_and_authorize(Some("GaggiMate".into()), *account_initialized)
+        .headless_pairing_and_authorize(initial_name, *account_initialized)
         .await?;
     *account_initialized = connected;
     if !connected {
@@ -163,12 +165,29 @@ fn retain_active_workers(
     });
 }
 
-fn start_pairing_worker(manager: Arc<MachineManager>) {
+fn setup_snapshot(outcome: &Result<SetupState, String>) -> Value {
+    match outcome {
+        Ok(SetupState::Pairing(url)) => json!({"state": "pairing", "verificationUrl": url}),
+        Ok(SetupState::Disconnected) => json!({"state": "disconnected"}),
+        Ok(SetupState::MachineSelectionRequired) => json!({"state": "machine_selection"}),
+        Ok(SetupState::MachinesConnected(_)) => json!({"state": "ready"}),
+        Err(error) => json!({"state": "error", "error": error}),
+    }
+}
+
+fn start_pairing_worker(
+    manager: Arc<MachineManager>,
+    initial_name: Option<String>,
+    setup: watch::Sender<Value>,
+) {
     tokio::spawn(async move {
         let mut notices = SetupNotices::default();
         let mut account_initialized = false;
         loop {
-            match notices.observe(poll_setup(&manager, &mut account_initialized).await) {
+            let outcome =
+                poll_setup(&manager, &mut account_initialized, initial_name.clone()).await;
+            setup.send_replace(setup_snapshot(&outcome));
+            match notices.observe(outcome) {
                 Ok(Some(message)) => eprintln!("{message}"),
                 Ok(None) => {}
                 Err(error) => {
@@ -250,7 +269,17 @@ async fn spawn_machine_workers(
 }
 
 pub(super) async fn run_daemon(manager: Arc<MachineManager>, socket: PathBuf) -> ! {
-    start_pairing_worker(manager.clone());
+    let (setup, _) = watch::channel(json!({"state": "starting"}));
+    run_daemon_with_setup(manager, socket, Some("GaggiMate".into()), setup).await
+}
+
+pub(super) async fn run_daemon_with_setup(
+    manager: Arc<MachineManager>,
+    socket: PathBuf,
+    initial_name: Option<String>,
+    setup: watch::Sender<Value>,
+) -> ! {
+    start_pairing_worker(manager.clone(), initial_name, setup);
     #[cfg(unix)]
     start_control_socket(manager.clone(), socket);
     #[cfg(not(unix))]

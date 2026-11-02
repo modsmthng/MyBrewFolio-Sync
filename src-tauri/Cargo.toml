@@ -1,6 +1,6 @@
 [package]
 name = "mybrewfolio-sync"
-version = "0.6.6"
+version = "0.6.7"
 default-run = "mybrewfolio-sync"
 description = "GaggiMate to MyBrewFolio synchronization companion"
 authors = ["André Tolksdorf"]
@@ -16,6 +16,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 default = ["desktop"]
 headless = ["dep:libc"]
+headless-web = ["headless", "dep:axum"]
 desktop = [
   "dep:keyring",
   "dep:tauri",
@@ -46,6 +47,7 @@ required-features = ["headless"]
 tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"], optional = true }
 base64 = "0.22"
 png = "0.17.16"
 chrono = { version = "0.4", features = ["serde"] }
@@ -65,7 +67,7 @@ tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"], optional = true }
 tauri-plugin-updater = { version = "2", optional = true }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net", "io-util", "fs"] }
 tokio-tungstenite = "0.26"
 url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -77,4 +79,5 @@ libc = { version = "0.2", optional = true }
 windows = { version = "0.61.3", features = ["ApplicationModel", "Foundation"] }
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"

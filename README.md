@@ -127,6 +127,18 @@ MyBrewFolio through the shared engine's outgoing action channel. The desktop kee
 connection, status, update and operating-system preferences. See [docs/headless.md](docs/headless.md)
 for Compose, Unraid and Synology installation and existing-installation upgrades.
 
+## Home Assistant
+
+A Home Assistant OS app packages the same engine with a small administrator-only Ingress UI for
+account pairing, machine selection and local status. No HACS dependency or additional host port
+is needed. Settings and reviewed Sync actions remain in MyBrewFolio.
+
+[![Add the MyBrewFolio app repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fmodsmthng%2FMyBrewFolio-Sync%23home-assistant)
+
+The button becomes usable after the first stable HA catalog publication. See the
+[Home Assistant guide](docs/home-assistant.md) for setup, release requirements and testing.
+Home Assistant Container users should continue using the standard Docker companion.
+
 ## Verification
 
 ```bash

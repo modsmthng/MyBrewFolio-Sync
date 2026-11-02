@@ -20,6 +20,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - run: npm run build:ha
+      - run: npm run test:ha
+      - run: npm run test:ha-release
       - run: npm run test:fake-gaggimate
       - run: sh -n scripts/install-headless.sh
       - run: npm run test:headless-installer
@@ -34,6 +37,17 @@ jobs:
           node-version: 24
       - run: docker build -t mybrewfolio-sync:local-control .
       - run: node tests/verify-headless-container.mjs
+
+  home-assistant-container-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - run: docker build --target home-assistant -t mybrewfolio-sync-ha:test .
+      - run: node tests/verify-ha-container.mjs mybrewfolio-sync-ha:test
 
   native-check:
     strategy:
@@ -71,6 +85,10 @@ jobs:
         working-directory: src-tauri
 
       - run: cargo test --locked --no-default-features --features headless
+        working-directory: src-tauri
+
+      - run: cargo test --locked --no-default-features --features headless-web
+        if: matrix.os == 'ubuntu-22.04'
         working-directory: src-tauri
 
       - name: Verify Microsoft Store packaging sources
@@ -169,7 +187,7 @@ jobs:
         run: |
           cargo llvm-cov clean --workspace
           cargo llvm-cov --locked --lib --no-report
-          cargo llvm-cov --locked --no-default-features --features headless --bins --no-report
+          cargo llvm-cov --locked --no-default-features --features headless-web --bins --no-report
           cargo llvm-cov report --lcov --output-path ../coverage/rust.lcov
 
       - name: SonarQube Scan

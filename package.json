@@ -1,7 +1,7 @@
 {
   "name": "@mybrewfolio/sync",
   "private": true,
-  "version": "0.6.6",
+  "version": "0.6.7",
   "license": "GPL-3.0-or-later",
   "type": "module",
   "scripts": {
@@ -16,7 +16,10 @@
     "tauri:build": "tauri build",
     "test:headless-container": "node tests/verify-headless-container.mjs",
     "icons:generate": "node scripts/generate-icons.mjs",
-    "icons:verify": "node scripts/verify-icons.mjs"
+    "icons:verify": "node scripts/verify-icons.mjs",
+    "build:ha": "vite build --config vite.ha.config.js",
+    "test:ha": "vitest run ha-web/src",
+    "test:ha-release": "node --test tests/ha-release.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

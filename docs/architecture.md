@@ -235,6 +235,13 @@ The companion uses only authenticated endpoints below `/v1/sync`:
 The hosted API implementation, database schema, website, and infrastructure are intentionally not
 part of this repository.
 
+## Home Assistant adapter
+
+The optional `headless-web` build serves an administrator-only Ingress UI from the same daemon and
+MachineManager. Its setup/status adapter does not duplicate synchronization or machine-write logic.
+[Home Assistant distribution](home-assistant.md) owns the local interface, packaging, release gate,
+verification and catalog lifecycle.
+
 ## Releases
 
 Pull requests and ordinary pushes run frontend fixtures and native Rust checks. A tag matching

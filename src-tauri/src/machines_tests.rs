@@ -47,8 +47,7 @@ impl CredentialStore for TestCredentials {
     }
 }
 
-#[tokio::test]
-async fn new_installation_does_not_bind_an_existing_account_machine_during_login() {
+async fn login_without_implicit_machine(has_existing_machine: bool) {
     let installation_id = "22222222-2222-4222-8222-222222222222";
     let remote_machine = "11111111-1111-4111-8111-111111111111";
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -91,7 +90,11 @@ async fn new_installation_does_not_bind_an_existing_account_machine_during_login
                 .expect("request log")
                 .push(first_line.clone());
             let body = if first_line.starts_with("GET ") {
-                format!("{{\"machines\":[{{\"id\":\"{remote_machine}\",\"name\":\"Existing\",\"legacyDefault\":true}}]}}")
+                if has_existing_machine {
+                    format!("{{\"machines\":[{{\"id\":\"{remote_machine}\",\"name\":\"Existing\",\"legacyDefault\":true}}]}}")
+                } else {
+                    "{\"machines\":[]}".into()
+                }
             } else {
                 format!("{{\"installationId\":\"{installation_id}\",\"capabilities\":{{\"multiMachine\":1}}}}")
             };
@@ -118,7 +121,7 @@ async fn new_installation_does_not_bind_an_existing_account_machine_during_login
     )
     .expect("machine manager");
     manager
-        .after_oauth_authorized(Some("New Gaggia".into()))
+        .after_oauth_authorized(has_existing_machine.then(|| "New Gaggia".into()))
         .await
         .expect("account authorized");
     timeout(Duration::from_secs(5), server)
@@ -133,6 +136,16 @@ async fn new_installation_does_not_bind_an_existing_account_machine_during_login
     let lines = requests.lock().expect("request log");
     assert!(lines[0].starts_with("POST "));
     assert!(lines[1].starts_with("GET "));
+}
+
+#[tokio::test]
+async fn new_installation_does_not_bind_an_existing_account_machine_during_login() {
+    login_without_implicit_machine(true).await;
+}
+
+#[tokio::test]
+async fn empty_account_with_explicit_selection_does_not_create_first_machine_during_login() {
+    login_without_implicit_machine(false).await;
 }
 
 #[cfg(feature = "headless")]

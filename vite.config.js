@@ -18,11 +18,12 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    include: ['src/**/*.test.{js,jsx}', 'ha-web/src/**/*.test.{js,jsx}'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],
       reportsDirectory: 'coverage',
-      include: ['src/**/*.jsx'],
+      include: ['src/**/*.jsx', 'ha-web/src/**/*.{js,jsx}'],
     },
   },
 });

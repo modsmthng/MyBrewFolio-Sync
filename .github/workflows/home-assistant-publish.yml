@@ -1,0 +1,77 @@
+name: Publish Home Assistant catalog
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release to retry (vX.Y.Z)
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: home-assistant-catalog
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'modsmthng/MyBrewFolio-Sync'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: read
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      IMAGE: ghcr.io/modsmthng/mybrewfolio-sync-ha
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Require a published stable Sync release
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq 'select(.isDraft == false and .isPrerelease == false)' > "$RUNNER_TEMP/release.json"
+          test -s "$RUNNER_TEMP/release.json"
+          git fetch origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          git checkout --detach "$RELEASE_TAG"
+          node scripts/ha-release.mjs version "$RELEASE_TAG"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify released images and build receipt
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          gh release download "$RELEASE_TAG" --pattern home-assistant-build.json --dir "$RUNNER_TEMP/ha-receipt"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > "$RUNNER_TEMP/image-manifest.json"
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          test "$DIGEST" = "$(node -p "require(process.env.RUNNER_TEMP + '/ha-receipt/home-assistant-build.json').digest")"
+      - name: Generate and publish the stable catalog
+        run: |
+          SOURCE_SHA="$(git rev-parse HEAD)"
+          CATALOG="$RUNNER_TEMP/ha-catalog"
+          PREVIOUS=()
+          if git ls-remote --exit-code --heads origin home-assistant; then
+            git fetch origin home-assistant
+            git worktree add --detach "$CATALOG" FETCH_HEAD
+            test -f "$CATALOG/release.json"
+            cp "$CATALOG/release.json" "$RUNNER_TEMP/previous-ha-release.json"
+            PREVIOUS=("$RUNNER_TEMP/previous-ha-release.json")
+          else
+            git worktree add --detach "$CATALOG" HEAD
+            git -C "$CATALOG" checkout --orphan ha-catalog-initial
+          fi
+          git -C "$CATALOG" rm -rf --ignore-unmatch .
+          node scripts/ha-release.mjs catalog "$RELEASE_TAG" "$SOURCE_SHA" \
+            "$RUNNER_TEMP/ha-receipt/home-assistant-build.json" "$RUNNER_TEMP/image-manifest.json" "$CATALOG" "${PREVIOUS[@]}"
+          git -C "$CATALOG" config user.name 'github-actions[bot]'
+          git -C "$CATALOG" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$CATALOG" add .
+          if ! git -C "$CATALOG" diff --cached --quiet; then
+            git -C "$CATALOG" commit -m "Publish MyBrewFolio Sync ${RELEASE_TAG#v}"
+            git -C "$CATALOG" push origin HEAD:refs/heads/home-assistant
+          fi

@@ -5,6 +5,9 @@ credentials key, connects through a browser link, and keeps state in `/data`. Ma
 [Account → MyBrewFolio Sync](https://mybrewfolio.com/account/sync). No host binary, host-side key
 generation, nested container, or incoming network port is required.
 
+For Home Assistant OS, use the [Home Assistant app](home-assistant.md) and its Ingress setup UI.
+Home Assistant Container users can use the Docker setup below.
+
 ## Quick Start
 
 Create a Compose project using [compose.headless.yaml](../compose.headless.yaml), or save this as

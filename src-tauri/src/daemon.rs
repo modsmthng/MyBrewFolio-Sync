@@ -22,6 +22,9 @@ mod data;
 mod notes_wizard;
 #[path = "daemon/runtime.rs"]
 mod runtime;
+#[cfg(feature = "headless-web")]
+#[path = "daemon/web.rs"]
+mod web;
 
 const FIRST_SYNCHRONIZATION_MESSAGE: &str =
     "Your first sync may take a while, depending on your history. You can leave this page and come back later. Keep the Sync app or Docker container running.";
@@ -175,7 +178,8 @@ fn help_text(args: &[String]) -> &'static str {
                notes <subcommand>      Back up, restore, or disable Notes Sync\n\
                resync preview|apply    Review suppressed items; apply needs JSON and --confirm\n\n\
              Service:\n\
-               daemon                  Run the continuous local synchronization service\n\n\
+               daemon                  Run the continuous local synchronization service\n\
+               daemon --home-assistant  Serve the administrator-only HA ingress UI (headless-web build)\n\n\
              Successful data commands write JSON to stdout. Logs and errors use stderr.\n\
              Use --machine <id> for machine-specific commands when several are connected.\n\
              sync-once without --machine synchronizes all connected machines.\n\
@@ -806,6 +810,16 @@ async fn main() -> ExitCode {
     let Some((command, args)) = all_args.split_first() else {
         unreachable!("an empty command was handled as a help request");
     };
+    let home_assistant = command == "daemon" && args == ["--home-assistant"];
+    if command == "daemon" && !args.is_empty() && !home_assistant {
+        eprintln!("Usage: mybrewfolio-syncd daemon [--home-assistant]");
+        return ExitCode::from(2);
+    }
+    #[cfg(not(feature = "headless-web"))]
+    if home_assistant {
+        eprintln!("This binary was built without the headless-web feature");
+        return ExitCode::from(2);
+    }
     let socket = data_dir().join("control.sock");
     if let Some(exit_code) = run_notes_wizard(command, args, &socket).await {
         return exit_code;
@@ -823,6 +837,31 @@ async fn main() -> ExitCode {
             return ExitCode::from(78);
         }
     };
+    #[cfg(feature = "headless-web")]
+    if home_assistant {
+        let (setup, snapshot) = tokio::sync::watch::channel(json!({"state": "starting"}));
+        let listener = match tokio::net::TcpListener::bind("0.0.0.0:8099").await {
+            Ok(listener) => listener,
+            Err(error) => {
+                daemon_error(&format!("Cannot start Home Assistant ingress: {error}"));
+                return ExitCode::from(78);
+            }
+        };
+        let root = env::var_os("MYBREWFOLIO_SYNC_WEB_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/share/mybrewfolio-sync/web"));
+        if !root.join("index.html").is_file() {
+            daemon_error("Home Assistant web assets are missing");
+            return ExitCode::from(78);
+        }
+        tokio::select! {
+            _ = runtime::run_daemon_with_setup(manager.clone(), socket, None, setup) => unreachable!(),
+            result = web::serve(listener, manager, snapshot, root) => {
+                daemon_error(&format!("Home Assistant ingress stopped: {result:?}"));
+                return ExitCode::from(1);
+            }
+        }
+    }
     if command == "daemon" {
         runtime::run_daemon(manager, socket).await;
     }

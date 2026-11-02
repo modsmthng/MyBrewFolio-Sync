@@ -1,0 +1,20 @@
+{
+  "name": "MyBrewFolio Sync",
+  "version": "0.6.7",
+  "slug": "mybrewfolio_sync",
+  "description": "Synchronize GaggiMate brews, profiles and Notes with your private MyBrewFolio library",
+  "url": "https://github.com/modsmthng/MyBrewFolio-Sync",
+  "arch": ["amd64", "aarch64"],
+  "image": "ghcr.io/modsmthng/mybrewfolio-sync-ha",
+  "startup": "application",
+  "boot": "auto",
+  "init": true,
+  "ingress": true,
+  "ingress_port": 8099,
+  "panel_admin": true,
+  "panel_icon": "mdi:coffee",
+  "panel_title": "MyBrewFolio Sync",
+  "backup": "cold",
+  "options": {},
+  "schema": {}
+}

@@ -9,8 +9,184 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: sync-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  versions:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - id: version
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: |
+          VERSION="$(node scripts/ha-release.mjs version "$RELEASE_TAG")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  home-assistant-validation:
+    needs: versions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run build:ha
+      - run: npm run test:ha
+      - run: npm run test:ha-release
+      - run: cargo test --locked --no-default-features --features headless-web
+        working-directory: src-tauri
+
+  home-assistant:
+    needs: [versions, home-assistant-validation]
+    if: github.repository == 'modsmthng/MyBrewFolio-Sync'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    env:
+      IMAGE: ghcr.io/modsmthng/mybrewfolio-sync-ha
+      VERSION: ${{ needs.versions.outputs.version }}
+      ARCH: ${{ matrix.arch }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Verify OAuth configuration
+        env:
+          OAUTH_CLIENT_ID: ${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+        run: test -n "$OAUTH_CLIENT_ID"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reuse previously tested immutable architecture image
+        id: existing
+        if: github.event_name == 'push'
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION-$ARCH-$GITHUB_SHA" >/dev/null 2>&1; then
+            docker pull --platform "$PLATFORM" "$IMAGE:$VERSION-$ARCH-$GITHUB_SHA"
+            docker tag "$IMAGE:$VERSION-$ARCH-$GITHUB_SHA" mybrewfolio-sync-ha:test
+            echo 'reuse=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: docker/build-push-action@v6
+        if: steps.existing.outputs.reuse != 'true'
+        with:
+          context: .
+          target: home-assistant
+          provenance: false
+          load: true
+          platforms: ${{ matrix.platform }}
+          tags: mybrewfolio-sync-ha:test
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.versions.outputs.version }}
+            io.hass.version=${{ needs.versions.outputs.version }}
+            io.hass.arch=${{ matrix.arch == 'arm64' && 'aarch64' || 'amd64' }}
+          build-args: |
+            MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID=${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
+      - name: Test the HA image on its target architecture
+        run: |
+          test "$(docker inspect mybrewfolio-sync-ha:test --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          node tests/verify-ha-container.mjs mybrewfolio-sync-ha:test
+      - name: Publish tested architecture and record evidence
+        if: github.event_name == 'push'
+        run: |
+          REF="$IMAGE:$VERSION-$ARCH-$GITHUB_SHA"
+          if [ '${{ steps.existing.outputs.reuse }}' != true ]; then
+            docker tag mybrewfolio-sync-ha:test "$REF"
+            docker push "$REF"
+          fi
+          DIGEST="$(docker buildx imagetools inspect "$REF" --format '{{.Manifest.Digest}}')"
+          node scripts/ha-release.mjs test-evidence "$PLATFORM" "$GITHUB_SHA" "$DIGEST" "ha-test-$ARCH.json"
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: ha-test-${{ matrix.arch }}
+          path: ha-test-*.json
+          if-no-files-found: error
+
+  home-assistant-manifest:
+    needs: [versions, home-assistant, release]
+    if: github.repository == 'modsmthng/MyBrewFolio-Sync' && github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      IMAGE: ghcr.io/modsmthng/mybrewfolio-sync-ha
+      VERSION: ${{ needs.versions.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ha-test-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish immutable multi-architecture image
+        run: |
+          if docker manifest inspect "$IMAGE:$VERSION" > existing-manifest.json 2> inspect-error.txt; then
+            echo 'Verifying the existing immutable version'
+          elif grep -Eq 'manifest unknown|no such manifest' inspect-error.txt; then
+            AMD64_DIGEST="$(node -p "require('./ha-test-amd64.json').digest")"
+            ARM64_DIGEST="$(node -p "require('./ha-test-arm64.json').digest")"
+            docker buildx imagetools create --tag "$IMAGE:$VERSION" \
+              "$IMAGE@$AMD64_DIGEST" "$IMAGE@$ARM64_DIGEST"
+          else
+            cat inspect-error.txt >&2
+            exit 1
+          fi
+          DIGEST="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')"
+          docker buildx imagetools inspect "$IMAGE:$VERSION" --raw > image-manifest.json
+          node scripts/ha-release.mjs receipt "$VERSION" "$GITHUB_SHA" "$DIGEST" home-assistant-build.json ha-test-amd64.json ha-test-arm64.json
+          node --input-type=module -e 'import {readFileSync} from "node:fs"; import {validateReceipt} from "./scripts/ha-release.mjs"; validateReceipt(JSON.parse(readFileSync("home-assistant-build.json")),process.env.VERSION,process.env.GITHUB_SHA,JSON.parse(readFileSync("image-manifest.json")));'
+      - name: Attach the verified receipt to the release
+        run: |
+          if gh release download "$GITHUB_REF_NAME" --pattern home-assistant-build.json --dir previous-receipt; then
+            cmp previous-receipt/home-assistant-build.json home-assistant-build.json
+          else
+            gh release upload "$GITHUB_REF_NAME" home-assistant-build.json
+          fi
+
   container:
+    needs: versions
     if: github.repository == 'modsmthng/MyBrewFolio-Sync'
     runs-on: ubuntu-22.04
     permissions:
@@ -43,6 +219,7 @@ jobs:
             MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID=${{ vars.MYBREWFOLIO_SYNC_OAUTH_CLIENT_ID }}
 
   release:
+    needs: versions
     if: github.repository == 'modsmthng/MyBrewFolio-Sync'
     permissions:
       contents: write
@@ -118,7 +295,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Updates Rust TLS/WebPKI dependencies and bundled root certificates to current patch releases.'
+          releaseBody: 'Adds a Home Assistant OS app with Ingress setup and the shared SyncEngine. Existing desktop and Docker workflows remain supported; no MyBrewFolio server update is required.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false

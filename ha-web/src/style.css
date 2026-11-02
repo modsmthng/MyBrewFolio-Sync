@@ -1,0 +1,31 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+:root { color-scheme: light dark; font-family: system-ui, -apple-system, sans-serif; color: #263d59; background: #edf2f5; --brand: #e07035; --surface: #fff; --border: #bcc9d5; --muted: #52667c; --error: #922f37; --focus: #326b8e; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.shell { max-width: 760px; padding: 28px 20px; margin: auto; }
+.brand { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; color: var(--muted); }
+.brand img { width: 170px; height: auto; }
+h1 { font-size: clamp(28px, 6vw, 42px); letter-spacing: -.04em; margin-bottom: 12px; }
+h2 { font-size: 21px; margin: 0 0 12px; overflow-wrap: anywhere; }
+p { line-height: 1.6; }
+.intro, .muted, footer { color: var(--muted); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 24px; margin: 20px 0; }
+label { display: grid; gap: 8px; font-weight: 650; margin: 16px 0 10px; }
+input, select, button, .button { font: inherit; font-size: 16px; }
+input, select { width: 100%; min-height: 46px; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface); color: inherit; }
+button, .button { display: inline-block; min-height: 44px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); color: inherit; padding: 10px 16px; font-weight: 650; cursor: pointer; text-decoration: none; }
+.primary { background: var(--brand); color: #1c1511; border-color: var(--brand); }
+button:disabled { opacity: .55; cursor: default; }
+a { color: var(--focus); text-underline-offset: 3px; }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.error { color: var(--error); border-left: 3px solid currentColor; padding-left: 12px; overflow-wrap: anywhere; }
+.actions, .machine-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+.badge { border: 1px solid var(--border); border-radius: 12px; padding: 6px 10px; font-size: 14px; }
+.text-button { border: 0; text-decoration: underline; }
+.confirmation { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 16px; }
+footer { font-size: 14px; padding: 8px 0 24px; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #e3eaf1; background: #17202a; --brand: #eb8042; --surface: #222e3a; --border: #53677a; --muted: #b2c1d0; --error: #ffadb3; --focus: #a9d6f0; }
+  .brand img { filter: brightness(0) invert(1); }
+}
+@media (max-width: 480px) { .shell { padding: 20px 12px; } .card { padding: 18px; } }

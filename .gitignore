@@ -8,3 +8,4 @@ src-tauri/gen/
 !.env.example
 *.log
 .DS_Store
+dist-ha/
