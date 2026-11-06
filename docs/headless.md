@@ -1,17 +1,12 @@
 # MyBrewFolio Sync in Docker
 
-The container runs the same synchronization engine as the desktop app. It creates its own
-credentials key, connects through a browser link, and keeps state in `/data`. Manage Sync in
-[Account → MyBrewFolio Sync](https://mybrewfolio.com/account/sync). No host binary, host-side key
-generation, nested container, or incoming network port is required.
+Run Sync on a Linux host or NAS to synchronize your local GaggiMate machines with MyBrewFolio. The container connects through your browser and stores its connection and queue in `/data`. No incoming port is required.
 
-For Home Assistant OS, use the [Home Assistant app](home-assistant.md) and its Ingress setup UI.
-Home Assistant Container users can use the Docker setup below.
+For Home Assistant OS, use the [Home Assistant app](../home-assistant/mybrewfolio_sync/DOCS.md). Home Assistant Container users can use Docker.
 
-## Quick Start
+## Quick start
 
-Create a Compose project using [compose.headless.yaml](../compose.headless.yaml), or save this as
-`compose.yaml`:
+Create a Compose project with [compose.headless.yaml](../compose.headless.yaml), or save this as `compose.yaml`:
 
 ```yaml
 services:
@@ -27,201 +22,92 @@ volumes:
   sync-data:
 ```
 
-1. Use your machine's fixed private LAN IP instead of `gaggimate.local` if Docker cannot resolve it.
-2. Start the project: `docker compose up -d`.
-3. Open its logs: `docker compose logs -f sync`. Follow the MyBrewFolio connection link and sign in.
-4. If this account has no machines yet, Sync creates its first machine using the configured LAN
-   address. Open **Account → MyBrewFolio Sync**, choose its matching preference and select
-   **Save and start first sync**. If the account already has machines, first connect the intended
-   machine with `mybrewfolio-syncd machines list` and `machines add --existing MACHINE_ID HOST`,
-   or create another with `machines add NAME HOST`.
+1. If Docker cannot resolve `gaggimate.local`, replace it with the machine's fixed private LAN IP.
+2. Run `docker compose up -d`, then open the logs with `docker compose logs -f sync`.
+3. Follow the connection link in the logs and sign in to MyBrewFolio. The link renews automatically if unused.
+4. If your account has no machines, Sync creates the first one using the configured address. If it already has machines, [choose or add a machine](#multiple-machines) explicitly.
+5. Open [Account → MyBrewFolio Sync](https://mybrewfolio.com/account/sync), choose the machine's import preference and select **Save and start first sync**.
 
-The daemon polls for approval automatically. An unused link expires after ten minutes and is
-renewed while the container remains unconnected. Closing the log window does not stop pairing or
-Sync. The persistent volume retains the key, account connection and queue across container updates.
+Keep the container and its `/data` volume. Closing the logs does not stop Sync. Account connection alone does not start the first import; you must save the import preference.
 
-### Understanding the setup messages
+## Unraid
 
-Before account approval, the logs show only the pairing link and wait for you to open it.
-After approval, Sync registers this installation and restores its known machine connections.
-Registration failures are logged and retried automatically.
-
-If the logs say **Account connected; machine selection required**, sign-in succeeded but no
-machine is connected to this installation yet. Run the commands printed in the logs inside
-the container. From the host, use the following, replacing `SERVICE` with your Compose service
-name (`sync` in the example above, or your own name such as `gaggimatesync`):
-
-```sh
-docker compose exec SERVICE mybrewfolio-syncd machines list
-docker compose exec SERVICE mybrewfolio-syncd machines add --existing MACHINE_ID HOST
-```
-
-Replace `MACHINE_ID` with the intended machine's ID from the list and `HOST` with that machine's
-local GaggiMate address. To create a different machine instead, run
-`mybrewfolio-syncd machines add NAME HOST` inside the container; quote names containing spaces.
-The machine choice is explicit even when the account has only one existing machine.
-
-Once a machine is connected, the logs show the MyBrewFolio Account link. Open it to finish
-first-sync setup or manage an existing connection. Account approval and machine connection do
-not start the first import until its import preference has been saved in MyBrewFolio.
-Each setup message appears at startup and when its state changes, including after a CLI machine
-connection. `status` can report `connected: true` and `machines: []` while machine selection is
-still required: `connected` describes the account connection.
-
-### More than one machine
-
-`MYBREWFOLIO_SYNC_GAGGIMATE_HOST` remains the address of the first, upgraded machine. On a new
-installation, it is used automatically only when the account has no machines yet. Addresses
-for other machines are stored locally in `/data`; they are never sent to MyBrewFolio. Keep
-the container connected, then use the CLI inside it:
-
-```sh
-docker compose exec sync mybrewfolio-syncd machines list
-docker compose exec sync mybrewfolio-syncd machines add "Office GaggiMate" 192.168.1.43
-docker compose exec sync mybrewfolio-syncd machines add --existing MACHINE_ID 192.168.1.44
-docker compose exec sync mybrewfolio-syncd machines rename MACHINE_ID "Kitchen GaggiMate"
-docker compose exec sync mybrewfolio-syncd machines remove MACHINE_ID
-```
-
-`machines list` shows the account machines and their IDs, including machines already connected
-from another computer. Use `add --existing` with one of those IDs to connect that same machine
-to this installation. A new machine name must contain 1–24 characters and be unique in the
-account without regard to case. `remove` stops this installation's Sync for that machine and
-detaches it from the server; its MyBrewFolio history, name, profiles, Notes and backups remain.
-An offline detach is saved and retried when the service reconnects. Use `add --existing` to
-reconnect it later.
-
-The daemon synchronizes all connected machines and runs at most two complete Sync cycles at the
-same time. A machine that is offline does not stop another machine's Sync. `sync-once` without a
-machine selection also runs all connected machines. For machine-specific commands, append
-`--machine MACHINE_ID`:
-
-```sh
-docker compose exec sync mybrewfolio-syncd status
-docker compose exec sync mybrewfolio-syncd sync-once --machine MACHINE_ID
-docker compose exec sync mybrewfolio-syncd diagnose --machine MACHINE_ID
-docker compose exec sync mybrewfolio-syncd host set 192.168.1.45 --machine MACHINE_ID
-docker compose exec sync mybrewfolio-syncd resync preview --machine MACHINE_ID
-```
-
-`status` shows an array of connected machines. Other machine-specific commands require
-`--machine` when several machines are connected; with exactly one machine, existing commands
-without a selection continue to work. The `machines` subcommands take their machine ID as an
-argument and do not use `--machine`. In MyBrewFolio, select a machine on the Sync account page
-to manage its matching, Notes, backups, conflicts and resync settings. Account sign-in and
-`disconnect` apply to the entire installation.
-
-### Unraid
-
-From an Unraid terminal, install the supplied [Unraid user template](../unraid/mybrewfolio-sync.xml) using the following command:
+Install the supplied [Unraid template](../unraid/mybrewfolio-sync.xml) from an Unraid terminal:
 
 ```sh
 wget -P /boot/config/plugins/dockerMan/templates-user https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/refs/heads/main/unraid/mybrewfolio-sync.xml
 ```
 
-From the Docker tab of Unraid, choose ***Add Container*** and select the ***MyBrewFolio-Sync*** template from the ***Templates*** drop-down. Enter your GaggiMate's LAN IP in the appropriate field and click ***Apply***.
+In the Docker tab, choose **Add Container**, select **MyBrewFolio-Sync** from **Templates**, enter the GaggiMate LAN IP and select **Apply**. Open the container logs and follow the connection link, then finish setup in MyBrewFolio. Enable container autostart if desired.
 
-Or, without using the supplied user template, choose **Add Container**
-and enter the following settings. The template is provided in this repository; a Community Apps
-listing is not required.
+Alternatively configure the image `ghcr.io/modsmthng/mybrewfolio-sync:latest` on a bridge network with no ports, a dedicated writable appdata folder mounted at `/data`, `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` set to the LAN IP, and `--user=99:100`. The template supplies this user override; ensure the appdata folder is writable by UID 99 / GID 100.
 
-| Setting | Value |
-|---|---|
-| Repository | `ghcr.io/modsmthng/mybrewfolio-sync:latest` |
-| Network | Bridge |
-| Port mappings | None |
-| Appdata path | `/mnt/user/appdata/mybrewfolio-sync` → `/data`, read/write |
-| Environment variable | `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` = your GaggiMate's LAN IP |
-| Extra parameters | `--user=99:100` |
+## Synology and other Docker hosts
 
-Use a dedicated appdata directory writable by UID 99 / GID 100. The template includes this user
-override; the image otherwise uses UID/GID 10001. Start the container, open **Logs**, follow the
-connection link, then use **WebUI** to manage Sync in MyBrewFolio. Enable Unraid's container autostart
-if it should run after a reboot. No privileged mode or Docker socket mount is needed.
+In Synology Container Manager, create a **Project** with the Compose configuration above. Start it, open the container's **Log** view and follow the connection link. Other container editors need the same image, host variable, restart policy and persistent `/data` mount.
 
-### Synology and other Docker hosts
+A named volume works with the image's default UID/GID `10001:10001`. For a bind-mounted folder, grant the container user access to the dedicated folder and its existing files. If needed, set `user: "UID:GID"` in Compose. A `/data` permission error can also indicate a read-only mount or insufficient disk space; do not make private data world-writable. Sync does not change existing ownership or permissions.
 
-In Synology Container Manager, create a **Project** and paste the Compose configuration above.
-Start it and open the Sync container's **Log** view to connect your account. On hosts using a
-container editor, use the same image, host variable, restart policy and persistent `/data` mount.
+## Multiple machines
 
-A named volume works with the image's default non-root user. For a bind-mounted shared folder,
-grant the chosen UID/GID write access to that dedicated folder through the host's permission
-settings and set Compose `user: "UID:GID"` when needed. No `PUID`/`PGID` variables or automatic
-recursive permission changes are used. A permission error means `/data` is not writable by that
-container user; do not solve it by making the private data directory world-writable.
+If logs say **Account connected; machine selection required**, sign-in succeeded but you must select a machine. For Compose, list account machines and attach one using its ID and local address:
 
-For example, to keep data in a dedicated folder beside your Compose file:
-
-```yaml
-services:
-  sync:
-    image: ghcr.io/modsmthng/mybrewfolio-sync:latest
-    restart: unless-stopped
-    user: "10001:10001"
-    environment:
-      MYBREWFOLIO_SYNC_GAGGIMATE_HOST: gaggimate.local
-    volumes:
-      - ./sync-data:/data
+```sh
+docker compose exec sync mybrewfolio-syncd machines list
+docker compose exec sync mybrewfolio-syncd machines add --existing MACHINE_ID HOST
 ```
 
-Create `sync-data` on the host and grant UID/GID `10001:10001` access to read, write and enter
-that folder. If your NAS uses another dedicated owner, set `user:` to its numeric UID/GID and
-grant that owner access instead. Existing database and key files must also be accessible.
-On startup, Sync tests the data directory before opening SQLite. A failure reports the container
-path, operating-system error and effective UID/GID on Unix; check host permissions, a read-only
-mount or available disk space as indicated. Sync never changes existing ownership or permissions.
+To create a new account machine instead, use `docker compose exec sync mybrewfolio-syncd machines add "Machine name" HOST`. Repeat for additional machines. Names must be 1–24 characters and unique in the account, ignoring case. The configured host is used automatically on a new installation only if the account has no machines.
 
-Changing from a named volume to an empty host folder starts a new local installation. It does
-not copy the previous account connection, machine assignments, queue or key. To retain them,
-stop the container and copy the complete old data directory, including `state.key`, to the new
-folder while preserving private file permissions and granting the chosen container user access.
-Keep the original external key mount if you use one. If you intentionally start with an empty
-folder, pair again and explicitly select the existing account machine when prompted.
+Manage connections with `machines rename MACHINE_ID "New name"` or `machines remove MACHINE_ID` using the same `docker compose exec sync mybrewfolio-syncd` prefix. Removing a connection leaves its MyBrewFolio history and machine content intact; use `add --existing` to reconnect it. Account disconnect affects every machine on this installation.
 
-## Two-way Notes Sync
+When several machines are connected, machine-specific commands need `--machine MACHINE_ID`, for example:
 
-Open **Account → MyBrewFolio Sync**, select the machine, open **Notes Sync**, choose the
-installation connected to it, and select **Set up two-way Notes Sync**. Sync creates the complete
-**First Backup**. When the action finishes, select **Review Notes activation**, compare both copies
-and confirm your choices.
-MyBrewFolio Notes are preselected. Choosing an empty Note clears the other copy.
+```sh
+docker compose exec sync mybrewfolio-syncd host set 192.168.1.45 --machine MACHINE_ID
+docker compose exec sync mybrewfolio-syncd diagnose --machine MACHINE_ID
+```
 
-Only one installation writes Notes for each machine. Another active writer is never taken over
-automatically. You can turn the feature off in MyBrewFolio; ordinary GaggiMate-to-MyBrewFolio imports
-continue. Later conflicts are reviewed in the affected Brew.
+With one machine, the selection can be omitted. `machines` commands take an ID directly. Change the first machine's address in the container environment and recreate the container; if the variable is omitted, `host set` can save it locally. Additional addresses are stored in `/data`.
 
-Create **Latest Backup**, download either backup, and preview a restore on the same Notes page.
-A restore requires a fresh preview, selected Brews and explicit confirmation. It makes a new
-Latest Backup before replacing machine Notes and skips Notes changed since the preview.
+## Everyday use and troubleshooting
 
-## Everyday Commands
+Use MyBrewFolio to synchronize now, review conflicts, retry items, change matching and preview a complete resync. Keep the container running and connected for these actions. Interrupted actions are not replayed automatically; check the machine state and review a new preview.
 
-Everyday actions are available in MyBrewFolio: **Synchronize now**, **Retry failed items**, **Check
-status**, matching preferences and **Preview complete resync**. Keep the container running and
-connected for machine actions. Waiting actions expire after ten minutes. Interrupted actions are
-never replayed automatically; check the machine state, dismiss the action and review a new preview.
-
-For local troubleshooting, the CLI is already inside the image:
+For local troubleshooting:
 
 ```sh
 docker compose exec sync mybrewfolio-syncd status
 docker compose exec sync mybrewfolio-syncd diagnose
 docker compose exec sync mybrewfolio-syncd help
-docker compose exec sync mybrewfolio-syncd auth begin
-docker compose exec sync mybrewfolio-syncd disconnect
 ```
 
-Use `docker exec CONTAINER_NAME mybrewfolio-syncd ...` for a container managed through a NAS UI.
-`diagnose` is read-only; its local output includes the machine address and troubleshooting guidance.
-The web status check returns only availability and counts. After an intentional local disconnect or
-server revocation, automatic pairing stays off until you explicitly run `auth begin` again.
+On a NAS without Compose, use `docker exec CONTAINER_NAME mybrewfolio-syncd ...`. Local `diagnose` output includes the machine address. If a machine cannot be reached, check its private IP, network routing and internet access; Sync retries and resumes on its configured schedule. `connected: true` in status means the account is connected, even if the machine list is empty.
 
-### Optional terminal helper
+After an intentional disconnect or server revocation, restart pairing explicitly with `docker compose exec sync mybrewfolio-syncd auth begin`. The `disconnect` command disconnects the account locally.
 
-On conventional Linux hosts, the optional installer asks for the machine address, creates Compose
-configuration and a local shortcut, starts Docker, and shows how to read the automatic connection
-link:
+## Notes and recovery
+
+In **Account → MyBrewFolio Sync**, select a machine and open **Notes Sync** to enable optional two-way Notes. Sync creates a **First Backup** before you review and confirm the differences. MyBrewFolio Notes are preselected; choosing an empty Note clears the other copy. Only one installation can write Notes for a machine.
+
+You can create and download a **Latest Backup** or preview a restore on the same page. A restore requires a fresh preview, selected Brews and confirmation; it creates a new Latest Backup before writing. Turning Notes Sync off leaves ordinary imports running. Review later Notes conflicts in the affected Brew.
+
+## Updates and backups
+
+Update through your NAS's image update/recreate action, or with Compose:
+
+```sh
+docker compose pull
+docker compose up -d
+```
+
+Preserve the existing project and `/data` volume; do not remove volumes during an update. Back up the **entire data directory including `state.key`**, protect it like account credentials, and restore it together. The key is stored alongside the encrypted credentials by default, so anyone who can read the complete volume can access them.
+
+If you use `MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE`, keep its original setting and external key mount during updates and recovery. Moving to an empty volume or host folder creates a new local installation; to retain the existing one, stop Sync and copy all data and its key with private permissions. If you intentionally start empty, pair again and select the existing account machine.
+
+## Optional terminal helper
+
+On a conventional Linux host, the installer can create Compose configuration and a local `sync` shortcut:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scripts/install-headless.sh | sh
@@ -229,95 +115,10 @@ curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scr
 ~/.config/mybrewfolio-sync/sync diagnose
 ```
 
-The shortcut delegates to the CLI inside the container. It is optional. Existing automation and the
-interactive `sync notes enable` assistant remain supported. The assistant backs up before offering
-bulk or custom decisions, defaults to MyBrewFolio Notes, and requires final confirmation. Run
-`sync notes help` through your installed shortcut for the complete advanced command reference.
-
-To update only an existing helper, preserving Compose, credentials, keys, volumes and the running
-service:
+The installer shows how to open the connection link. Use `sync notes help` for advanced Notes commands. To update only the helper without changing the running service or its data:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scripts/install-headless.sh \
-  | sh -s -- --update-helper
+curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scripts/install-headless.sh | sh -s -- --update-helper
 ```
 
-## Configuration and Recovery
-
-Matching preferences and complete resync are managed in MyBrewFolio. A resync preview lists deleted
-imports and unambiguous duplicate copies. Review the selected restores, merges and any differing
-Notes before confirming; ambiguous matches remain unchanged. Advanced CLI commands such as
-`resync preview` and `resync apply FILE --confirm` remain available for existing automation.
-
-Change the first machine's address in the container environment, then recreate the container.
-Keep `MYBREWFOLIO_SYNC_GAGGIMATE_HOST` local; it is never sent to MyBrewFolio. If the environment
-variable is omitted, the local `host set` command can persist the address in the data directory.
-For additional machines, use `host set <address> --machine MACHINE_ID`; their addresses stay in
-the local data directory.
-
-### Reading connection errors
-
-After a whole-cycle failure, Sync immediately tries once more, then makes two additional attempts
-30 seconds apart. If all four attempts fail, that machine resumes at the account-wide interval
-selected in MyBrewFolio. Another machine continues on its own timer. The final failure is written
-with a UTC timestamp and machine ID. For example:
-
-```text
-2026-09-18T14:30:00Z Machine MACHINE_ID: Sync attempt failed after its automatic retries: GaggiMate could not be reached. Sync will resume on the selected interval.
-```
-
-Errors that mention a Shot, Notes, or Profile include the local GaggiMate ID so you can identify the
-affected record. They never include Notes contents or credentials. Run `mybrewfolio-syncd diagnose`
-inside the container for the most recent error code, timestamp, and recovery guidance.
-
-### Updating Docker
-
-Use your NAS's image update/recreate action while preserving the `/data` mount. For Compose:
-
-```sh
-docker compose pull
-docker compose up -d
-```
-
-For installations created by the optional installer, use its existing project file:
-
-```sh
-docker compose --project-directory ~/.config/mybrewfolio-sync -f ~/.config/mybrewfolio-sync/compose.yaml pull
-docker compose --project-directory ~/.config/mybrewfolio-sync -f ~/.config/mybrewfolio-sync/compose.yaml up -d
-```
-
-Keep the existing project name and volume. Do not remove volumes during an update. Docker updates
-are managed by the host; the daemon has no desktop updater. Older installations without web-control
-support continue syncing and display an update notice in MyBrewFolio.
-
-**Existing external keys:** configurations using `MYBREWFOLIO_SYNC_CREDENTIAL_KEY_FILE` continue to work.
-Retain that setting and its original secret mount when updating. The daemon uses the supplied key;
-it does not rotate or replace it. No migration or re-pairing is needed for these installations.
-
-## Security, Networking, and Manual Automation
-
-On first startup the daemon generates a random 32-byte `/data/state.key` with owner-only file
-permissions. It encrypts the local OAuth credentials with that key and reuses it on every start.
-The key is never logged or sent to MyBrewFolio. If encrypted credentials exist but the key is missing,
-startup fails with a recovery instruction instead of silently replacing the key.
-
-Back up the whole data directory, including its key, and protect the backup like an account
-credential. Encryption with a key in the same volume does not protect against someone who can read
-the entire volume. An external, read-only secret mount remains available for separate key storage.
-
-The image runs as a non-root user. CLI commands use a local Unix socket to reach the running engine.
-The daemon only makes outgoing authenticated HTTPS requests and local machine connections; no
-public port, reverse proxy or public hostname for Sync is needed. Use `gaggimate.local` or a private
-LAN IP. Arbitrary DNS hostnames and public machine addresses are rejected. Docker bridge networks
-may not resolve mDNS; a fixed LAN IP is usually easiest.
-
-For unattended installer configuration:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/modsmthng/MyBrewFolio-Sync/main/scripts/install-headless.sh \
-  | sh -s -- --host 192.168.1.42 --non-interactive
-```
-
-The daemon still publishes its pairing link in logs; authorization requires a person to sign in.
-`--no-start` only writes configuration and the optional helper. Set `MYBREWFOLIO_SYNC_HOME` on the
-installer's `sh` command to choose another directory.
+For unattended configuration, pass `--host 192.168.1.42 --non-interactive` after `sh -s --`; account authorization still requires a person. `--no-start` only writes configuration and the helper. Set `MYBREWFOLIO_SYNC_HOME` to choose another directory. To update an installer-created service with Compose, use its existing project and file: `docker compose --project-directory ~/.config/mybrewfolio-sync -f ~/.config/mybrewfolio-sync/compose.yaml pull`, followed by the same command ending in `up -d`.
