@@ -2,7 +2,7 @@
 
 MyBrewFolio Sync connects one or more local GaggiMate machines to your private MyBrewFolio library. It runs on your desktop, in Docker, or as a Home Assistant app.
 
-[MyBrewFolio](https://mybrewfolio.com/info) helps you track and share brews, organize beans and grinders, discover profiles, and explore your espresso with analysis and statistics. It supports GaggiMate today, with more machine integrations planned.
+[MyBrewFolio](https://mybrewfolio.com/info) helps you track and share brews, organize beans and grinders, discover profiles, and explore your espresso with analysis and statistics.
 
 ## Get started
 
