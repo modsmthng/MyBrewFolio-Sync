@@ -1,14 +1,14 @@
 {
-  "version": "0.6.7",
-  "sha": "870d995224ee827b0e3cd7047ebe3eea4951144b",
-  "image": "ghcr.io/modsmthng/mybrewfolio-sync-ha:0.6.7",
-  "digest": "sha256:fa9eaf23a6a8c3c463dffa7259f3745237c816842ed25863444312f85e887354",
+  "version": "0.6.8",
+  "sha": "88c915c00f91803cd2c5fc18391b1493a1f6fb9a",
+  "image": "ghcr.io/modsmthng/mybrewfolio-sync-ha:0.6.8",
+  "digest": "sha256:9d3fe8402a4d34bef8d8363c6ee79a4be46f98ed7a24d0052567a157c4131ca9",
   "testedPlatforms": [
     "linux/amd64",
     "linux/arm64"
   ],
   "platformDigests": {
-    "linux/amd64": "sha256:e115a78a358ecf9e120b98ba2a43e92998a2a4a4542fdb8e463ba29f02b3178d",
-    "linux/arm64": "sha256:9ee91338a0b0a533dff1665fb178aa7d94f392ee27736d131539df9d81eaf6c3"
+    "linux/amd64": "sha256:26df489e3df538d8011a9d93f633e910dfc12b2b4a78dc8e08d3fdbbc69cde84",
+    "linux/arm64": "sha256:0eb0f3a742376521226a7d01e005ac43027bae4b4ff775321de0f1c265204cf4"
   }
 }
