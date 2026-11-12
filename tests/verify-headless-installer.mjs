@@ -126,15 +126,17 @@ printf '%s\\n' 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
   assert.doesNotMatch(installer, /Connect your account once with/);
 
   const docs = await readFile(join(repository, 'docs', 'headless.md'), 'utf8');
-  assert.ok(docs.indexOf('## Quick Start') < docs.indexOf('## Two-way Notes Sync'));
-  assert.ok(docs.indexOf('## Two-way Notes Sync') < docs.indexOf('## Everyday Commands'));
-  assert.match(docs, /sync notes enable/);
+  const quickStart = docs.indexOf('## Quick start');
+  const helperSection = docs.indexOf('## Optional terminal helper');
+  assert.ok(quickStart >= 0 && helperSection > quickStart, 'document the main Docker setup before the optional helper');
+  assert.match(docs, /docker compose up -d/);
+  assert.match(docs, /docker compose logs -f sync/);
+  assert.match(docs, /sync notes help/);
   assert.match(docs, /--update-helper/);
-  assert.ok(docs.indexOf('## Quick Start') < docs.indexOf('## Everyday Commands'));
-  assert.ok(docs.indexOf('## Everyday Commands') < docs.indexOf('## Configuration and Recovery'));
-  assert.ok(docs.indexOf('## Configuration and Recovery') < docs.indexOf('## Security, Networking, and Manual Automation'));
   assert.match(docs, /sync diagnose/);
-  assert.match(docs, /resync preview/);
+  assert.match(docs, /preview a complete resync/i);
+  assert.match(docs, /First Backup/);
+  assert.match(docs, /state\.key/);
 
   console.log('Headless installer, helper, and documentation verified');
 } finally {
