@@ -869,3 +869,15 @@ pub(super) fn connect_test_engine(engine: &SyncEngine) {
 }
 
 mod integration;
+
+#[test]
+fn profile_install_selection_does_not_force_favorite() {
+    let payload = json!({
+        "profile": { "id": "profile-1" },
+        "favorite": false,
+        "selected": true
+    });
+    let request = super::profile_install_request(&payload).unwrap();
+    assert!(request.selected);
+    assert!(!request.favorite);
+}

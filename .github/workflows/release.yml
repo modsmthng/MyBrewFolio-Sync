@@ -295,7 +295,7 @@ jobs:
           tauriScript: npm run tauri
           tagName: ${{ github.ref_name }}
           releaseName: 'MyBrewFolio Sync __VERSION__'
-          releaseBody: 'Adds a Home Assistant OS app with Ingress setup and the shared SyncEngine. Existing desktop and Docker workflows remain supported; no MyBrewFolio server update is required.'
+          releaseBody: 'Profile selection and favorites can be applied independently. Installation reports when the GaggiMate favorite limit is reached.'
           releaseDraft: true
           prerelease: false
           generateReleaseNotes: false

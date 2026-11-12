@@ -295,6 +295,7 @@ pub(super) fn profile_store_local_error(error: LocalError) -> (&'static str, Str
         LocalError::InvalidHost => "GAGGIMATE_HOST_INVALID",
         LocalError::UnsupportedShotFormat(_) => "GAGGIMATE_SHOT_FORMAT_UNSUPPORTED",
         LocalError::InvalidData
+        | LocalError::FavoriteLimitReached
         | LocalError::InvalidHistoryIndex
         | LocalError::InvalidShot(_)
         | LocalError::InvalidNotes(_)
@@ -324,8 +325,7 @@ pub(super) fn profile_install_request(
         favorite: payload
             .get("favorite")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-            || selected,
+            .unwrap_or(false),
         selected,
         expected_collision: payload
             .get("expectedCollision")
@@ -427,13 +427,16 @@ pub(super) async fn apply_profile_actions(
     profile_id: &str,
     favorite: bool,
     selected: bool,
-) -> (Vec<&'static str>, bool, bool) {
+) -> (Vec<&'static str>, bool, bool, bool) {
     let mut action_failures = Vec::new();
-    let favorite_applied = if favorite {
-        local.favorite_profile(profile_id).await.is_ok()
+    let favorite_result = if favorite {
+        Some(local.favorite_profile(profile_id).await)
     } else {
-        false
+        None
     };
+    let favorite_limit_reached =
+        matches!(favorite_result, Some(Err(LocalError::FavoriteLimitReached)));
+    let favorite_applied = matches!(favorite_result, Some(Ok(())));
     if favorite && !favorite_applied {
         action_failures.push("favorite");
     }
@@ -445,7 +448,12 @@ pub(super) async fn apply_profile_actions(
     if selected && !selected_applied {
         action_failures.push("select");
     }
-    (action_failures, favorite_applied, selected_applied)
+    (
+        action_failures,
+        favorite_applied,
+        selected_applied,
+        favorite_limit_reached,
+    )
 }
 
 pub(super) async fn profile_inventory_operation(
@@ -518,19 +526,21 @@ pub(super) async fn profile_install_operation(
         profile_collision(local, &inventory, request.profile_id, request.profile).await?;
     let already_installed = validate_profile_install(&request, collision)?;
     let installed_profile_id = save_profile_if_needed(local, &request, already_installed).await?;
-    let (action_failures, favorite_applied, selected_applied) = apply_profile_actions(
-        local,
-        &installed_profile_id,
-        request.favorite,
-        request.selected,
-    )
-    .await;
+    let (action_failures, favorite_applied, selected_applied, favorite_limit_reached) =
+        apply_profile_actions(
+            local,
+            &installed_profile_id,
+            request.favorite,
+            request.selected,
+        )
+        .await;
     let final_inventory = local.profile_inventory().await.unwrap_or(inventory);
     Ok(json!({
         "installed": true,
         "alreadyInstalled": already_installed,
         "profileId": installed_profile_id,
         "favoriteApplied": favorite_applied,
+        "favoriteLimitReached": favorite_limit_reached,
         "selectedApplied": selected_applied,
         "favoriteCount": profile_favorite_count(&final_inventory),
         "actionFailures": action_failures,
@@ -569,6 +579,7 @@ impl EngineError {
             Self::Local(LocalError::Unreachable) => "GAGGIMATE_UNREACHABLE",
             Self::Local(
                 LocalError::InvalidData
+                | LocalError::FavoriteLimitReached
                 | LocalError::InvalidHistoryIndex
                 | LocalError::InvalidShot(_)
                 | LocalError::InvalidNotes(_)

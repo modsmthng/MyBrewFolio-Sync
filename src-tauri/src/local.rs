@@ -27,6 +27,8 @@ pub enum LocalError {
     Unreachable,
     #[error("The GaggiMate returned invalid data")]
     InvalidData,
+    #[error("The GaggiMate favorite limit was reached")]
+    FavoriteLimitReached,
     #[error("The GaggiMate returned invalid data while reading the history index")]
     InvalidHistoryIndex,
     #[error("The GaggiMate returned invalid data while reading shot {0}")]
@@ -711,11 +713,19 @@ impl GaggiMateClient {
     }
 
     pub async fn favorite_profile(&self, id: &str) -> Result<(), LocalError> {
-        self.websocket_request("req:profiles:favorite", json!({ "id": id }))
+        let response = self
+            .websocket_request_allowing_error("req:profiles:favorite", json!({ "id": id }))
             .await
             .map_err(|error| {
                 error.with_context(LocalError::InvalidProfileUpdate(id.to_string()))
             })?;
+        if let Some(error) = response.get("error") {
+            return Err(if error.as_str() == Some("Favorite limit reached") {
+                LocalError::FavoriteLimitReached
+            } else {
+                LocalError::InvalidProfileUpdate(id.to_string())
+            });
+        }
         Ok(())
     }
 

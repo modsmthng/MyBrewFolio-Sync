@@ -117,7 +117,7 @@ impl SyncEngine {
                 .get("selected")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            let (action_failures, favorite_applied, selected_applied) =
+            let (action_failures, favorite_applied, selected_applied, favorite_limit_reached) =
                 apply_profile_actions(local, profile_id, favorite, selected).await;
             let favorite_count =
                 profile_favorite_count(&local.profile_inventory().await.unwrap_or_default());
@@ -129,6 +129,7 @@ impl SyncEngine {
                     "alreadyInstalled": false,
                     "profileId": profile_id,
                     "favoriteApplied": favorite_applied,
+                    "favoriteLimitReached": favorite_limit_reached,
                     "selectedApplied": selected_applied,
                     "favoriteCount": favorite_count,
                     "actionFailures": action_failures,

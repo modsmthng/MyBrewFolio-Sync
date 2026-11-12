@@ -23,6 +23,8 @@ struct Machine {
     upload_status: u16,
     fail_next_load: bool,
     actions: usize,
+    favorite_limit_reached: bool,
+    selections: usize,
 }
 
 async fn machine_request(mut stream: TcpStream, state: Arc<Mutex<Machine>>) {
@@ -64,7 +66,16 @@ async fn machine_request(mut stream: TcpStream, state: Arc<Mutex<Machine>>) {
                     machine.profile = Some(saved.clone());
                     response["profile"] = saved;
                 }
-                "req:profiles:favorite" | "req:profiles:select" => machine.actions += 1,
+                "req:profiles:favorite" => {
+                    machine.actions += 1;
+                    if machine.favorite_limit_reached {
+                        response["error"] = json!("Favorite limit reached");
+                    }
+                }
+                "req:profiles:select" => {
+                    machine.actions += 1;
+                    machine.selections += 1;
+                }
                 other => panic!("Unexpected request {other}"),
             }
         }
@@ -298,4 +309,20 @@ async fn resumed_confirmation_uploads_the_frozen_image_without_saving_the_profil
     );
     assert_eq!(state.lock().unwrap().saves, 1);
     assert_eq!(state.lock().unwrap().uploads.len(), 1);
+}
+
+#[tokio::test]
+async fn selects_profile_when_favorites_are_full() {
+    let (local, state) = machine(None, 200, false).await;
+    state.lock().unwrap().favorite_limit_reached = true;
+    let mut request = payload();
+    request["favorite"] = json!(true);
+    request["selected"] = json!(true);
+    let result = profile_install_operation(&local, &request).await.unwrap();
+    assert_eq!(result["installed"], true);
+    assert_eq!(result["selectedApplied"], true);
+    assert_eq!(result["favoriteApplied"], false);
+    assert_eq!(result["favoriteLimitReached"], true);
+    assert_eq!(result["actionFailures"], json!(["favorite"]));
+    assert_eq!(state.lock().unwrap().selections, 1);
 }

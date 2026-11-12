@@ -163,7 +163,7 @@ jobs:
               --target $env:GITHUB_SHA `
               --draft `
               --title $storeTitle `
-              --notes 'Private Microsoft Store submission package. Supports GaggiMate shot formats v1-v8, both v6 layouts, active hardware scales and new process flags. Never publish this draft release.'
+              --notes 'Private Microsoft Store submission package. Includes independent profile selection and favorite actions. Never publish this draft release.'
             if ($LASTEXITCODE -ne 0) {
               throw 'Failed to create the private Microsoft Store draft release'
             }

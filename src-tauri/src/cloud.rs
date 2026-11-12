@@ -94,7 +94,7 @@ async fn log_http_failure(context: &str, response: Response) {
 fn companion_capabilities() -> Value {
     json!({
         "machineMaintenance": 1,
-        "profileStoreBridge": 2,
+        "profileStoreBridge": 3,
         "profileStoreImages": 1,
         "canonicalNotesHash": 1,
         "twoWayNotesProtocol": 2,
